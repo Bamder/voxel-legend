@@ -18,7 +18,19 @@ enum class AppScreen {
     WorldDetail,
     CreateWorld,
     RoomLobby,
-    PlayerProfile
+    PlayerProfile,
+    JoinRoom,
+    RoomLoading
+};
+
+struct RemoteAvatar {
+    uint32_t id = 0;
+    std::string name;
+    Vec3 pos{ 0, 0, 0 };
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    bool spectator = false;
+    bool moving = false;
 };
 
 struct RoomTeamView {
@@ -31,6 +43,8 @@ struct RoomPlayerView {
     std::string name;
     int team = -1;
     bool local = false;
+    bool host = false;
+    uint32_t id = 0;
 };
 
 struct UIState {
@@ -74,7 +88,8 @@ struct UIState {
     bool settingsOpen = false;
     float mouseSens = 0.0022f;
     bool invertY = false;
-    int menuHover = -1;       // 0 resume, 1 settings, 2 quit
+    int menuHover = -1;       // free play: 0 resume, 1 settings, 2 debug, 3 leave
+                              // room match: 0 resume, 1 settings, 2 leave (debug hidden)
     int settingsHover = -1;   // 0 back, 1 invert-y toggle
     float sliderX = 0, sliderY = 0, sliderW = 0, sliderH = 0; // sensitivity slider rect
 
@@ -127,6 +142,21 @@ struct UIState {
     int roomMinPlayers = 1;
     int lobbyJoinHover = -1;   // team index of the "+" under the cursor
     int lobbyBtnHover = -1;    // 0 new team, 1 start, 2 back
+    bool roomHost = false;     // this machine created the room and runs the server
+    bool roomSession = false;  // in a room match: hide privilege mode and the debug panel
+    int roomPort = 35535;
+    std::string roomPortText = "35535";
+    bool portFieldActive = false;
+    bool portFieldHover = false;
+    float portFieldX = 0, portFieldY = 0, portFieldW = 0, portFieldH = 0;
+    std::string joinHost = "127.0.0.1";
+    std::string joinPortText = "35535";
+    int joinHover = -1;        // 0 address, 1 port, 2 connect, 3 back
+    bool joinAddrActive = false;
+    bool joinPortActive = false;
+    std::string loadStatus;
+    int loadHover = -1;        // 0 cancel
+    std::vector<RemoteAvatar> remotes;
     bool spectating = false;   // in match, camera only
     std::string playerName = "玩家";
     bool portraitHover = false;
@@ -282,6 +312,8 @@ private:
     void drawStartMenu(UIState& ui);
     void drawPlayerProfile(UIState& ui);
     void drawRoomLobby(UIState& ui);
+    void drawJoinRoom(UIState& ui);
+    void drawRoomLoading(UIState& ui);
     void drawMenuPortrait(const World& world, float timeOfDay, UIState& ui);
     void drawWorldsMenu(UIState& ui);
     void drawWorldDetail(UIState& ui);

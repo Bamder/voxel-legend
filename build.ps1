@@ -40,7 +40,7 @@ function Build($name, $sources) {
     Fail-IfLocked $name
     Write-Output "Sources ($name):"
     $sources | ForEach-Object { Write-Output "  $_" }
-    & g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -finput-charset=UTF-8 -fexec-charset=UTF-8 @sources -o $name -lopengl32 -lgdi32 -luser32 -lgdiplus -lcomdlg32
+    & g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -finput-charset=UTF-8 -fexec-charset=UTF-8 @sources -o $name -lopengl32 -lgdi32 -luser32 -lgdiplus -lcomdlg32 -lws2_32
     if ($LASTEXITCODE -ne 0) { Explain-LinkFailure $name $LASTEXITCODE }
     Write-Output "BUILD OK -> $name"
 }

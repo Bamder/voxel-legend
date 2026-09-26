@@ -1,7 +1,7 @@
 # Tree Lab — standalone tree-growth sandbox (MinGW-w64 g++).
 # Run from this folder:
 #   .\build.ps1
-# Output: tree_lab.exe (also copied to the repo root for convenience)
+# Output: tree_lab.exe in this folder (tools/tree_lab/)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -22,5 +22,4 @@ if ($LASTEXITCODE -ne 0) {
     Write-Output "BUILD FAILED (tree_lab.exe)"
     exit $LASTEXITCODE
 }
-Copy-Item -Force tree_lab.exe "$root\tree_lab.exe"
-Write-Output "BUILD OK -> tree_lab.exe"
+Write-Output "BUILD OK -> $PSScriptRoot\tree_lab.exe"

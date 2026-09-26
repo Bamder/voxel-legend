@@ -22,6 +22,9 @@ __pycache__/
 GameSaves/
 world_save/
 
+# Runtime logs (crash.log, room_server.log, …)
+*.log
+
 # OS and IDE junk
 Thumbs.db
 ehthumbs.db

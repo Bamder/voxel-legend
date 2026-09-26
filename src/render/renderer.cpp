@@ -764,6 +764,22 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             &playerClip, player.animClock, heldR, heldL, carried,
                             nullptr, strike, strikeAt, &sky, wearUpper, wearLower, wearShoes);
         }
+        if (!ui.remotes.empty()) {
+            static float remoteClock = 0.0f;
+            float rdt = (ui.fps > 1.0f) ? (1.0f / ui.fps) : (1.0f / 60.0f);
+            const anim::Clip& walk = anim::playerClips().walk;
+            const anim::Clip& idle = anim::playerClips().idle;
+            remoteClock += rdt * ((walk.fps > 0.1f) ? walk.fps : 16.0f);
+            float L = (walk.length > 0) ? (float)walk.length : 20.0f;
+            while (remoteClock >= L) remoteClock -= L;
+            for (const RemoteAvatar& rp : ui.remotes) {
+                if (rp.spectator) continue;
+                const anim::Clip& clip = rp.moving ? walk : idle;
+                float frame = rp.moving ? remoteClock : 0.0f;
+                drawPlayerModel(rp.pos, rp.yaw, rp.yaw, rp.pitch, eye, vp, false, &clip, frame,
+                                AIR, AIR, AIR, nullptr, nullptr, 0.0f, &sky);
+            }
+        }
 
         // Observation dummy: loops walk in place. Head/body yaw stay a runtime overlay.
         if (ui.dummyActive) {
@@ -1855,8 +1871,9 @@ void Renderer::drawMenu(UIState& ui) {
     const float ts = 1.3f;
 
     quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.55f);
+    const int nBtn = ui.roomSession ? 3 : 4;
     ui.menuHover = -1;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < nBtn; i++) {
         float y = by0 + i * (bh + gap);
         bool hover = (ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= y && ui.mouseY < y + bh);
         if (hover) ui.menuHover = i;
@@ -1875,10 +1892,12 @@ void Renderer::drawMenu(UIState& ui) {
     flushUI(progUI, atlasTex);
 
     centeredText("VOXEL LEGEND", scrW * 0.5f, titleY, ts, 1, 1, 1, 1);
-        const char* labels[4] = { "继续游戏", "设置", "调试菜单", "返回菜单" };
-    for (int i = 0; i < 4; i++) {
+    const char* labelsFree[4] = { "继续游戏", "设置", "调试菜单", "返回菜单" };
+    const char* labelsRoom[3] = { "继续游戏", "设置", "返回菜单" };
+    for (int i = 0; i < nBtn; i++) {
         float y = by0 + i * (bh + gap);
-    centeredText(labels[i], bx + bw * 0.5f, y + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+        const char* label = ui.roomSession ? labelsRoom[i] : labelsFree[i];
+        centeredText(label, bx + bw * 0.5f, y + bh * 0.5f, 1.0f, 1, 1, 1, 1);
     }
 }
 
@@ -1888,7 +1907,7 @@ void Renderer::drawStartMenu(UIState& ui) {
     const float by0 = scrH * 0.5f - 70.0f;
     const float titleY = by0 - 92.0f;
     const char* labels[5] = { "创建房间", "自由探索", "加入房间", "游戏设置", "关于我们" };
-    const bool enabled[5] = { true, true, false, false, false };
+    const bool enabled[5] = { true, true, true, false, false };
     float split = ui.portraitX;
     if (split < 64.0f) split = std::max(420.0f, scrW * 0.42f);
 
@@ -1977,7 +1996,23 @@ void Renderer::drawRoomLobby(UIState& ui) {
     const float newY = (float)scrH - 16.0f - btnH;
     const int nTeams = (int)ui.roomTeams.size();
     const int nPlayers = (int)ui.roomPlayers.size();
-    const bool canStart = nPlayers >= ui.roomMinPlayers;
+    const bool enoughPlayers = nPlayers >= ui.roomMinPlayers;
+    const bool canStart = ui.roomHost && enoughPlayers;
+    const bool canAddTeam = ui.roomHost && nTeams < 9;
+
+    int lw = 0, lh = 0;
+    stringSize("开放端口", lw, lh);
+    const float portBoxW = 96.0f, portBoxH = 30.0f;
+    const float portBoxX = rightX - portBoxW;
+    const float portLabelX = portBoxX - (float)lw * 0.85f - 8.0f;
+    const float portBoxY = 14.0f;
+    ui.portFieldX = portBoxX;
+    ui.portFieldY = portBoxY;
+    ui.portFieldW = portBoxW;
+    ui.portFieldH = portBoxH;
+    ui.portFieldHover = ui.roomHost &&
+                        ui.mouseX >= portBoxX && ui.mouseX < portBoxX + portBoxW &&
+                        ui.mouseY >= portBoxY && ui.mouseY < portBoxY + portBoxH;
 
     int localTeam = -1;
     for (const RoomPlayerView& p : ui.roomPlayers)
@@ -2029,10 +2064,10 @@ void Renderer::drawRoomLobby(UIState& ui) {
                      t.spectator ? 0.45f : t.g, t.spectator ? 0.48f : t.b);
     }
 
-    bool newHover = nTeams < 9 && ui.mouseX >= leftX && ui.mouseX < leftX + sideW &&
+    bool newHover = canAddTeam && ui.mouseX >= leftX && ui.mouseX < leftX + sideW &&
                     ui.mouseY >= newY && ui.mouseY < newY + btnH;
     if (newHover) ui.lobbyBtnHover = 0;
-    if (nTeams < 9) buttonChrome(leftX, newY, sideW, btnH, newHover);
+    if (canAddTeam) buttonChrome(leftX, newY, sideW, btnH, newHover);
     else buttonChrome(leftX, newY, sideW, btnH, false, 0.22f, 0.22f, 0.24f);
 
     float startW = 200.0f;
@@ -2049,6 +2084,13 @@ void Renderer::drawRoomLobby(UIState& ui) {
     if (canStart) buttonChrome(startX, barY, startW, btnH, startHover, 0.28f, 0.48f, 0.24f);
     else buttonChrome(startX, barY, startW, btnH, false, 0.22f, 0.22f, 0.24f);
     buttonChrome(backX, barY, backW, btnH, backHover);
+    {
+        float br = ui.portFieldActive ? 0.22f : 0.14f;
+        if (ui.portFieldHover) br = 0.28f;
+        quad(portBoxX, portBoxY, portBoxW, portBoxH, 0, 0, 0, 0, br, br, br + 0.02f, 1.0f);
+        if (ui.portFieldActive)
+            quad(portBoxX, portBoxY, portBoxW, 2, 0, 0, 0, 0, 0.55f, 0.75f, 0.35f, 1.0f);
+    }
     flushUI(progUI, whiteTex);
 
     if (cameraIconTex && !camX.empty()) {
@@ -2057,10 +2099,16 @@ void Renderer::drawRoomLobby(UIState& ui) {
         flushUI(progUI, cameraIconTex);
     }
 
-    drawString("等待开始", 24.0f, 22.0f, 1.2f, 1, 1, 1, 1);
+    std::string title = ui.roomHost ? "等待开始  ·  主机" : "等待开始";
+    drawString(title, 24.0f, 22.0f, 1.2f, 1, 1, 1, 1);
+    drawString("开放端口", portLabelX, 20.0f, 0.85f, 0.8f, 0.82f, 0.78f, 1);
+    std::string portShown = ui.roomPortText.empty() ? std::to_string(ui.roomPort) : ui.roomPortText;
+    bool caret = ((int)(ui.timeOfDay / 200.0f) % 2) == 0;
+    if (ui.portFieldActive && caret) portShown += "|";
+    centeredText(portShown, portBoxX + portBoxW * 0.5f, portBoxY + portBoxH * 0.5f, 0.9f, 1, 1, 1, 1);
     char countBuf[64];
     snprintf(countBuf, sizeof(countBuf), "房间人数 %d / %d", nPlayers, ui.roomMinPlayers);
-    drawString(countBuf, midX, 28.0f, 0.85f, canStart ? 0.75f : 0.95f, canStart ? 0.9f : 0.55f, canStart ? 0.55f : 0.4f, 1);
+    drawString(countBuf, midX, 28.0f, 0.85f, enoughPlayers ? 0.75f : 0.95f, enoughPlayers ? 0.9f : 0.55f, enoughPlayers ? 0.55f : 0.4f, 1);
 
     drawString("队伍", leftX + 14.0f, top + 8.0f, 0.9f, 0.85f, 0.85f, 0.85f, 1);
     drawString("房间内玩家", rightX + 14.0f, top + 8.0f, 0.9f, 0.85f, 0.85f, 0.85f, 1);
@@ -2080,7 +2128,14 @@ void Renderer::drawRoomLobby(UIState& ui) {
             drawString(p.name, nameX, y + 12.0f, 0.85f, 1, 1, 1, 1);
             int tw = 0, th = 0;
             stringSize(p.name, tw, th);
-            nameX += (float)tw * 0.85f + 16.0f;
+            nameX += (float)tw * 0.85f + 8.0f;
+            if (p.host) {
+                drawString("主机", nameX, y + 12.0f, 0.75f, 0.95f, 0.78f, 0.35f, 1);
+                stringSize("主机", tw, th);
+                nameX += (float)tw * 0.75f + 16.0f;
+            } else {
+                nameX += 8.0f;
+            }
         }
         if (!any)
             drawString("空", nameX, y + 14.0f, 0.75f, 0.45f, 0.45f, 0.48f, 1);
@@ -2097,19 +2152,91 @@ void Renderer::drawRoomLobby(UIState& ui) {
         quad(rightX + 14.0f, py + 4.0f, 8.0f, 18.0f, 0, 0, 0, 0, cr, cg, cb, 1);
         flushUI(progUI, whiteTex);
         std::string label = p.name;
+        if (p.host) label += "  主机";
         if (p.team < 0) label += "  未入队";
         else if (p.team < nTeams) label += "  " + ui.roomTeams[p.team].name;
         drawString(label, rightX + 30.0f, py, 0.8f, 1, 1, 1, 1);
         py += 28.0f;
     }
 
-    centeredText(nTeams < 9 ? "新建队伍" : "队伍已满", leftX + sideW * 0.5f, newY + btnH * 0.5f,
-                 0.9f, nTeams < 9 ? 1.0f : 0.4f, nTeams < 9 ? 1.0f : 0.4f, nTeams < 9 ? 1.0f : 0.4f, 1);
+    const char* newLabel = canAddTeam ? "新建队伍" : (ui.roomHost ? "队伍已满" : "仅主机可新建");
+    centeredText(newLabel, leftX + sideW * 0.5f, newY + btnH * 0.5f,
+                 0.9f, canAddTeam ? 1.0f : 0.4f, canAddTeam ? 1.0f : 0.4f, canAddTeam ? 1.0f : 0.4f, 1);
     centeredText("返回", backX + backW * 0.5f, barY + btnH * 0.5f, 0.95f, 1, 1, 1, 1);
+    const char* startLabel = "等待主机";
+    if (ui.roomHost) startLabel = canStart ? "开始对局" : "人数不足";
     float sa = canStart ? 1.0f : 0.4f;
-    centeredText(canStart ? "开始对局" : "人数不足", startX + startW * 0.5f, barY + btnH * 0.5f, 0.95f, sa, sa, sa, 1);
+    centeredText(startLabel, startX + startW * 0.5f, barY + btnH * 0.5f, 0.95f, sa, sa, sa, 1);
     if (!ui.menuMessage.empty())
         drawString(ui.menuMessage, midX, barY - 28.0f, 0.8f, 0.95f, 0.75f, 0.45f, 1);
+}
+
+void Renderer::drawJoinRoom(UIState& ui) {
+    const float bw = 360.0f, bh = 48.0f;
+    const float bx = 72.0f;
+    const float addrY = scrH * 0.5f - 70.0f;
+    const float portY = addrY + 78.0f;
+    const float goY = portY + 78.0f;
+    const float backY = goY + bh + 14.0f;
+
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.06f, 0.07f, 0.09f, 1.0f);
+    ui.joinHover = -1;
+
+    auto field = [&](float y, bool active, int id) {
+        bool hover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= y && ui.mouseY < y + bh;
+        if (hover) ui.joinHover = id;
+        quad(bx, y, bw, bh, 0, 0, 0, 0, 0.12f, 0.12f, 0.12f, 1.0f);
+        float f = (active || hover) ? 0.22f : 0.16f;
+        quad(bx + 2, y + 2, bw - 4, bh - 4, 0, 0, 0, 0, f, f, f, 1.0f);
+        if (active) quad(bx, y, bw, 2, 0, 0, 0, 0, 0.55f, 0.75f, 0.35f, 1.0f);
+    };
+    field(addrY, ui.joinAddrActive, 0);
+    field(portY, ui.joinPortActive, 1);
+
+    bool goHover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= goY && ui.mouseY < goY + bh;
+    bool backHover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= backY && ui.mouseY < backY + bh;
+    if (goHover) ui.joinHover = 2;
+    if (backHover) ui.joinHover = 3;
+    buttonChrome(bx, goY, bw, bh, goHover, 0.28f, 0.48f, 0.24f);
+    buttonChrome(bx, backY, bw, bh, backHover);
+    flushUI(progUI, whiteTex);
+
+    drawString("加入房间", bx, addrY - 88.0f, 1.3f, 1, 1, 1, 1);
+    drawString("主机地址", bx, addrY - 28.0f, 0.85f, 0.8f, 0.8f, 0.8f, 1);
+    drawString("端口", bx, portY - 28.0f, 0.85f, 0.8f, 0.8f, 0.8f, 1);
+    bool caret = ((int)(ui.timeOfDay / 200.0f) % 2) == 0;
+    auto show = [&](const std::string& text, bool active, float y, const char* empty) {
+        std::string s = text;
+        if (active && caret) s += "|";
+        if (s.empty())
+            centeredText(empty, bx + bw * 0.5f, y + bh * 0.5f, 0.95f, 0.5f, 0.5f, 0.5f, 1);
+        else
+            centeredText(s, bx + bw * 0.5f, y + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+    };
+    show(ui.joinHost, ui.joinAddrActive, addrY, "127.0.0.1");
+    show(ui.joinPortText, ui.joinPortActive, portY, "35535");
+    centeredText("连接", bx + bw * 0.5f, goY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+    centeredText("返回", bx + bw * 0.5f, backY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+    if (!ui.menuMessage.empty())
+        drawString(ui.menuMessage, bx, (float)scrH - 40.0f, 0.85f, 0.95f, 0.75f, 0.45f, 1);
+}
+
+void Renderer::drawRoomLoading(UIState& ui) {
+    const float bw = 220.0f, bh = 48.0f;
+    const float bx = ((float)scrW - bw) * 0.5f;
+    const float by = (float)scrH * 0.5f + 48.0f;
+
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.05f, 0.06f, 0.08f, 1.0f);
+    ui.loadHover = -1;
+    bool hover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= by && ui.mouseY < by + bh;
+    if (hover) ui.loadHover = 0;
+    buttonChrome(bx, by, bw, bh, hover);
+    flushUI(progUI, whiteTex);
+
+    centeredText("正在进入房间", (float)scrW * 0.5f, (float)scrH * 0.5f - 36.0f, 1.3f, 1, 1, 1, 1);
+    std::string status = ui.loadStatus.empty() ? "正在加载" : ui.loadStatus;
+    centeredText(status, (float)scrW * 0.5f, (float)scrH * 0.5f + 4.0f, 0.95f, 0.8f, 0.84f, 0.78f, 1);
+    centeredText("取消", bx + bw * 0.5f, by + bh * 0.5f, 1.0f, 1, 1, 1, 1);
 }
 
 void Renderer::drawWorldsMenu(UIState& ui) {
@@ -2559,6 +2686,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         else if (ui.appScreen == AppScreen::WorldDetail) drawWorldDetail(ui);
         else if (ui.appScreen == AppScreen::CreateWorld) drawCreateWorld(ui);
         else if (ui.appScreen == AppScreen::RoomLobby) drawRoomLobby(ui);
+        else if (ui.appScreen == AppScreen::JoinRoom) drawJoinRoom(ui);
+        else if (ui.appScreen == AppScreen::RoomLoading) drawRoomLoading(ui);
         gl::Enable(GL_DEPTH_TEST);
         return;
     }

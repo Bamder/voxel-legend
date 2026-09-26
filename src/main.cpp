@@ -14,6 +14,7 @@
 #include "render/textures.hpp"
 #include "material/registry.hpp"
 #include "plugin/plugin.hpp"
+#include "net/room_net.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include <fstream>
 #include <random>
 #include <string>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Window / input globals (populated by WndProc, consumed by the game loop).
@@ -35,13 +37,16 @@ static float g_mouseScale = 1.0f;
 static float g_absScaleX = 1.0f, g_absScaleY = 1.0f;
 static LONG g_prevAbsX = -1, g_prevAbsY = -1;
 static int g_screenW = 1280, g_screenH = 720;
-static bool g_focused = true;
+static bool g_focused = false;
+static bool g_clipHeld = false;
 static int g_winW = 1280, g_winH = 720;
 static bool g_resized = false;
 static bool g_cursorHidden = false;
 static int g_wheel = 0;
 static std::string* g_textTarget = nullptr;
 static bool g_textSubmit = false;
+static bool g_textDigits = false;
+static int g_textMax = 64;
 
 static void popUtf8(std::string& s) {
     if (s.empty()) return;
@@ -58,9 +63,35 @@ static bool appendUtf8(std::string& s, const char* utf8, size_t maxBytes) {
     return true;
 }
 
+static bool windowForeground(HWND hwnd) {
+    return hwnd && GetForegroundWindow() == hwnd;
+}
+
+static void showGameCursor() {
+    if (!g_cursorHidden) return;
+    ShowCursor(TRUE);
+    g_cursorHidden = false;
+}
+
+// ClipCursor is system-wide. A second instance must not release a clip it does not hold.
+static void releaseCursorClip() {
+    if (!g_clipHeld) return;
+    ClipCursor(nullptr);
+    g_clipHeld = false;
+}
+
+static void clearPointer() {
+    g_mouseDX = 0.0f;
+    g_mouseDY = 0.0f;
+    g_wheel = 0;
+    g_prevAbsX = -1;
+    g_prevAbsY = -1;
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
         case WM_INPUT: {
+            if (!windowForeground(h)) return 0;
             UINT size = 0;
             GetRawInputData((HRAWINPUT)l, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER));
             if (size > 0 && size <= 512) {
@@ -89,10 +120,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         case WM_MOUSEWHEEL:
+            if (!windowForeground(h)) return 0;
             g_wheel += (int)(short)HIWORD(w);
             return 0;
         case WM_CHAR: {
-            if (!g_textTarget) return 0;
+            if (!windowForeground(h) || !g_textTarget) return 0;
             wchar_t wc = (wchar_t)w;
             if (wc < 32) return 0;
             wchar_t wcs[2] = { wc, 0 };
@@ -100,18 +132,21 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             int n = WideCharToMultiByte(CP_UTF8, 0, wcs, -1, utf8, (int)sizeof(utf8), nullptr, nullptr);
             if (n > 1) {
                 utf8[n - 1] = 0;
-                // Reject Windows-illegal filename characters.
-                if (utf8[1] == 0) {
+                if (g_textDigits) {
+                    if (utf8[1] != 0 || utf8[0] < '0' || utf8[0] > '9') return 0;
+                } else if (utf8[1] == 0) {
                     char c = utf8[0];
                     if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/' ||
                         c == '\\' || c == '|' || c == '?' || c == '*')
                         return 0;
                 }
-                appendUtf8(*g_textTarget, utf8, 64);
+                size_t cap = g_textMax > 0 ? (size_t)g_textMax : 64;
+                appendUtf8(*g_textTarget, utf8, cap);
             }
             return 0;
         }
         case WM_KEYDOWN:
+            if (!windowForeground(h)) return 0;
             if (g_textTarget) {
                 if (w == VK_BACK) { popUtf8(*g_textTarget); return 0; }
                 if (w == VK_RETURN) { g_textSubmit = true; return 0; }
@@ -123,17 +158,20 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_resized = true;
             return 0;
         case WM_SETFOCUS:
-            g_focused = true;
+            g_focused = windowForeground(h);
             return 0;
         case WM_KILLFOCUS:
             g_focused = false;
-            ClipCursor(nullptr);
+            clearPointer();
+            showGameCursor();
+            releaseCursorClip();
             return 0;
         case WM_CLOSE:
             DestroyWindow(h);
             return 0;
         case WM_DESTROY:
-            ClipCursor(nullptr);
+            showGameCursor();
+            releaseCursorClip();
             PostQuitMessage(0);
             return 0;
     }
@@ -252,17 +290,38 @@ static bool createWindowAndContext(WinGL& wg, int w, int h) {
     return true;
 }
 
-static bool keyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+// GetAsyncKeyState is system-wide. Only the foreground window may see keys.
+static bool keyDown(int vk) {
+    if (!g_focused) return false;
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+// Authoritative focus: WM_SETFOCUS can stay true on a covered window.
+static void syncFocus(HWND hwnd) {
+    bool now = windowForeground(hwnd);
+    if (g_focused != now) {
+        clearPointer();
+        if (!now) {
+            showGameCursor();
+            releaseCursorClip();
+        }
+    }
+    g_focused = now;
+}
 
 static void updateCursor(HWND hwnd, bool locked) {
+    if (!g_focused) locked = false;
     if (locked) {
         if (!g_cursorHidden) { ShowCursor(FALSE); g_cursorHidden = true; }
         // Trap the cursor inside the window so it can't reach the screen border.
         RECT rc;
-        if (GetWindowRect(hwnd, &rc)) ClipCursor(&rc);
+        if (GetWindowRect(hwnd, &rc)) {
+            ClipCursor(&rc);
+            g_clipHeld = true;
+        }
     } else {
-        if (g_cursorHidden) { ShowCursor(TRUE); g_cursorHidden = false; }
-        ClipCursor(nullptr);
+        showGameCursor();
+        releaseCursorClip();
     }
 }
 
@@ -431,6 +490,16 @@ static int inventoryAdd(ItemSlot* inv, uint8_t block, int count) {
     return count;
 }
 
+static bool g_roomRecord = false;
+static bool g_roomApplyNet = false;
+static std::vector<BlockEditNet> g_roomEdits;
+
+static void noteRoomEdit(int x, int y, int z, uint8_t b) {
+    if (!g_roomRecord || g_roomApplyNet) return;
+    if (g_roomEdits.size() >= 256) g_roomEdits.erase(g_roomEdits.begin());
+    g_roomEdits.push_back(BlockEditNet{ x, y, z, b });
+}
+
 static Vec3 cellCenter(int x, int y, int z) {
     const float S = cfg::BLOCK_SCALE;
     // Stay inside the cell. A lower point overlaps the block underneath, and the
@@ -481,6 +550,7 @@ static void finishMinedBlock(World& world, uint8_t held, int physHit, const IVec
     int barkN = world.takeAllBarkAt(hit.x, hit.y, hit.z);
     Vec3 dropPos = cellCenter(hit.x, hit.y, hit.z);
     world.setBlock(hit.x, hit.y, hit.z, AIR, true);
+    noteRoomEdit(hit.x, hit.y, hit.z, AIR);
     if (harvest) {
         spawnHarvestDrops(world, dropPos, b, held, extraGrass);
         if (barkN > 0) world.spawnDrop(dropPos, BARK, barkN, true);
@@ -982,6 +1052,9 @@ int main(int argc, char** argv) {
     int frames = 0;       // 0 = run until window closed
     int selfTest = -1;    // -1 = disabled
     bool seedData = false;
+    bool roomServer = false;
+    uint16_t roomServerPort = kRoomPortDefault;
+    std::string roomHandoff;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -993,6 +1066,9 @@ int main(int argc, char** argv) {
         else if (a == "--sim") { sim = true; }
         else if (a == "--withertest") { witherTest = true; }
         else if (a == "--watertest") { waterTest = true; }
+        else if (a == "--room-server") { roomServer = true; }
+        else if (a == "--port" && i + 1 < argc) { roomServerPort = (uint16_t)std::atoi(argv[++i]); }
+        else if (a == "--handoff" && i + 1 < argc) { roomHandoff = argv[++i]; }
         else if (a == "--help") {
             printf("VOXEL LEGEND\n");
             printf("  --selftest N   run N iterations of a headless stress test and exit\n");
@@ -1003,10 +1079,14 @@ int main(int argc, char** argv) {
             printf("  --seed N       seed used when creating a new world\n");
             printf("  --no-save      disable save/load\n");
             printf("  --seed-data    write missing assets/data files and exit\n");
+            printf("  --room-server  headless room server (started by the host)\n");
+            printf("  --port N       room server port (default 35535)\n");
+            printf("  --handoff PATH lobby roster for --room-server\n");
             return 0;
         }
     }
 
+    if (roomServer) return runRoomServer(roomServerPort, roomHandoff);
     if (seedData) {
         printf("data pack ready under assets/data/\n");
         return 0;
@@ -1101,6 +1181,23 @@ int main(int argc, char** argv) {
     std::vector<RoomTeamView> roomTeams;
     std::vector<RoomPlayerView> roomPlayers;
     bool roomSession = false;
+    bool roomHost = false;
+    int roomPort = kRoomPortDefault;
+    std::string roomHostAddr = "127.0.0.1";
+    LobbyHost lobbyHost;
+    LobbyGuest lobbyGuest;
+    GameClient gameClient;
+    ServerProcess roomProc;
+    bool loadFailed = false;
+    bool loadSeedApplied = false;
+    float loadShown = 0.0f;
+    float lobbyBroadcastAccum = 0.0f;
+    bool lobbyDirty = false;
+    float roomNetAccum = 0.0f;
+    uint32_t worldAck = 0;
+    std::unordered_map<uint32_t, RemoteAvatar> remoteMap;
+    std::unordered_map<uint32_t, Vec3> remotePrev;
+    std::vector<RemoteAvatar> remotes;
     bool spectating = false;
     constexpr int kRoomMinPlayers = 1;
     float tickSpeed = 1.0f;
@@ -1153,7 +1250,28 @@ int main(int argc, char** argv) {
         ui.backupItemHover = -1;
     };
 
+    auto shutdownRoom = [&]() {
+        lobbyHost.close();
+        lobbyGuest.close();
+        gameClient.close();
+        roomProc.kill();
+        roomHost = false;
+        g_roomRecord = false;
+        g_roomEdits.clear();
+        remoteMap.clear();
+        remotePrev.clear();
+        remotes.clear();
+        worldAck = 0;
+        loadSeedApplied = false;
+        loadFailed = false;
+        g_textDigits = false;
+        ui.portFieldActive = false;
+        ui.joinAddrActive = false;
+        ui.joinPortActive = false;
+    };
+
     auto enterWorld = [&](const std::string& name) {
+        shutdownRoom();
         spectating = false;
         roomSession = false;
         player.noclip = false;
@@ -1219,6 +1337,7 @@ int main(int argc, char** argv) {
             if (!noSave && !currentWorld.empty())
                 savePlayer(world.saveDir(), player, timeOfDay, inv, carry, worn, mouseSens, invertY);
         }
+        shutdownRoom();
         spectating = false;
         roomSession = false;
         roomTeams.clear();
@@ -1248,38 +1367,39 @@ int main(int argc, char** argv) {
         { 0.92f, 0.46f, 0.16f }, { 0.86f, 0.42f, 0.62f },
     };
     auto beginRoom = [&]() {
+        shutdownRoom();
+        std::string err;
+        roomPort = kRoomPortDefault;
+        if (!lobbyHost.open((uint16_t)roomPort, err)) {
+            ui.menuMessage = err.empty() ? "无法监听端口" : err;
+            return;
+        }
+        roomHost = true;
+        roomHostAddr = "127.0.0.1";
+        ui.roomPort = roomPort;
+        ui.roomPortText = std::to_string(roomPort);
+        ui.portFieldActive = false;
         roomTeams.clear();
         roomTeams.push_back(RoomTeamView{ "观战", 0.75f, 0.76f, 0.80f, true });
         roomPlayers.clear();
-        std::string who = ui.playerName.empty() ? "玩家" : ui.playerName;
-        roomPlayers.push_back(RoomPlayerView{ who, -1, true });
+        RoomPlayerView me;
+        me.name = ui.playerName.empty() ? "玩家" : ui.playerName;
+        me.team = -1;
+        me.local = true;
+        me.host = true;
+        me.id = 1;
+        roomPlayers.push_back(me);
         roomSession = false;
         spectating = false;
-        uint32_t s = (uint32_t)std::chrono::steady_clock::now().time_since_epoch().count();
-        if (s == 0) s = 1;
-        world.reset(s);
-        world.setSaveEnabled(false);
-        seed = s;
-        currentWorld.clear();
-        player = Player();
-        if (const plugin::EntityModule* em = plugin::findEntity("player")) {
-            plugin::EntityEvent ev{ &world, &player, 0.0f };
-            em->strategy->onSpawn(ev);
-        }
-        for (int i = 0; i < cfg::INVENTORY_SLOTS; i++) inv[i].clear();
-        for (int i = 0; i < wear::Count; i++) worn[i].clear();
-        carry.clear();
-        timeOfDay = 6000.0f;
-        spawnPlayer();
-        world.update(player.pos, 40);
-        player.yaw = 0.4f;
-        player.pitch = -0.15f;
+        lobbyDirty = true;
         appScreen = AppScreen::RoomLobby;
         ui.appScreen = AppScreen::RoomLobby;
         ui.menuMessage.clear();
+        g_textTarget = nullptr;
         firstLook = true;
     };
     auto addRoomTeam = [&]() {
+        if (!roomHost) return;
         if (roomTeams.size() >= 9) return;
         int i = (int)roomTeams.size() - 1;
         if (i < 0) i = 0;
@@ -1289,26 +1409,176 @@ int main(int argc, char** argv) {
         t.g = kTeamCols[i % 8][1];
         t.b = kTeamCols[i % 8][2];
         roomTeams.push_back(t);
+        lobbyDirty = true;
     };
     auto joinRoomTeam = [&](int team) {
         if (team < 0 || team >= (int)roomTeams.size()) return;
         for (RoomPlayerView& rp : roomPlayers)
             if (rp.local) rp.team = team;
+        if (!roomHost) lobbyGuest.sendJoinTeam(team);
+        lobbyDirty = true;
     };
-    auto startRoom = [&]() {
-        if ((int)roomPlayers.size() < kRoomMinPlayers) return;
-        int team = -1;
-        for (const RoomPlayerView& rp : roomPlayers)
-            if (rp.local) team = rp.team;
-        spectating = (team == 0);
+    auto rosterTeams = [&]() {
+        std::vector<RoomTeamNet> teams;
+        for (const RoomTeamView& t : roomTeams) {
+            RoomTeamNet n{};
+            n.name = t.name;
+            n.r = t.r;
+            n.g = t.g;
+            n.b = t.b;
+            n.spectator = t.spectator;
+            teams.push_back(n);
+        }
+        return teams;
+    };
+    auto rosterPlayers = [&]() {
+        std::vector<RoomPlayerNet> players;
+        for (const RoomPlayerView& p : roomPlayers) {
+            RoomPlayerNet n{};
+            n.id = p.id;
+            n.name = p.name;
+            n.team = p.team;
+            n.host = p.host;
+            players.push_back(n);
+        }
+        return players;
+    };
+    auto applyRoomPort = [&]() {
+        ui.portFieldActive = false;
+        g_textTarget = nullptr;
+        g_textDigits = false;
+        if (!roomHost || !lobbyHost.listening()) {
+            ui.roomPortText = std::to_string(roomPort);
+            return;
+        }
+        int p = 0;
+        if (ui.roomPortText.empty()) p = -1;
+        for (char c : ui.roomPortText) {
+            if (p < 0) break;
+            if (c < '0' || c > '9') { p = -1; break; }
+            p = p * 10 + (c - '0');
+            if (p > 65535) { p = -1; break; }
+        }
+        if (p < 1) {
+            ui.menuMessage = "端口无效";
+            ui.roomPortText = std::to_string(roomPort);
+            return;
+        }
+        if (p == roomPort) {
+            ui.roomPortText = std::to_string(roomPort);
+            return;
+        }
+        if (lobbyHost.remoteCount() > 0) {
+            ui.menuMessage = "已有玩家加入，无法修改端口";
+            ui.roomPortText = std::to_string(roomPort);
+            return;
+        }
+        std::string err;
+        if (!lobbyHost.open((uint16_t)p, err)) {
+            ui.menuMessage = err.empty() ? "端口被占用" : err;
+            ui.roomPortText = std::to_string(roomPort);
+            lobbyHost.open((uint16_t)roomPort, err);
+            return;
+        }
+        roomPort = p;
+        ui.roomPort = p;
+        ui.roomPortText = std::to_string(p);
+        ui.menuMessage = "端口已更新";
+        lobbyDirty = true;
+    };
+    auto pullGuestLobby = [&]() {
+        uint16_t port = 0;
+        std::vector<RoomTeamNet> teams;
+        std::vector<RoomPlayerNet> players;
+        if (!lobbyGuest.takeLobby(port, teams, players)) return;
+        roomPort = port;
+        ui.roomPort = (int)port;
+        if (!ui.portFieldActive) ui.roomPortText = std::to_string(port);
+        roomTeams.clear();
+        for (const RoomTeamNet& t : teams) {
+            RoomTeamView v;
+            v.name = t.name;
+            v.r = t.r;
+            v.g = t.g;
+            v.b = t.b;
+            v.spectator = t.spectator;
+            roomTeams.push_back(v);
+        }
+        uint32_t me = lobbyGuest.localId();
+        roomPlayers.clear();
+        for (const RoomPlayerNet& p : players) {
+            RoomPlayerView v;
+            v.name = p.name;
+            v.team = p.team;
+            v.host = p.host;
+            v.id = p.id;
+            v.local = (p.id == me);
+            roomPlayers.push_back(v);
+        }
+    };
+    auto liftSpawn = [&]() {
+        const float S = cfg::BLOCK_SCALE;
+        auto collides = [&](float x, float y, float z) {
+            float hw = cfg::PLAYER_HALF_WIDTH, hgt = cfg::PLAYER_HEIGHT;
+            int x0 = (int)std::floor((x - hw) / S), x1 = (int)std::floor((x + hw - 1e-6f) / S);
+            int y0 = (int)std::floor(y / S), y1 = (int)std::floor((y + hgt - 1e-6f) / S);
+            int z0 = (int)std::floor((z - hw) / S), z1 = (int)std::floor((z + hw - 1e-6f) / S);
+            for (int bx = x0; bx <= x1; bx++)
+                for (int by = y0; by <= y1; by++)
+                    for (int bz = z0; bz <= z1; bz++)
+                        if (isSolid(world.getBlock(bx, by, bz))) return true;
+            return false;
+        };
+        float sy = player.pos.y;
+        float maxY = (float)(cfg::CHUNK_H - 4) * cfg::BLOCK_SCALE;
+        while (sy < maxY && collides(player.pos.x, sy, player.pos.z)) sy += cfg::BLOCK_SCALE;
+        player.pos.y = sy;
+    };
+    auto beginLoading = [&](const std::string& addr) {
+        roomHostAddr = addr;
+        loadFailed = false;
+        loadSeedApplied = false;
+        loadShown = 0.0f;
+        g_roomRecord = false;
+        g_roomEdits.clear();
+        appScreen = AppScreen::RoomLoading;
+        ui.appScreen = AppScreen::RoomLoading;
+        ui.loadStatus = "正在连接服务器";
+        ui.menuMessage.clear();
+        g_textTarget = nullptr;
+        g_textDigits = false;
+        ui.portFieldActive = false;
+        std::string err;
+        if (!gameClient.startConnect(addr, (uint16_t)roomPort, ui.playerName, err)) {
+            loadFailed = true;
+            ui.loadStatus = err.empty() ? "无法连接服务器" : err;
+        }
+    };
+    auto enterRoomPlay = [&]() {
+        int team = gameClient.team();
+        for (RoomPlayerView& rp : roomPlayers)
+            if (rp.local) rp.team = team;
+        spectating = gameClient.spectator() || team == 0;
         roomSession = true;
+        g_roomRecord = true;
+        g_roomEdits.clear();
+        worldAck = 0;
+        remoteMap.clear();
+        remotePrev.clear();
+        remotes.clear();
+        player.privilegeMode = false;
         player.flying = spectating;
         player.noclip = spectating;
         player.vel = { 0, 0, 0 };
         player.dead = false;
+        humidityMode = false;
+        showDebug = false;
+        tickSpeed = 1.0f;
         if (spectating) ui.camMode = 0;
+        liftSpawn();
         appScreen = AppScreen::Playing;
         ui.appScreen = AppScreen::Playing;
+        ui.loadStatus.clear();
         g_textTarget = nullptr;
         ui.menuMessage.clear();
         firstLook = true;
@@ -1317,9 +1587,194 @@ int main(int argc, char** argv) {
         inventoryOpen = false;
         debugMenuOpen = false;
         ui.matEditorOpen = false;
+        ui.dummyActive = false;
         accumulator = 0.0f;
         gameTickAccum = 0.0f;
         gameTick = 0;
+        roomNetAccum = 0.0f;
+    };
+    auto tryApplyNetEdit = [&](const BlockEditNet& e) -> bool {
+        if (e.y < 0 || e.y >= cfg::CHUNK_H) return true;
+        const float S = cfg::BLOCK_SCALE;
+        world.update(Vec3{ (e.x + 0.5f) * S, (e.y + 0.5f) * S, (e.z + 0.5f) * S }, 2);
+        int cx = floorDiv(e.x, cfg::CHUNK_X);
+        int cz = floorDiv(e.z, cfg::CHUNK_Z);
+        if (!world.chunkExists(cx, cz)) return false;
+        if (world.getBlock(e.x, e.y, e.z) == e.block) return true;
+        g_roomApplyNet = true;
+        world.setBlock(e.x, e.y, e.z, e.block, true);
+        g_roomApplyNet = false;
+        return true;
+    };
+    auto startRoom = [&]() {
+        if (!roomHost) return;
+        if ((int)roomPlayers.size() < kRoomMinPlayers) return;
+        std::string path = std::string(saves::kRoot) + "/room_handoff.bin";
+        std::string err;
+        if (!writeRoomHandoff(path, rosterTeams(), rosterPlayers(), err)) {
+            ui.menuMessage = err.empty() ? "无法写入房间交接" : err;
+            return;
+        }
+        lobbyHost.sendMatchStart();
+        lobbyHost.flushOut(400);
+        lobbyHost.close();
+        if (!spawnRoomServer((uint16_t)roomPort, path, roomProc, err)) {
+            ui.menuMessage = err.empty() ? "无法启动服务器进程" : err;
+            std::string reopen;
+            if (!lobbyHost.open((uint16_t)roomPort, reopen))
+                ui.menuMessage = err.empty() ? "无法启动服务器进程" : err;
+            return;
+        }
+        beginLoading("127.0.0.1");
+    };
+    auto pollRoom = [&](float frameDt) {
+        if (appScreen == AppScreen::RoomLobby && roomHost && lobbyHost.listening()) {
+            lobbyHost.poll();
+            for (const LobbyHost::Join& j : lobbyHost.takeJoins()) {
+                RoomPlayerView v;
+                v.name = j.name;
+                v.id = j.id;
+                v.team = -1;
+                v.host = false;
+                v.local = false;
+                roomPlayers.push_back(v);
+                lobbyDirty = true;
+            }
+            for (uint32_t id : lobbyHost.takeLeaves()) {
+                roomPlayers.erase(std::remove_if(roomPlayers.begin(), roomPlayers.end(),
+                                                 [&](const RoomPlayerView& p) { return p.id == id && !p.local; }),
+                                  roomPlayers.end());
+                lobbyDirty = true;
+            }
+            for (const LobbyHost::TeamCmd& cmd : lobbyHost.takeTeamCmds()) {
+                if (cmd.team < -1 || cmd.team >= (int)roomTeams.size()) continue;
+                for (RoomPlayerView& rp : roomPlayers)
+                    if (rp.id == cmd.id) rp.team = cmd.team;
+                lobbyDirty = true;
+            }
+            lobbyBroadcastAccum += frameDt;
+            if (lobbyDirty || lobbyBroadcastAccum >= 0.1f) {
+                lobbyHost.broadcast(rosterTeams(), rosterPlayers());
+                lobbyDirty = false;
+                lobbyBroadcastAccum = 0.0f;
+            }
+        } else if (appScreen == AppScreen::RoomLobby && !roomHost) {
+            lobbyGuest.poll();
+            if (lobbyGuest.matchStarting()) {
+                std::string addr = lobbyGuest.host();
+                roomPort = lobbyGuest.port();
+                ui.roomPort = roomPort;
+                lobbyGuest.close();
+                beginLoading(addr);
+            } else if (!lobbyGuest.alive()) {
+                shutdownRoom();
+                roomTeams.clear();
+                roomPlayers.clear();
+                roomSession = false;
+                spectating = false;
+                appScreen = AppScreen::Start;
+                ui.appScreen = AppScreen::Start;
+                ui.menuMessage = "与主机断开";
+            } else {
+                pullGuestLobby();
+            }
+        } else if (appScreen == AppScreen::RoomLoading) {
+            if (loadFailed) return;
+            gameClient.poll();
+            if (gameClient.failed()) {
+                loadFailed = true;
+                ui.loadStatus = gameClient.failReason().empty() ? "无法连接服务器" : gameClient.failReason();
+                return;
+            }
+            if (!gameClient.welcomed()) {
+                ui.loadStatus = gameClient.handshaking() ? "服务器正在创建世界" : "正在连接服务器";
+                return;
+            }
+            if (!loadSeedApplied) {
+                uint32_t s = gameClient.seed();
+                if (s == 0) s = 1;
+                world.reset(s);
+                world.setSaveEnabled(false);
+                seed = s;
+                currentWorld.clear();
+                player = Player();
+                player.privilegeMode = false;
+                if (const plugin::EntityModule* em = plugin::findEntity("player")) {
+                    plugin::EntityEvent ev{ &world, &player, 0.0f };
+                    em->strategy->onSpawn(ev);
+                }
+                for (int i = 0; i < cfg::INVENTORY_SLOTS; i++) inv[i].clear();
+                for (int i = 0; i < wear::Count; i++) worn[i].clear();
+                carry.clear();
+                timeOfDay = 6000.0f;
+                player.setSpawn({ gameClient.spawnX(), gameClient.spawnY(), gameClient.spawnZ() });
+                player.yaw = 0.4f;
+                player.pitch = -0.15f;
+                loadSeedApplied = true;
+                ui.loadStatus = "正在生成世界";
+            }
+            world.update(player.pos, 4);
+            loadShown += frameDt;
+            const float S = cfg::BLOCK_SCALE;
+            int cx = floorDiv((int)std::floor(player.pos.x / S), cfg::CHUNK_X);
+            int cz = floorDiv((int)std::floor(player.pos.z / S), cfg::CHUNK_Z);
+            ui.loadStatus = "正在生成世界 " + std::to_string(world.loadedChunks());
+            if (loadShown >= 0.4f && world.chunkExists(cx, cz) && world.loadedChunks() >= 48)
+                enterRoomPlay();
+        } else if (roomSession && appScreen == AppScreen::Playing) {
+            gameClient.poll();
+            if (gameClient.failed()) {
+                leaveWorld();
+                ui.menuMessage = "与服务器断开";
+                return;
+            }
+            for (PlayDeltaNet& d : gameClient.takeDeltas()) {
+                for (uint32_t id : d.removed) {
+                    remoteMap.erase(id);
+                    remotePrev.erase(id);
+                }
+                for (const PlayerPoseNet& pose : d.players) {
+                    if (pose.id == gameClient.selfId()) continue;
+                    RemoteAvatar& av = remoteMap[pose.id];
+                    bool first = (av.id == 0);
+                    av.id = pose.id;
+                    av.name = pose.name;
+                    av.pos = { pose.x, pose.y, pose.z };
+                    av.yaw = pose.yaw;
+                    av.pitch = pose.pitch;
+                    av.spectator = pose.spectator;
+                    if (first) remotePrev[pose.id] = av.pos;
+                }
+                if (!d.edits.empty() && d.baseRev > 0) {
+                    uint32_t rev = d.baseRev;
+                    for (const BlockEditNet& e : d.edits) {
+                        if (rev > worldAck) {
+                            if (!tryApplyNetEdit(e)) break;
+                            worldAck = rev;
+                        }
+                        ++rev;
+                    }
+                }
+            }
+            remotes.clear();
+            for (auto& entry : remoteMap) {
+                RemoteAvatar& av = entry.second;
+                Vec3 prev = remotePrev.count(entry.first) ? remotePrev[entry.first] : av.pos;
+                float dx = av.pos.x - prev.x, dy = av.pos.y - prev.y, dz = av.pos.z - prev.z;
+                av.moving = (dx * dx + dy * dy + dz * dz) > 0.0004f;
+                remotePrev[entry.first] = av.pos;
+                remotes.push_back(av);
+            }
+            roomNetAccum += frameDt;
+            if (roomNetAccum >= 0.05f) {
+                roomNetAccum = 0.0f;
+                size_t n = g_roomEdits.size() < 32 ? g_roomEdits.size() : 32;
+                std::vector<BlockEditNet> batch(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
+                gameClient.sendInput(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
+                                     spectating, worldAck, batch);
+                g_roomEdits.erase(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
+            }
+        }
     };
 
     auto seedFromName = [](const std::string& name) -> uint32_t {
@@ -1493,6 +1948,8 @@ int main(int argc, char** argv) {
         }
         if (!running) break;
 
+        syncFocus(wg.hwnd);
+
         auto t1 = std::chrono::steady_clock::now();
         float dt = std::chrono::duration<float>(t1 - t0).count();
         t0 = t1;
@@ -1507,6 +1964,17 @@ int main(int argc, char** argv) {
         }
 
         bool playing = (appScreen == AppScreen::Playing);
+        pollRoom(dt);
+        playing = (appScreen == AppScreen::Playing);
+        if (roomSession) {
+            player.privilegeMode = false;
+            humidityMode = false;
+            showDebug = false;
+            debugMenuOpen = false;
+            ui.matEditorOpen = false;
+            ui.dummyActive = false;
+            tickSpeed = 1.0f;
+        }
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead);
         bool lookLocked = (canMove && !inventoryOpen);
 
@@ -1517,9 +1985,9 @@ int main(int argc, char** argv) {
             in.left = keyDown('A');
             in.right = keyDown('D');
             in.sprint = keyDown(VK_CONTROL) || (keyDown(VK_SHIFT) && !player.flying);
+            in.jump = keyDown(VK_SPACE);
+            in.sneak = keyDown(VK_SHIFT);
         }
-        in.jump = keyDown(VK_SPACE);
-        in.sneak = keyDown(VK_SHIFT);
 
         if (sim) {
             in.forward = true;
@@ -1527,7 +1995,8 @@ int main(int argc, char** argv) {
         }
 
         bool f3 = keyDown(VK_F3);
-        if (playing && f3 && !prevF3) showDebug = !showDebug;
+        if (playing && !roomSession && f3 && !prevF3) showDebug = !showDebug;
+        if (roomSession) showDebug = false;
         prevF3 = f3;
         bool f = keyDown('F');
         bool fPressed = playing && f && !prevF;
@@ -1568,7 +2037,10 @@ int main(int argc, char** argv) {
                     saveProfile();
                     appScreen = AppScreen::Start;
                     ui.appScreen = AppScreen::Start;
-                } else if (appScreen == AppScreen::RoomLobby) {
+                } else if (appScreen == AppScreen::RoomLobby || appScreen == AppScreen::JoinRoom ||
+                           appScreen == AppScreen::RoomLoading) {
+                    if (ui.portFieldActive) applyRoomPort();
+                    shutdownRoom();
                     roomTeams.clear();
                     roomPlayers.clear();
                     spectating = false;
@@ -1788,8 +2260,55 @@ int main(int argc, char** argv) {
                     refreshBackups();
                     ui.menuMessage = "已创建世界";
                 };
+                bool submitJoin = g_textSubmit && appScreen == AppScreen::JoinRoom;
                 if (g_textSubmit && appScreen == AppScreen::CreateWorld) tryCreateWorld();
+                if (g_textSubmit && appScreen == AppScreen::RoomLobby && ui.portFieldActive) applyRoomPort();
                 g_textSubmit = false;
+
+                auto parsePortText = [](const std::string& text) -> int {
+                    if (text.empty()) return -1;
+                    int p = 0;
+                    for (char c : text) {
+                        if (c < '0' || c > '9') return -1;
+                        p = p * 10 + (c - '0');
+                        if (p > 65535) return -1;
+                    }
+                    return p < 1 ? -1 : p;
+                };
+                auto tryJoinRoom = [&]() {
+                    int p = parsePortText(ui.joinPortText);
+                    if (p < 0) {
+                        ui.menuMessage = "端口无效";
+                        return;
+                    }
+                    std::string host = ui.joinHost;
+                    while (!host.empty() && (unsigned char)host.front() <= 32) host.erase(host.begin());
+                    while (!host.empty() && (unsigned char)host.back() <= 32) host.pop_back();
+                    if (host.empty()) host = "127.0.0.1";
+                    ui.joinHost = host;
+                    g_textTarget = nullptr;
+                    g_textDigits = false;
+                    ui.joinAddrActive = false;
+                    ui.joinPortActive = false;
+                    shutdownRoom();
+                    std::string err;
+                    if (!lobbyGuest.connect(host, (uint16_t)p, ui.playerName, err)) {
+                        ui.menuMessage = err.empty() ? "无法连接主机" : err;
+                        return;
+                    }
+                    roomHost = false;
+                    roomPort = p;
+                    roomHostAddr = host;
+                    ui.roomPort = p;
+                    ui.roomPortText = std::to_string(p);
+                    roomTeams.clear();
+                    roomPlayers.clear();
+                    pullGuestLobby();
+                    appScreen = AppScreen::RoomLobby;
+                    ui.appScreen = AppScreen::RoomLobby;
+                    ui.menuMessage.clear();
+                };
+                if (submitJoin) tryJoinRoom();
 
                 if (lmb && !prevLmb) {
                     if (appScreen == AppScreen::Start) {
@@ -1797,21 +2316,34 @@ int main(int argc, char** argv) {
                             appScreen = AppScreen::PlayerProfile;
                             ui.appScreen = AppScreen::PlayerProfile;
                             ui.nameFieldActive = true;
+                            g_textDigits = false;
+                            g_textMax = 64;
                             g_textTarget = &ui.playerName;
                             ui.menuMessage.clear();
                         } else if (ui.startHover == 0) {
                             beginRoom();
                         } else if (ui.startHover == 1) {
                             openExplore();
+                        } else if (ui.startHover == 2) {
+                            appScreen = AppScreen::JoinRoom;
+                            ui.appScreen = AppScreen::JoinRoom;
+                            ui.menuMessage.clear();
+                            ui.joinAddrActive = false;
+                            ui.joinPortActive = false;
+                            g_textTarget = nullptr;
+                            g_textDigits = false;
                         }
                     } else if (appScreen == AppScreen::PlayerProfile) {
                         if (ui.profileHover == 0) {
                             ui.nameFieldActive = true;
+                            g_textDigits = false;
+                            g_textMax = 64;
                             g_textTarget = &ui.playerName;
                         } else if (ui.profileHover == 1) {
                             importPlayerModel();
                         } else if (ui.profileHover == 2) {
                             g_textTarget = nullptr;
+                            g_textDigits = false;
                             ui.nameFieldActive = false;
                             if (ui.playerName.empty()) ui.playerName = "玩家";
                             saveProfile();
@@ -1821,24 +2353,75 @@ int main(int argc, char** argv) {
                         } else {
                             ui.nameFieldActive = false;
                             g_textTarget = nullptr;
+                            g_textDigits = false;
                         }
-                    } else if (appScreen == AppScreen::RoomLobby) {
-                        if (ui.lobbyJoinHover >= 0)
-                            joinRoomTeam(ui.lobbyJoinHover);
-                        else if (ui.lobbyBtnHover == 0)
-                            addRoomTeam();
-                        else if (ui.lobbyBtnHover == 1)
-                            startRoom();
-                        else if (ui.lobbyBtnHover == 2) {
+                    } else if (appScreen == AppScreen::JoinRoom) {
+                        if (ui.joinHover == 0) {
+                            ui.joinAddrActive = true;
+                            ui.joinPortActive = false;
+                            g_textDigits = false;
+                            g_textMax = 48;
+                            g_textTarget = &ui.joinHost;
+                        } else if (ui.joinHover == 1) {
+                            ui.joinPortActive = true;
+                            ui.joinAddrActive = false;
+                            g_textDigits = true;
+                            g_textMax = 5;
+                            g_textTarget = &ui.joinPortText;
+                        } else if (ui.joinHover == 2) {
+                            tryJoinRoom();
+                        } else if (ui.joinHover == 3) {
+                            g_textTarget = nullptr;
+                            g_textDigits = false;
+                            ui.joinAddrActive = false;
+                            ui.joinPortActive = false;
+                            appScreen = AppScreen::Start;
+                            ui.appScreen = AppScreen::Start;
+                            ui.menuMessage.clear();
+                        } else {
+                            ui.joinAddrActive = false;
+                            ui.joinPortActive = false;
+                            g_textTarget = nullptr;
+                            g_textDigits = false;
+                        }
+                    } else if (appScreen == AppScreen::RoomLoading) {
+                        if (ui.loadHover == 0) {
+                            shutdownRoom();
                             roomTeams.clear();
                             roomPlayers.clear();
                             spectating = false;
                             roomSession = false;
-                            world.reset(seed);
-                            world.setSaveEnabled(false);
                             appScreen = AppScreen::Start;
                             ui.appScreen = AppScreen::Start;
+                            ui.loadStatus.clear();
                             ui.menuMessage.clear();
+                        }
+                    } else if (appScreen == AppScreen::RoomLobby) {
+                        if (ui.portFieldHover && roomHost) {
+                            ui.portFieldActive = true;
+                            g_textDigits = true;
+                            g_textMax = 5;
+                            g_textTarget = &ui.roomPortText;
+                        } else if (ui.portFieldActive) {
+                            applyRoomPort();
+                        }
+                        if (!ui.portFieldActive) {
+                            if (ui.lobbyJoinHover >= 0)
+                                joinRoomTeam(ui.lobbyJoinHover);
+                            else if (ui.lobbyBtnHover == 0)
+                                addRoomTeam();
+                            else if (ui.lobbyBtnHover == 1)
+                                startRoom();
+                            else if (ui.lobbyBtnHover == 2) {
+                                shutdownRoom();
+                                roomTeams.clear();
+                                roomPlayers.clear();
+                                spectating = false;
+                                roomSession = false;
+                                appScreen = AppScreen::Start;
+                                ui.appScreen = AppScreen::Start;
+                                ui.menuMessage.clear();
+                            }
                         }
                     } else if (appScreen == AppScreen::Worlds) {
                         if (ui.worldDeleteHover >= 0 && ui.worldDeleteHover < (int)ui.worldNames.size()) {
@@ -2043,7 +2626,11 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     if (lmb && !prevLmb) {
-                        if (ui.menuHover == 0) { paused = false; settingsOpen = false; debugMenuOpen = false; }
+                        if (roomSession) {
+                            if (ui.menuHover == 0) { paused = false; settingsOpen = false; debugMenuOpen = false; }
+                            else if (ui.menuHover == 1) { settingsOpen = true; }
+                            else if (ui.menuHover == 2) leaveWorld();
+                        } else if (ui.menuHover == 0) { paused = false; settingsOpen = false; debugMenuOpen = false; }
                         else if (ui.menuHover == 1) { settingsOpen = true; }
                         else if (ui.menuHover == 2) { debugMenuOpen = true; }
                         else if (ui.menuHover == 3) leaveWorld();
@@ -2108,6 +2695,7 @@ int main(int argc, char** argv) {
                     if (world.getBlock(place.x, place.y, place.z) == AIR
                         && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
                         world.setBlock(place.x, place.y, place.z, carry.block, true);
+                        noteRoomEdit(place.x, place.y, place.z, carry.block);
                         carry.clear();
                         ui.hasPlacePreview = false;
                     }
@@ -2224,6 +2812,7 @@ int main(int argc, char** argv) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
                                         world.setBlock(place.x, place.y, place.z, sel.block, true);
+                                        noteRoomEdit(place.x, place.y, place.z, sel.block);
                                         if (--sel.count == 0) sel.clear();
                                     }
                                 }
@@ -2320,7 +2909,9 @@ int main(int argc, char** argv) {
             } else {
                 timeOfDay += dt * 80.0f;
                 if (timeOfDay >= (float)cfg::TICKS_PER_DAY) timeOfDay -= (float)cfg::TICKS_PER_DAY;
-                if (appScreen != AppScreen::Start && appScreen != AppScreen::PlayerProfile) {
+                if (appScreen != AppScreen::Start && appScreen != AppScreen::PlayerProfile &&
+                    appScreen != AppScreen::RoomLobby && appScreen != AppScreen::JoinRoom &&
+                    appScreen != AppScreen::RoomLoading) {
                     player.yaw += dt * 0.08f;
                     player.pitch = -0.12f;
                 }
@@ -2334,7 +2925,7 @@ int main(int argc, char** argv) {
 
         renderer.sync(world);
 
-        ui.showDebug = showDebug;
+        ui.showDebug = roomSession ? false : showDebug;
         ui.inventoryOpen = inventoryOpen;
         ui.bagLocked = inventoryOpen && (in.forward || in.back || in.left || in.right
             || (player.vel.x * player.vel.x + player.vel.z * player.vel.z) > 0.16f);
@@ -2343,10 +2934,10 @@ int main(int argc, char** argv) {
         ui.settingsOpen = settingsOpen;
         ui.mouseSens = mouseSens;
         ui.invertY = invertY;
-        ui.debugMenuOpen = debugMenuOpen;
+        ui.debugMenuOpen = roomSession ? false : debugMenuOpen;
         ui.tickSpeed = tickSpeed;
-        ui.humidityMode = humidityMode;
-        ui.privilegeMode = player.privilegeMode;
+        ui.humidityMode = roomSession ? false : humidityMode;
+        ui.privilegeMode = roomSession ? false : player.privilegeMode;
         ui.vitals = &player.vitals;
         ui.playerDead = player.dead;
         if (drag.active) { ui.held.block = drag.block; ui.held.count = (uint8_t)drag.count; }
@@ -2364,6 +2955,11 @@ int main(int argc, char** argv) {
         ui.roomTeams = roomTeams;
         ui.roomPlayers = roomPlayers;
         ui.roomMinPlayers = kRoomMinPlayers;
+        ui.roomHost = roomHost;
+        ui.roomSession = roomSession;
+        ui.roomPort = roomPort;
+        if (!ui.portFieldActive) ui.roomPortText = std::to_string(roomPort);
+        ui.remotes = roomSession ? remotes : std::vector<RemoteAvatar>{};
         ui.spectating = spectating && playing;
         ui.menuWorld = exploreScreen();
         ui.menuEye = menuEye;
