@@ -288,6 +288,25 @@ inline std::vector<BoneXform> evalPose(const Clip& c, float frame) {
     return out;
 }
 
+// Hip and legs. Upper-body strikes are stamped as a whole pose, and these
+// channels sit at rest — the same as idle. They must not replace walk or run.
+inline bool isLowerBodyBone(const std::string& name) {
+    if (name == "hip") return true;
+    return name.rfind("leg_", 0) == 0;
+}
+
+inline bool keyIsRest(const Key& k) {
+    const float e = 1.0e-4f;
+    return std::fabs(k.t.x) < e && std::fabs(k.t.y) < e && std::fabs(k.t.z) < e
+        && std::fabs(k.r.x) < e && std::fabs(k.r.y) < e && std::fabs(k.r.z) < e;
+}
+
+inline bool trackIsRest(const Track& tr) {
+    for (const Key& k : tr.keys)
+        if (!keyIsRest(k)) return false;
+    return true;
+}
+
 inline std::vector<BoneXform> evalPoseLayered(const Clip& base, float baseFrame,
                                              const Clip* const* layers, int nLayers, float layerFrame) {
     std::vector<BoneXform> out(base.bones.size());
@@ -298,11 +317,13 @@ inline std::vector<BoneXform> evalPoseLayered(const Clip& base, float baseFrame,
         bool fromLayer = false;
         for (int li = nLayers - 1; li >= 0; li--) {
             if (!layers[li]) continue;
-            if (findTrack(*layers[li], b.name) >= 0) {
-                k = evalBone(*layers[li], b.name, layerFrame);
-                fromLayer = true;
-                break;
-            }
+            int ti = findTrack(*layers[li], b.name);
+            if (ti < 0) continue;
+            if (isLowerBodyBone(b.name) && trackIsRest(layers[li]->tracks[ti]))
+                continue;
+            k = evalBone(*layers[li], b.name, layerFrame);
+            fromLayer = true;
+            break;
         }
         if (!fromLayer) k = evalBone(base, b.name, baseFrame);
         float local[9];
@@ -346,6 +367,17 @@ inline Vec3 toParentLocal(const Clip& c, int bi, float frame, const Vec3& world)
 inline std::string boneForPart(const Clip& c, const pm::Part& p) {
     std::string n = pm::partName(p);
     if (findBone(c, n) >= 0) return n;
+    // Several cloth pieces share one limb: leg_l_foot, leg_l_foot_2, ...
+    std::string best;
+    for (const Bone& b : c.bones) {
+        const std::string& bn = b.name;
+        if (bn.empty() || bn.size() >= n.size()) continue;
+        if (n.compare(0, bn.size(), bn) != 0) continue;
+        char sep = n[bn.size()];
+        if (sep != '_' && sep != '-') continue;
+        if (bn.size() > best.size()) best = bn;
+    }
+    if (!best.empty()) return best;
     if (p.type == 0 || p.type == 4 || p.kind == "hair" || p.kind == "haircard"
         || p.kind == "eye" || p.kind == "eyelid" || p.kind == "mouth") {
         if (findBone(c, "head") >= 0) return "head";

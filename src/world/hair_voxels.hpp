@@ -235,10 +235,11 @@ inline void shellClothParts(std::vector<Part>& parts) {
             continue;
         }
         if (src.name.find("neck") != std::string::npos) continue;
-        std::string key = src.name.empty() ? ("_" + std::to_string((int)segs.size())) : src.name;
-        if (src.name.empty()) key = "__anon_" + std::to_string((int)passthrough.size() + (int)segs.size());
-        else if (key.find("arm_l") != std::string::npos) key = "arm_l";
-        else if (key.find("arm_r") != std::string::npos) key = "arm_r";
+        // Keep each named segment (arm_l_shoulder vs arm_l_upper, and the same on the right).
+        // Collapsing every arm_* into one tube fused the shoulder joint to the upper arm.
+        std::string key = src.name.empty()
+            ? ("__anon_" + std::to_string((int)passthrough.size() + (int)segs.size()))
+            : src.name;
         Seg& s = segs[key];
         Vec3 a = src.center - src.half, b = src.center + src.half;
         if (!s.any) { s.tmpl = src; s.any = true; }
@@ -256,8 +257,15 @@ inline void shellClothParts(std::vector<Part>& parts) {
         // Part-tool blocks are named cloth / cloth_N and must stay the size that was saved.
         // Any block already at or under one paint cell on an axis is kept too: rebuilding
         // it as a paint-cell wall would inflate that axis up to the paint grid.
+        // A segment whose pieces are already thin walls (a finished sleeve or torso) is
+        // kept as authored, so a shoulder/upper split is not fused back into one tube.
         bool authored = key.rfind("cloth", 0) == 0;
-        if (authored || sx <= g + eps || sy <= g + eps || sz <= g + eps) {
+        bool allThin = true;
+        for (const Part& p : s.srcs) {
+            float ex = p.half.x * 2.0f, ey = p.half.y * 2.0f, ez = p.half.z * 2.0f;
+            if (ex > g + eps && ey > g + eps && ez > g + eps) allThin = false;
+        }
+        if (authored || allThin || sx <= g + eps || sy <= g + eps || sz <= g + eps) {
             for (Part& p : s.srcs) out.push_back(std::move(p));
             continue;
         }
