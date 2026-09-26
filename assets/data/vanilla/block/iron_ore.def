@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id iron_ore
+display Iron Ore
+kind block
+max_stack 1
+hardness 5
+durability 45
+efficiency 0
+weight 22
+tags 
+harvest_need pick
+harvest_drop iron_ore 1

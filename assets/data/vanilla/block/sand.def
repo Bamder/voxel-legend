@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id sand
+display Sand
+kind block
+max_stack 1
+hardness 1.4
+durability 8.8
+efficiency 0
+weight 12
+tags 
+harvest_need shovel
+harvest_drop sand 1

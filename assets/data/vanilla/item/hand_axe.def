@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id hand_axe
+display Hand Axe
+kind tool
+max_stack 1
+hardness 3.4
+durability 0
+efficiency 2.5
+charge_sec 1
+cooldown_sec 1
+weight 1.2
+tags axe,woodworking,one_hand

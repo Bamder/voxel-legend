@@ -1,0 +1,37 @@
+# MinGW / MSVC intermediates. Built executables (*.exe) are kept on purpose.
+*.o
+*.obj
+*.d
+*.gch
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.a
+*.dll
+*.so
+*.stackdump
+
+# Python bytecode from scratch scripts
+__pycache__/
+*.py[cod]
+
+# Runtime saves (chunk bins, player.bin, profile)
+GameSaves/
+world_save/
+
+# OS and IDE junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*~
+.vs/
+*.user
+*.suo
+*.ncb
+*.opensdf
+*.sdf

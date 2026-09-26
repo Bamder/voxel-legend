@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id shrub_stem
+display Shrub Stem
+kind block
+max_stack 1
+hardness 2.2
+durability 4.5
+efficiency 0
+weight 0.4
+tags 
+harvest_need axe
+harvest_drop stick 1

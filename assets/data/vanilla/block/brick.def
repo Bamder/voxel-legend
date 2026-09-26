@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id brick
+display Bricks
+kind block
+max_stack 1
+hardness 3.8
+durability 36
+efficiency 0
+weight 15
+tags 
+harvest_need pick
+harvest_drop brick 1

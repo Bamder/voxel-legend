@@ -1,0 +1,294 @@
+#pragma once
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include "../core/gl.hpp"
+#include "../core/math.hpp"
+#include "../world/player.hpp"
+#include "../world/world.hpp"
+#include "../world/vitals.hpp"
+
+namespace anim { struct Clip; }
+namespace mat { struct Model; }
+
+enum class AppScreen {
+    Playing = 0,
+    Start,
+    Worlds,
+    WorldDetail,
+    CreateWorld,
+    RoomLobby,
+    PlayerProfile
+};
+
+struct RoomTeamView {
+    std::string name;
+    float r = 1.0f, g = 1.0f, b = 1.0f;
+    bool spectator = false;
+};
+
+struct RoomPlayerView {
+    std::string name;
+    int team = -1;
+    bool local = false;
+};
+
+struct UIState {
+    bool showDebug = false;
+    bool inventoryOpen = false;
+    int selectedLeft = 0;   // 0..HAND_SLOTS-1, left-hand hotbar
+    int selectedRight = 0;  // 0..HAND_SLOTS-1, right-hand hotbar
+    int selectedSlot = 3;   // absolute right-hand inventory index (HAND_SLOTS + selectedRight)
+    const ItemSlot* inventory = nullptr; // 33 slots (left 3 + right 3 + main)
+    const ItemSlot* wear = nullptr;      // wear::Count slots; open ones sit left of the body
+    const ItemSlot* carrySlot = nullptr; // one-block carry (not part of the 6-slot bar)
+    ItemSlot held;                       // item currently being dragged
+    bool bagLocked = false;              // moving: backpack (non-hotbar) is grayed / unusable
+    bool hasTarget = false;
+    IVec3 targetBlock{ 0, 0, 0 };
+    bool hasPlacePreview = false; // carried block, local placement ghost
+    IVec3 placePreview{ 0, 0, 0 };
+    int targetFace = 0;
+    int targetPhys = -1;
+    int targetDrop = -1;
+    float breakProgress = 0.0f; // 0 intact .. 1 more cracks (targeted block)
+    bool hasBreakOverlay = false;
+    bool breakSod = false; // thinning sod overlay; dirt face stays drawn underneath
+
+    float fps = 0.0f;
+    int loadedChunks = 0;
+    float timeOfDay = 0.0f;
+    Vec3 playerPos{ 0, 0, 0 };
+    Vec3 playerVel{ 0, 0, 0 };
+    float yaw = 0.0f, pitch = 0.0f;
+    bool flying = false, onGround = false;
+    uint32_t seed = 0;
+
+    float mouseX = 0.0f, mouseY = 0.0f;
+    int hoveredSlot = -1;   // inventory slot under the mouse (-1 = none)
+    int hoveredWear = -1;   // open wear slot under the mouse (-1 = none)
+    int hoveredBlock = -1;  // palette block under the mouse (-1 = none)
+
+    // Pause menu + settings.
+    bool menuOpen = false;
+    bool settingsOpen = false;
+    float mouseSens = 0.0022f;
+    bool invertY = false;
+    int menuHover = -1;       // 0 resume, 1 settings, 2 quit
+    int settingsHover = -1;   // 0 back, 1 invert-y toggle
+    float sliderX = 0, sliderY = 0, sliderW = 0, sliderH = 0; // sensitivity slider rect
+
+    // Debug menu (game-tick speed + time-of-day control).
+    bool debugMenuOpen = false;
+    float tickSpeed = 1.0f;   // game-tick multiplier (0 = pause, up to 20x)
+    float tickSliderX = 0, tickSliderY = 0, tickSliderW = 0, tickSliderH = 0;
+    float timeSliderX = 0, timeSliderY = 0, timeSliderW = 0, timeSliderH = 0;
+    int debugHover = -1;      // 0 back, 1 humidity, 2 mat, 3 model, 4 dummy, 5 privilege, 6 fly
+    bool humidityMode = false; // render air as red/blue humidity blocks
+    bool privilegeMode = false; // 权限模式 (debug): skip survival vitals / death
+
+    const vitals::Vitals* vitals = nullptr;
+    bool playerDead = false;
+    int deathHover = -1;      // 0 = respawn
+
+    // Humidity label for the air block under the crosshair.
+    bool hasHumidityBlock = false;
+    IVec3 humidityBlock{ 0, 0, 0 };
+    int humidityValue = 0;
+    float humidityScreenX = 0, humidityScreenY = 0;
+
+    // Material editor (texture painter).
+    bool matEditorOpen = false;
+    int camMode = 0;                  // 0 first-person, 1 third-person (over-shoulder), 2 second-person (front)
+    bool dummyActive = false;         // spawn an observation dummy player
+    Vec3 dummyPos{ 0, 0, 0 };         // dummy's fixed position (set when spawned)
+    bool dummyPlaced = false;
+    int matEditorTile = TEX_DIRT;      // tile currently being edited
+    float matEditorTileX = 0, matEditorTileY = 0, matEditorTileSize = 0;
+    int matEditorHoverX = -1, matEditorHoverY = -1;
+    float matEditorR = 0.0f, matEditorG = 1.0f, matEditorB = 0.0f, matEditorA = 1.0f;
+    int matEditorPaletteHover = -1;
+    bool matEditorDirty = false;
+
+    // Title / world-select menus (shown before entering a world).
+    AppScreen appScreen = AppScreen::Start;
+    std::vector<std::string> worldNames;
+    std::vector<std::string> backupNames;
+    std::string selectedWorld;
+    std::string newWorldName;
+    std::string menuMessage;
+    int selectedBackup = -1;
+    int worldScroll = 0;
+    int backupScroll = 0;
+    int startHover = -1;       // 0 create room, 1 free explore (2..4 locked)
+    // Create-room lobby. Team 0 is the spectator team when present.
+    std::vector<RoomTeamView> roomTeams;
+    std::vector<RoomPlayerView> roomPlayers;
+    int roomMinPlayers = 1;
+    int lobbyJoinHover = -1;   // team index of the "+" under the cursor
+    int lobbyBtnHover = -1;    // 0 new team, 1 start, 2 back
+    bool spectating = false;   // in match, camera only
+    std::string playerName = "玩家";
+    bool portraitHover = false;
+    float portraitX = 0.0f;
+    int profileHover = -1;     // 0 name field, 1 import, 2 back
+    bool menuWorld = false;    // free-explore backdrop
+    Vec3 menuEye{ 0, 0, 0 };
+    Vec3 menuTarget{ 0, 0, 0 };
+    Vec3 menuFeet{ 0, 0, 0 };
+    int worldItemHover = -1;
+    int worldDeleteHover = -1; // row whose 删除 button is hovered
+    int worldsBtnHover = -1;   // 0 create, 1 back
+    int detailBtnHover = -1;   // 0 enter, 1 backup, 2 restore, 3 delete, 4 back
+    bool deleteArmed = false;  // second click confirms delete
+    std::string pendingDelete; // world name waiting for confirm on the list
+    int backupItemHover = -1;
+    int createBtnHover = -1;   // 0 name field, 1 create, 2 back
+    bool nameFieldActive = false;
+};
+
+class Renderer {
+public:
+    bool init(int screenW, int screenH);
+    void shutdown();
+    void setScreenSize(int w, int h);
+    void sync(const World& world);
+    void render(const World& world, const Player& player, float timeOfDay, UIState& ui);
+    void reloadPlayerAssets();
+
+    struct Sky {
+        Vec3 sunDir, moonDir, sunColor, ambient, fogColor, zenith, horizon, below, moonColor;
+        float sunDisc, moonDisc, starAmount;
+    };
+    static void computeSky(float timeOfDay, Sky& s);
+
+    // Text measurement (px) of a UTF-8 string at scale 1.0 (caches the glyph texture).
+    void stringSize(const std::string& s, int& w, int& h);
+
+    // Material editor: persist an edited tile image to disk + re-upload the atlas.
+    void saveMaterialTile(int tile);
+
+private:
+    struct TextTex { unsigned int tex = 0; int w = 0, h = 0; };
+    struct ChunkGL {
+        unsigned int vaoO = 0, vboO = 0, vaoT = 0, vboT = 0;
+        int opaqueCount = 0, transparentCount = 0;
+        bool created = false;
+    };
+    struct UIBatch {
+        std::vector<float> data;
+        unsigned int vao = 0, vbo = 0;
+    };
+
+    unsigned int progWorld = 0, progSky = 0, progFlat = 0, progUI = 0, progUIText = 0, progHum = 0, progHumTex = 0;
+    int uMVP = 0, uChunkOffset = 0, uAtlas = 0, uSunDir = 0, uSunColor = 0, uAmbient = 0;
+    int uFogColor = 0, uFogDensity = 0, uBlockScale = 0;
+    int uBreakRel = 0, uBreakProgress = 0, uBreakSod = 0, uBreakNrm = 0, uCrackReveal = 0;
+    int uCrackFolds = 0, uCrackColor = 0, uCrackSeed = 0, uCrackShown = 0;
+    int uCrackLenMu0 = 0, uCrackLenMu1 = 0, uCrackLenSig = 0;
+    int uCrackWidMu0 = 0, uCrackWidMu1 = 0, uCrackWidSig = 0;
+    int uCrackStep = 0, uCrackGaussZ = 0, uCrackEdge = 0, uCrackCorner = 0;
+    int uInvVP = 0, uSkySunDir = 0, uSkyMoonDir = 0, uZenith = 0, uHorizon = 0, uBelow = 0;
+    int uSkySunColor = 0, uSkyMoonColor = 0, uSunDisc = 0, uMoonDisc = 0, uStarAmount = 0;
+    int uFlatMVP = 0, uFlatColor = 0;
+    int uHumMVP = 0, uHumTexMVP = 0, uHumTexAtlas = 0;
+    int uHumLit = 0, uHumSunDir = 0, uHumSunColor = 0, uHumAmbient = 0, uHumFogColor = 0, uHumFogDensity = 0;
+    int uHumTexLit = 0, uHumTexSunDir = 0, uHumTexSunColor = 0, uHumTexAmbient = 0, uHumTexFogColor = 0, uHumTexFogDensity = 0;
+    int uUIScreen = 0, uUITex = 0, uUITextScreen = 0, uUITextTex = 0;
+
+    unsigned int atlasTex = 0, whiteTex = 0, cameraIconTex = 0;
+    unsigned int skinTex = 0;
+    std::unordered_map<int, unsigned int> garmentTex;
+    std::unordered_map<std::string, unsigned int> overlayTex;
+    std::unordered_map<std::string, unsigned int> extraMatTex;
+    unsigned int skyVAO = 0, skyVBO = 0;
+    unsigned int outlineVAO = 0, outlineVBO = 0;
+    unsigned int fallVAO = 0, fallVBO = 0;
+    unsigned int humVAO = 0, humVBO = 0;
+    unsigned int humTexVAO = 0, humTexVBO = 0;
+
+    std::unordered_map<std::string, TextTex> m_textCache;
+    std::unordered_map<int64_t, ChunkGL> m_chunkGL;
+    UIBatch m_batch;
+    std::vector<Vertex> m_fallMesh;
+
+    int scrW = 1280, scrH = 720;
+
+    void uploadChunk(ChunkGL& cg, const World::Chunk& ch);
+    void destroyChunkGL(ChunkGL& cg);
+    unsigned int renderTextTexture(const std::string& utf8, int& outW, int& outH);
+    void drawSky(const Sky& s, const Mat4& invVP);
+    void drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const Sky& s,
+                   const Vec3& breakRel, float breakProgress, float breakSod,
+                   const Vec3& breakNrm);
+    void drawFallingTrees(const World& w, const Vec3& eye, const Mat4& vp, const Vec3& sunDir);
+    void drawDrops(const World& w, const Vec3& eye, const Mat4& vp);
+    void drawOutlineOriented(const Mat4& vp, const Vec3& eye, const PhysicsIsland& t,
+                             int lx, int ly, int lz, float r, float g, float b, float a);
+    void drawOutline(const Mat4& vp, const Vec3& eye, const IVec3& block,
+                     float r, float g, float b, float a);
+    void drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, float size, float yaw,
+                       float r, float g, float b, float a);
+    void drawBreakOverlay(const Mat4& vp, const Vec3& eye, const UIState& ui, const World& world);
+    void drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,
+                       int phys, int bx, int by, int bz, int face,
+                       const float* steps, int nSteps);
+    void drawHumidity(const World& w, const Vec3& eye, const Mat4& vp);
+    void drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, float pitch,
+                         const Vec3& eye, const Mat4& vp, bool hideHead,
+                         const anim::Clip* clip, float frame, uint8_t heldRight = AIR,
+                         uint8_t heldLeft = AIR, uint8_t carried = AIR,
+                         const vitals::Vitals* tint = nullptr,
+                         const anim::Clip* strike = nullptr, float strikeAt = 0.0f,
+                         const Sky* sun = nullptr,
+                         uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR);
+    void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);
+
+    void quad(float x, float y, float w, float h, float u0, float v0, float u1, float v1,
+              float r, float g, float b, float a);
+    void scrimFade(float w, float h);
+    void tri(float x0, float y0, float x1, float y1, float x2, float y2,
+             float r, float g, float b, float a);
+    void drawFlag(float x, float y, float w, float h, float r, float g, float b);
+    void flushUI(unsigned int prog, unsigned int tex);
+    void drawString(const std::string& s, float x, float y, float scale, float r, float g, float b, float a);
+    void text(float x, float y, float scale, float r, float g, float b, float a, const char* fmt, ...);
+    void centeredText(const std::string& s, float cx, float cy, float scale, float r, float g, float b, float a);
+
+    // Crosshair hints, packed left to right from the right side of the crosshair.
+    // A "/" is inserted between neighbors. Add future hints by appending another entry.
+    enum class CrosshairKeyKind { Text, MouseRight };
+    struct CrosshairPrompt {
+        CrosshairKeyKind kind = CrosshairKeyKind::Text;
+        const char* key = "";
+        const char* action = "";
+    };
+    struct CrosshairPromptBox {
+        float x = 0, y = 0, w = 0, h = 0;
+        CrosshairKeyKind kind = CrosshairKeyKind::Text;
+        std::string key, action;
+    };
+    void layoutCrosshairPrompts(const CrosshairPrompt* items, int count, float originX, float crossY,
+                                std::vector<CrosshairPromptBox>& out);
+    void drawCrosshairPromptChrome(const std::vector<CrosshairPromptBox>& boxes);
+    void drawCrosshairPromptText(const std::vector<CrosshairPromptBox>& boxes);
+    void drawBlockIcon(uint8_t block, float x, float y, float size);
+    void drawModelItemIcon(uint8_t block, const mat::Model& model, float x, float y, float size);
+    void buttonChrome(float x, float y, float w, float h, bool hovered,
+                      float fr = 0.47f, float fg = 0.47f, float fb = 0.47f);
+    void drawMenu(UIState& ui);
+    void drawSettings(UIState& ui);
+    void drawDebugMenu(UIState& ui);
+    void drawStartMenu(UIState& ui);
+    void drawPlayerProfile(UIState& ui);
+    void drawRoomLobby(UIState& ui);
+    void drawMenuPortrait(const World& world, float timeOfDay, UIState& ui);
+    void drawWorldsMenu(UIState& ui);
+    void drawWorldDetail(UIState& ui);
+    void drawCreateWorld(UIState& ui);
+    void drawInventory(UIState& ui);
+    void drawInventoryDoll(UIState& ui, float x, float y, float w, float h);
+    void drawDeath(UIState& ui);
+    void drawMaterialEditor(UIState& ui);
+    void paletteLayout(int& x0, int& y0, int& cell, int& cols, int& rows) const;
+};

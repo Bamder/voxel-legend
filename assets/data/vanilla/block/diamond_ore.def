@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id diamond_ore
+display Diamond Ore
+kind block
+max_stack 1
+hardness 6
+durability 45
+efficiency 0
+weight 20
+tags 
+harvest_need pick
+harvest_drop diamond_ore 1

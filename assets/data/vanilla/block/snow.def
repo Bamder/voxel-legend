@@ -1,0 +1,12 @@
+# VOXEL LEGEND data pack entry
+id snow
+display Snow
+kind block
+max_stack 1
+hardness 0.4
+durability 6.3
+efficiency 0
+weight 3
+tags 
+harvest_need shovel
+harvest_drop snow 1
