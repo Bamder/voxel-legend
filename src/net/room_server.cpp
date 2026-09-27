@@ -9,6 +9,7 @@
 #include "../core/config.hpp"
 #include "../world/animation.hpp"
 #include "../world/world.hpp"
+#include "../world/matchmap.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -39,6 +40,28 @@ struct SeenTree {
     uint32_t rev = 0;
 };
 
+struct MineId {
+    uint32_t tree = 0;
+    int x = 0, y = 0, z = 0;
+    bool operator==(const MineId& o) const {
+        return tree == o.tree && x == o.x && y == o.y && z == o.z;
+    }
+};
+
+struct MineIdHash {
+    size_t operator()(const MineId& k) const {
+        size_t h = k.tree;
+        h = h * 1315423911u + (unsigned)k.x;
+        h = h * 1315423911u + (unsigned)k.y;
+        h = h * 1315423911u + (unsigned)k.z;
+        return h;
+    }
+};
+
+struct SeenMine {
+    uint32_t serial = 0;
+};
+
 struct SrvChunk {
     uint32_t rev = 0;
     bool diverged = false;
@@ -56,6 +79,13 @@ struct SClient {
     std::string name;
     int team = -1;
     bool spectator = false;
+    bool landed = true;
+    bool deathDeploy = false;
+    bool pin = false;
+    int dbx = 0, dbz = 0;
+    float pinLeft = 0.0f;
+    float fade = 0.0f;
+    float landX = 0, landY = 0, landZ = 0;
     bool known = false;
     bool sentWelcome = false;
     bool hasInput = false;
@@ -82,6 +112,7 @@ struct SClient {
     int hashCursor = 0;
     std::unordered_map<uint32_t, SeenTree> trees;
     bool treeResync = false;
+    std::unordered_map<MineId, SeenMine, MineIdHash> mines;
 };
 
 struct Seat {
@@ -125,6 +156,31 @@ void applyBark(World& world, const PlayInputNet::BarkEdit& e) {
     world.ensureColumn(cx, cz);
     if (e.place) world.addBarkFace(e.x, e.y, e.z, e.face);
     else world.takeBarkFace(e.x, e.y, e.z, e.face);
+}
+
+void applyMine(World& world, const PlayInputNet::MineEdit& e) {
+    int phys = -1;
+    if (e.tree != 0) {
+        const std::vector<PhysicsIsland>& islands = world.physicsIslands();
+        phys = -2;
+        for (int i = 0; i < (int)islands.size(); i++) {
+            if (islands[(size_t)i].netId == e.tree) { phys = i; break; }
+        }
+        if (phys < 0) return;
+    } else if (e.y < 0 || e.y >= cfg::WORLD_H) {
+        return;
+    }
+    bool broke = world.applyMineHit(phys, e.x, e.y, e.z, e.tool, e.face);
+    if (!broke) return;
+    if (phys < 0) {
+        int cx = floorDiv(e.x, cfg::CHUNK_X);
+        int cz = floorDiv(e.z, cfg::CHUNK_Z);
+        world.ensureColumn(cx, cz);
+        world.setBlock(e.x, e.y, e.z, AIR, false, false);
+    } else {
+        uint8_t drop = AIR;
+        world.breakPhysBlock(phys, e.x, e.y, e.z, drop);
+    }
 }
 
 void queueBase(SClient& c, int64_t col, bool front) {
@@ -216,7 +272,7 @@ void fillChunkSync(World& world, std::unordered_map<int64_t, SrvChunk>& srv, SCl
                 base.sod.reserve(ch->sodFaces.size());
                 for (const World::Chunk::SodFace& sf : ch->sodFaces) {
                     if (sf.face >= 6) continue;
-                    base.sod.push_back(AuthSodNet{ sf.x, sf.z, sf.y, sf.face, sf.stage });
+                    base.sod.push_back(AuthSodNet{ sf.x, sf.z, sf.y, sf.face, sf.stage, World::quantSodRem(sf.rem) });
                 }
                 base.bark.reserve(ch->barkFaces.size());
                 for (const World::Chunk::BarkFace& bf : ch->barkFaces)
@@ -261,7 +317,7 @@ void fillChunkSync(World& world, std::unordered_map<int64_t, SrvChunk>& srv, SCl
             if (rd.sod) {
                 delta.sods.reserve(rd.sods.size());
                 for (const World::AuthSod& s : rd.sods)
-                    delta.sods.push_back(AuthSodNet{ s.x, s.z, s.y, s.face, s.stage });
+                    delta.sods.push_back(AuthSodNet{ s.x, s.z, s.y, s.face, s.stage, s.rem });
             }
             delta.bark = rd.bark;
             if (rd.bark) {
@@ -433,6 +489,57 @@ void fillTrees(World& world, SClient& c, PlayDeltaNet& d, uint32_t serverTick) {
     d.treeHash = world.treeAuthHashOf(ids);
 }
 
+bool mineVisible(const SClient& c, const World& world, const World::MineView& v) {
+    if (v.tree != 0) {
+        for (const PhysicsIsland& t : world.physicsIslands())
+            if (t.netId == v.tree) return treeVisible(c, t);
+        return false;
+    }
+    int pcx = chunkCol(c.x, cfg::CHUNK_X);
+    int pcy = chunkCol(c.y, cfg::CHUNK_Y);
+    int pcz = chunkCol(c.z, cfg::CHUNK_Z);
+    int cx = floorDiv(v.x, cfg::CHUNK_X);
+    int cy = floorDiv(v.y, cfg::CHUNK_Y);
+    int cz = floorDiv(v.z, cfg::CHUNK_Z);
+    int dx = std::abs(cx - pcx);
+    int dy = std::abs(cy - pcy);
+    int dz = std::abs(cz - pcz);
+    return std::max(dx, std::max(dy, dz)) <= cfg::LOAD_RADIUS;
+}
+
+void fillMines(World& world, SClient& c, PlayDeltaNet& d) {
+    std::vector<World::MineView> all;
+    world.collectMineViews(all);
+    std::unordered_set<MineId, MineIdHash> now;
+    for (const World::MineView& v : all) {
+        if (!mineVisible(c, world, v)) continue;
+        MineId id{ v.tree, v.x, v.y, v.z };
+        now.insert(id);
+        auto seen = c.mines.find(id);
+        if (seen != c.mines.end() && seen->second.serial == v.serial) continue;
+        if (d.mines.size() >= 32) continue;
+        MineNet m;
+        m.tree = v.tree;
+        m.x = v.x;
+        m.y = v.y;
+        m.z = v.z;
+        m.rem = v.rem;
+        m.serial = v.serial;
+        for (int i = 0; i < v.nHits && i < World::kMaxMineHits; i++)
+            m.hits.push_back(MineHitNet{ v.hits[i].step, v.hits[i].face });
+        d.mines.push_back(std::move(m));
+        c.mines[id].serial = v.serial;
+    }
+    std::vector<MineId> drop;
+    for (const auto& kv : c.mines)
+        if (!now.count(kv.first)) drop.push_back(kv.first);
+    for (const MineId& id : drop) {
+        if (d.mineGone.size() >= 32) break;
+        d.mineGone.push_back(MineGoneNet{ id.tree, id.x, id.y, id.z });
+        c.mines.erase(id);
+    }
+}
+
 bool chunksVisible(const SClient& a, const SClient& b) {
     int dx = std::abs(chunkCol(a.x, cfg::CHUNK_X) - chunkCol(b.x, cfg::CHUNK_X));
     int dz = std::abs(chunkCol(a.z, cfg::CHUNK_Z) - chunkCol(b.z, cfg::CHUNK_Z));
@@ -532,6 +639,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     World world(seed);
     world.setSaveEnabled(false);
     world.reset(seed);
+    world.setMatchBounds(true);
     world.setAuthCapture(true);
     world.setKeepEdited(true);
     world.setTagTrees(true);
@@ -588,6 +696,32 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     float tickAcc = 0.0f;
     uint32_t serverTick = 0;
 
+    auto broadcastDeploy = [&]() {
+        for (SClient& c : clients) {
+            if (!c.sentWelcome || c.team < 1 || c.team > matchmap::kCombatTeams) continue;
+            std::vector<DeployPinNet> pins;
+            for (const SClient& o : clients) {
+                if (!o.sentWelcome || o.team != c.team) continue;
+                DeployPinNet pin;
+                pin.id = o.id;
+                pin.name = o.name;
+                pin.bx = o.dbx;
+                pin.bz = o.dbz;
+                if (o.pin && !o.landed) {
+                    pin.phase = 1;
+                    pin.t = o.pinLeft;
+                    pins.push_back(pin);
+                } else if (o.landed && o.fade > 0.01f) {
+                    pin.phase = 2;
+                    pin.t = o.fade;
+                    pins.push_back(pin);
+                }
+            }
+            c.conn.send((uint16_t)RoomMsg::DeploySync, encodeDeploySync(pins));
+            c.conn.pump();
+        }
+    };
+
     while (true) {
         for (;;) {
             SOCKET c = accept(listenSock, nullptr, nullptr);
@@ -631,17 +765,35 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.id = nextId++;
                     c.known = true;
                     hadClient = true;
-                    float ox = (float)(spawnSlot % 4) * 1.5f;
-                    float oz = (float)(spawnSlot / 4) * 1.5f;
-                    spawnSlot++;
-                    c.x = base.x + ox;
-                    c.y = base.y;
-                    c.z = base.z + oz;
+                    c.landed = c.spectator || c.team < 1 || c.team > matchmap::kCombatTeams;
+                    c.pin = false;
+                    c.fade = 0.0f;
+                    int bx = (int)std::floor(base.x / S);
+                    int bz = (int)std::floor(base.z / S);
+                    if (!c.landed) {
+                        matchmap::Zone zone = matchmap::combatZone(c.team - 1);
+                        bx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                        bz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                    }
+                    int by = world.surfaceHeight(bx, bz);
+                    float ox = 0.0f, oz = 0.0f;
+                    if (c.landed) {
+                        ox = (float)(spawnSlot % 4) * 1.5f;
+                        oz = (float)(spawnSlot / 4) * 1.5f;
+                        spawnSlot++;
+                    }
+                    c.x = (bx + 0.5f) * S + ox;
+                    c.y = (float)(by + 3) * S;
+                    c.z = (bz + 0.5f) * S + oz;
+                    c.landX = c.x;
+                    c.landY = c.y;
+                    c.landZ = c.z;
                     c.yaw = 0.4f;
                     c.pitch = -0.15f;
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
                     if (!decodePlayInput(p, end, in)) continue;
+                    float keepX = c.x, keepY = c.y, keepZ = c.z;
                     c.x = in.x;
                     c.y = in.y;
                     c.z = in.z;
@@ -650,6 +802,27 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.bodyYaw = in.bodyYaw;
                     c.vx = in.vx;
                     c.vz = in.vz;
+                    bool holdPos = !c.landed;
+                    if (!holdPos && c.fade > 0.0f) {
+                        float dx = c.x - c.landX;
+                        float dz = c.z - c.landZ;
+                        if (dx * dx + dz * dz > 9.0f) holdPos = true;
+                    }
+                    if (holdPos) {
+                        c.x = keepX;
+                        c.y = keepY;
+                        c.z = keepZ;
+                        c.vx = 0.0f;
+                        c.vz = 0.0f;
+                    } else {
+                        Vec3 p{ c.x, c.y, c.z };
+                        Vec3 v{ c.vx, 0.0f, c.vz };
+                        matchmap::clampOutside(p, v);
+                        c.x = p.x;
+                        c.z = p.z;
+                        c.vx = v.x;
+                        c.vz = v.z;
+                    }
                     c.flying = (in.flags & kPfFly) != 0;
                     c.sprinting = (in.flags & kPfSprint) != 0;
                     c.heldL = in.heldL;
@@ -666,7 +839,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.pickRaised = in.pickRaised;
                     c.hasInput = true;
                     c.spectator = in.spectator || c.team == 0;
-                    if (!c.spectator) {
+                    if (!c.spectator && c.landed && !holdPos) {
+                        for (const PlayInputNet::MineEdit& e : in.mines) applyMine(world, e);
                         for (const BlockEditNet& e : in.edits) applyEdit(world, e);
                         for (const PlayInputNet::BarkEdit& e : in.bark) applyBark(world, e);
                     }
@@ -675,6 +849,30 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         c.seen.erase(chunkKey(ask.cx, ask.cy, ask.cz));
                         queueBase(c, columnKey(ask.cx, ask.cz), true);
                     }
+                } else if (c.sentWelcome && type == (uint16_t)RoomMsg::Deploy) {
+                    uint8_t action = 0;
+                    int bx = 0, bz = 0;
+                    if (!decodeDeploy(p, end, action, bx, bz)) continue;
+                    if (c.spectator || c.team < 1 || c.team > matchmap::kCombatTeams) continue;
+                    if (action == 2) {
+                        c.landed = false;
+                        c.deathDeploy = true;
+                        c.pin = false;
+                        c.pinLeft = 0.0f;
+                        c.fade = 0.0f;
+                        continue;
+                    }
+                    if (c.landed) continue;
+                    if (action == 0) {
+                        c.pin = false;
+                        c.pinLeft = 0.0f;
+                        continue;
+                    }
+                    if (action != 1 || !matchmap::blockInZone(c.team - 1, bx, bz)) continue;
+                    c.pin = true;
+                    c.dbx = bx;
+                    c.dbz = bz;
+                    c.pinLeft = c.deathDeploy ? matchmap::kDeployDeathSeconds : matchmap::kDeploySeconds;
                 }
             }
             if (c.conn.dead()) {
@@ -725,6 +923,34 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                 tickAcc -= 1.0f / (float)cfg::TICKS_PER_SECOND;
                 steps++;
                 serverTick++;
+                {
+                    const float stepDt = 1.0f / (float)cfg::TICKS_PER_SECOND;
+                    for (SClient& c : clients) {
+                        if (!c.sentWelcome) continue;
+                        if (c.pin && !c.landed) {
+                            c.pinLeft -= stepDt;
+                            if (c.pinLeft <= 0.0f) {
+                                c.pinLeft = 0.0f;
+                                c.pin = false;
+                                c.landed = true;
+                                c.deathDeploy = false;
+                                c.fade = 1.0f;
+                                int by = world.surfaceHeight(c.dbx, c.dbz);
+                                c.landX = (c.dbx + 0.5f) * S;
+                                c.landY = (float)(by + 3) * S;
+                                c.landZ = (c.dbz + 0.5f) * S;
+                                c.x = c.landX;
+                                c.y = c.landY;
+                                c.z = c.landZ;
+                                c.vx = 0.0f;
+                                c.vz = 0.0f;
+                            }
+                        } else if (c.landed && c.fade > 0.0f) {
+                            c.fade -= stepDt / matchmap::kDeployFade;
+                            if (c.fade < 0.0f) c.fade = 0.0f;
+                        }
+                    }
+                }
                 for (int sub = 0; sub < 6; sub++) world.treeFallPhysics(cfg::FIXED_DT);
                 world.treeFallGameTick();
                 world.sodTick(2048, serverTick);
@@ -738,6 +964,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     d.serverTick = serverTick;
                     fillChunkSync(world, srvChunks, c, d, serverTick);
                     fillTrees(world, c, d, serverTick);
+                    fillMines(world, c, d);
                     std::vector<uint32_t> visible;
                     d.players.push_back(poseOf(c));
                     for (const SClient& o : clients) {
@@ -757,6 +984,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.conn.send((uint16_t)RoomMsg::PlayDelta, encodePlayDelta(d));
                     c.conn.pump();
                 }
+                broadcastDeploy();
             }
         }
 

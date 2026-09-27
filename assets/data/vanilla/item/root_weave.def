@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id root_weave
+display 根须织毯
+kind item
+max_stack 1
+hardness 0.4
+durability 2
+efficiency 0
+weight 0.3
+wrong_tool_resist 1
+tags 
+harvest_need none
+harvest_drop root_weave 1

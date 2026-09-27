@@ -532,6 +532,8 @@ void GameClient::close() {
     dead = false;
     why.clear();
     deltas.clear();
+    deploySnap.clear();
+    deployFresh = false;
     id = 0;
 }
 
@@ -569,6 +571,12 @@ void GameClient::pumpWelcome() {
         } else if (type == (uint16_t)RoomMsg::PlayDelta && haveWelcome) {
             PlayDeltaNet d;
             if (decodePlayDelta(p, e, d)) deltas.push_back(std::move(d));
+        } else if (type == (uint16_t)RoomMsg::DeploySync && haveWelcome) {
+            std::vector<DeployPinNet> pins;
+            if (decodeDeploySync(p, e, pins)) {
+                deploySnap.swap(pins);
+                deployFresh = true;
+            }
         }
     }
 }
@@ -615,10 +623,24 @@ void GameClient::sendInput(const PlayInputNet& in) {
     conn.pump();
 }
 
+void GameClient::sendDeploy(uint8_t action, int bx, int bz) {
+    if (phase != Phase::Play) return;
+    conn.send((uint16_t)RoomMsg::Deploy, encodeDeploy(action, bx, bz));
+    conn.pump();
+}
+
 std::vector<PlayDeltaNet> GameClient::takeDeltas() {
     std::vector<PlayDeltaNet> o;
     o.swap(deltas);
     return o;
+}
+
+bool GameClient::takeDeploy(std::vector<DeployPinNet>& out) {
+    if (!deployFresh) return false;
+    out.swap(deploySnap);
+    deploySnap.clear();
+    deployFresh = false;
+    return true;
 }
 
 ServerProcess::~ServerProcess() { kill(); }

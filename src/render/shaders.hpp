@@ -71,8 +71,22 @@ uniform float uCrackStep[12]; // per-hit (step / maxDurability)
 uniform float uCrackGaussZ;   // |z| cap of the truncated normal
 uniform vec4 uCrackEdge;      // back-support on -U +U -V +V
 uniform vec4 uCrackCorner;    // back-support on four diagonal neighbors
+uniform vec4 uBorderXZ;       // playable minX, maxX, minZ, maxZ
+uniform float uRimHalf;       // world units; opaque at this distance past the edge. 0 = off
+uniform vec3 uCameraPos;
 
 out vec4 fragColor;
+
+float borderFogAt(vec2 xz) {
+    if (uRimHalf <= 0.001) return 0.0;
+    float ox = 0.0;
+    float oz = 0.0;
+    if (xz.x < uBorderXZ.x) ox = uBorderXZ.x - xz.x;
+    else if (xz.x > uBorderXZ.y) ox = xz.x - uBorderXZ.y;
+    if (xz.y < uBorderXZ.z) oz = uBorderXZ.z - xz.y;
+    else if (xz.y > uBorderXZ.w) oz = xz.y - uBorderXZ.w;
+    return clamp(max(ox, oz) / uRimHalf, 0.0, 1.0);
+}
 
 float crackHash(vec3 p) {
     return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
@@ -152,6 +166,8 @@ void main() {
         float dist = length(vLocalPos + uChunkOffset);
         float f = 1.0 - exp(-uFogDensity * dist);
         col = mix(col, uFogColor, clamp(f, 0.0, 1.0));
+        vec3 world = uCameraPos + vLocalPos + uChunkOffset;
+        col = mix(col, vec3(0.78, 0.79, 0.80), borderFogAt(world.xz));
         fragColor = vec4(col, 0.94);
         return;
     }
@@ -174,6 +190,8 @@ void main() {
     float dist = length(vLocalPos + uChunkOffset);
     float f = 1.0 - exp(-uFogDensity * dist);
     col = mix(col, uFogColor, clamp(f, 0.0, 1.0));
+    vec3 world = uCameraPos + vLocalPos + uChunkOffset;
+    col = mix(col, vec3(0.78, 0.79, 0.80), borderFogAt(world.xz));
     fragColor = vec4(col, tex.a * vAlpha);
 }
 )GLSL";
@@ -205,6 +223,9 @@ uniform vec3 uMoonColor;
 uniform float uSunDisc;     // cos(angular radius)
 uniform float uMoonDisc;
 uniform float uStarAmount;  // 0..1
+uniform vec4 uBorderXZ;
+uniform float uRimHalf;
+uniform vec3 uCameraPos;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
@@ -235,6 +256,28 @@ void main() {
         star *= uStarAmount;
         star *= smoothstep(0.02, 0.18, d.y);
         sky += vec3(star);
+    }
+
+    if (uRimHalf > 0.001) {
+        vec2 o = uCameraPos.xz;
+        vec2 r = d.xz;
+        vec2 bmin = vec2(uBorderXZ.x - uRimHalf, uBorderXZ.z - uRimHalf);
+        vec2 bmax = vec2(uBorderXZ.y + uRimHalf, uBorderXZ.w + uRimHalf);
+        bool outside = o.x < bmin.x || o.x > bmax.x || o.y < bmin.y || o.y > bmax.y;
+        float t = 0.0;
+        if (!outside) {
+            float tx = 1e9;
+            float tz = 1e9;
+            if (r.x > 1e-5) tx = (bmax.x - o.x) / r.x;
+            else if (r.x < -1e-5) tx = (bmin.x - o.x) / r.x;
+            if (r.y > 1e-5) tz = (bmax.y - o.y) / r.y;
+            else if (r.y < -1e-5) tz = (bmin.y - o.y) / r.y;
+            t = min(tx, tz);
+            if (t < 0.0) t = 1e9;
+        }
+        float amt = clamp(1.0 - t / 360.0, 0.0, 1.0);
+        float elev = smoothstep(0.62, 0.08, d.y);
+        sky = mix(sky, vec3(0.78, 0.79, 0.80), amt * elev);
     }
 
     fragColor = vec4(sky, 1.0);

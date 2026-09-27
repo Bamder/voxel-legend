@@ -44,6 +44,7 @@ struct TickInput {
     bool mining = false;
     bool flying = false;
     float landImpact = 0.0f;
+    float borderDrain = 0.0f; // cardiopulmonary + inspiration loss per second
 };
 
 // Runtime overuse / combo state (not saved).
@@ -322,14 +323,19 @@ inline void tick(Vitals& v, Fatigue& f, const TickInput& in, float dt) {
         }
     }
 
-    if (!(in.sprint && !in.flying) && !in.jumpImpulse)
+    if (in.borderDrain <= 0.0f && !(in.sprint && !in.flying) && !in.jumpImpulse)
         v.cardio += dt * 0.10f * (0.35f + 0.65f * v.thirst);
     if (v.thirst < 0.12f) v.cardio -= dt * 0.04f;
 
     float well = 0.5f * (v.hunger + v.thirst);
-    v.inspire += dt * (well - 0.45f) * 0.05f;
-    if (meanLimbHealth(v) < 0.5f) v.inspire -= dt * 0.03f;
-    if (in.moving && well > 0.5f) v.inspire += dt * 0.01f;
+    if (in.borderDrain <= 0.0f) {
+        v.inspire += dt * (well - 0.45f) * 0.05f;
+        if (meanLimbHealth(v) < 0.5f) v.inspire -= dt * 0.03f;
+        if (in.moving && well > 0.5f) v.inspire += dt * 0.01f;
+    } else {
+        v.cardio -= in.borderDrain * dt;
+        v.inspire -= in.borderDrain * dt;
+    }
 
     bool usingLegs = (in.sprint && !in.flying) || in.jumpImpulse || (in.swim && !in.flying);
     bool usingHandR = in.mining;

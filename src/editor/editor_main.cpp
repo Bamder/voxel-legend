@@ -610,6 +610,28 @@ static void drawCircleImg(mat::Image& img, int cx, int cy, int r, Color4 c) {
 
 // Editor mode entry. editor.exe accepts --texture / --item / --model to skip
 // the chooser screen; without an argument it shows the mode chooser.
+static void launchStructureEditor() {
+    wchar_t self[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    std::wstring path(self);
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring dir = (slash == std::wstring::npos) ? L"." : path.substr(0, slash);
+    std::wstring exe = dir + L"\\voxel-legend.exe";
+    std::wstring cmd = L"\"" + exe + L"\" --edit-structure";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        MessageBoxW(nullptr, L"找不到 voxel-legend.exe，请先编译游戏。", L"Structure Editor", MB_ICONWARNING);
+    }
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     int startMode = -1; // -1 = chooser screen, 0 = texture, 1 = item model, 2 = entity model, 3 = animation
     if (lpCmdLine && *lpCmdLine) {
@@ -4965,7 +4987,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (startMode < 0) {
             // ---- mode chooser (entry screen): pick texture / block / entity ----
             const float bw = 380.0f, bh = 64.0f, gap = 20.0f;
-            const int nOpts = 5;
+            const int nOpts = 6;
             const float totalH = nOpts * bh + (nOpts - 1) * gap;
             const float bx = (g_winW - bw) * 0.5f;
             const float y0 = (g_winH - totalH) * 0.5f - 50.0f;
@@ -4975,7 +4997,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 if (mx >= bx && mx < bx + bw && my >= by && my < by + bh) choice = i;
             }
             if (lmb && !prevLmb && choice >= 0) {
-                if (choice == 4) {
+                if (choice == 5) {
+                    launchStructureEditor();
+                } else if (choice == 4) {
                     dataed::runModal(g_hwnd);
                 } else {
                     startMode = choice;
@@ -8580,7 +8604,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             // ---- mode chooser (entry screen): buttons only; text drawn later ----
             rect(0, 0, (float)g_winW, (float)g_winH, 0.05f, 0.05f, 0.08f, 1.0f);
             const float bw = 380.0f, bh = 64.0f, gap = 20.0f;
-            const int nOpts = 5;
+            const int nOpts = 6;
             const float totalH = nOpts * bh + (nOpts - 1) * gap;
             const float bx = (g_winW - bw) * 0.5f;
             const float y0 = (g_winH - totalH) * 0.5f - 50.0f;
@@ -10896,14 +10920,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         // ---- text overlay (white English), drawn after geometry so it stays on top ----
         if (startMode < 0) {
             const float bw = 380.0f, bh = 64.0f, gap = 20.0f;
-            const float totalH = 5 * bh + 4 * gap;
+            const float totalH = 6 * bh + 5 * gap;
             const float bx = (g_winW - bw) * 0.5f;
             const float y0 = (g_winH - totalH) * 0.5f - 50.0f;
-            const char* labels[5] = {
+            const char* labels[6] = {
                 "Texture Editor", "Item Model Editor", "Entity Model Editor",
-                "Animation Editor", "Data Pack Editor"
+                "Animation Editor", "Data Pack Editor", "Structure Editor"
             };
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < 6; i++) {
                 TextTex& tt = getTextTex(labels[i]);
                 if (tt.tex) drawTextTex(tt, bx + (bw - tt.w) * 0.5f, y0 + i * (bh + gap) + (bh - tt.h) * 0.5f);
             }

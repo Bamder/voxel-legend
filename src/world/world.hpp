@@ -183,9 +183,23 @@ public:
         float rem = 0.0f;
         MineHit hits[kMaxMineHits]{};
         int nHits = 0;
+        uint32_t serial = 0;
+    };
+    struct MineView {
+        uint32_t tree = 0;
+        int x = 0, y = 0, z = 0;
+        float rem = 0.0f;
+        uint32_t serial = 0;
+        MineHit hits[kMaxMineHits]{};
+        int nHits = 0;
     };
     const std::unordered_map<uint64_t, MineState>& mineStates() const { return m_blockDur; }
     static void decodeMineKey(uint64_t key, int& phys, int& x, int& y, int& z);
+    void collectMineViews(std::vector<MineView>& out) const;
+    void applyMineView(uint32_t tree, int x, int y, int z, float rem, const MineHit* hits, int nHits);
+    void clearMineView(uint32_t tree, int x, int y, int z);
+    static uint8_t quantSodRem(float rem);
+    static float dequantSodRem(uint8_t q);
 
     bool hasSodFace(int x, int y, int z, int face) const;
     float sodDurProgress(int x, int y, int z, int face) const; // 0 intact .. 1 about to strip
@@ -212,6 +226,7 @@ public:
     };
     struct AuthSod {
         uint8_t x = 0, z = 0, y = 0, face = 0, stage = 0;
+        uint8_t rem = 255;
     };
     struct AuthBark {
         uint8_t x = 0, z = 0, y = 0, face = 0;
@@ -267,6 +282,10 @@ public:
     void exportNetTree(const PhysicsIsland& t, NetTree& out, bool withCells) const;
     bool applyNetTrees(const std::vector<NetTree>& trees, const std::vector<uint32_t>& gone);
     void setKeepEdited(bool on) { m_keepEdited = on; }
+    void setMatchBounds(bool on);
+    bool matchBounds() const { return m_matchBounds; }
+    void setBuildCanvas(bool on);
+    bool buildCanvas() const { return m_buildCanvas; }
     void ensureColumn(int cx, int cz);
     void updateAnchors(const Vec3* pos, int count, int meshBudget);
     int humidityAt(int x, int y, int z) const; // air humidity -256..255
@@ -324,8 +343,11 @@ private:
     void touchAuthSod(int64_t key);
     void touchAuthBark(int64_t key);
     void tagIsland(PhysicsIsland& t);
+    void clearIslandMines(size_t index);
+    void forgetIslandMines(size_t index);
     void rememberEdited(int cx, int cz);
     void remeshChunk(int cx, int cy, int cz);
+    void noteBlankColumn(int cx, int cz);
 
     uint32_t m_seed;
     std::string m_saveDir = cfg::SAVE_DIR;
@@ -337,6 +359,7 @@ private:
     std::vector<loot::Drop> m_drops;
     uint32_t m_dropRng = 0xA341316Cu;
     std::unordered_map<uint64_t, MineState> m_blockDur;
+    uint32_t m_mineEpoch = 1;
     struct OriginTree {
         uint32_t bindId = 0; // unique living wood/leaf bind for this tree
         std::vector<IVec3> woods;
@@ -347,6 +370,8 @@ private:
     bool m_keepEdited = false;
     bool m_localTrees = true;
     bool m_tagTrees = false;
+    bool m_matchBounds = false;
+    bool m_buildCanvas = false;
     uint32_t m_nextTree = 1;
     std::unordered_set<int64_t> m_authBark;
     std::unordered_map<AuthCellKey, AuthCell, AuthCellKeyHash> m_authCells;

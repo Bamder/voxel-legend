@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id judge_scale
+display 裁决天平
+kind item
+max_stack 1
+hardness 0.4
+durability 2
+efficiency 0
+weight 0.5
+wrong_tool_resist 1
+tags 
+harvest_need none
+harvest_drop judge_scale 1

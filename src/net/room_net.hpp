@@ -120,7 +120,9 @@ public:
     bool spectator() const { return spec; }
     int team() const { return teamId; }
     void sendInput(const PlayInputNet& in);
+    void sendDeploy(uint8_t action, int bx, int bz);
     std::vector<PlayDeltaNet> takeDeltas();
+    bool takeDeploy(std::vector<DeployPinNet>& out);
 
 private:
     enum class Phase { Idle, Connecting, WaitWelcome, Play, Dead };
@@ -143,6 +145,8 @@ private:
     bool spec = false;
     int teamId = -1;
     std::vector<PlayDeltaNet> deltas;
+    std::vector<DeployPinNet> deploySnap;
+    bool deployFresh = false;
     long long deadlineMs = 0;
     long long retryAtMs = 0;
 };

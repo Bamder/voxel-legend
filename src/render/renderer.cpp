@@ -14,6 +14,8 @@
 #include "../plugin/plugin.hpp"
 #include "../world/loot.hpp"
 #include "../world/wear.hpp"
+#include "../world/matchmap.hpp"
+#include "../world/structure.hpp"
 #include <algorithm>
 #include <cstdarg>
 #include <cstddef>
@@ -171,6 +173,9 @@ bool Renderer::init(int w, int h) {
     uAmbient = gl::GetUniformLocation(progWorld, "uAmbient");
     uFogColor = gl::GetUniformLocation(progWorld, "uFogColor");
     uFogDensity = gl::GetUniformLocation(progWorld, "uFogDensity");
+    uBorderXZ = gl::GetUniformLocation(progWorld, "uBorderXZ");
+    uRimHalf = gl::GetUniformLocation(progWorld, "uRimHalf");
+    uCameraPos = gl::GetUniformLocation(progWorld, "uCameraPos");
     uBlockScale = gl::GetUniformLocation(progWorld, "uBlockScale");
     uBreakRel = gl::GetUniformLocation(progWorld, "uBreakRel");
     uBreakProgress = gl::GetUniformLocation(progWorld, "uBreakProgress");
@@ -224,6 +229,9 @@ bool Renderer::init(int w, int h) {
     uSunDisc = gl::GetUniformLocation(progSky, "uSunDisc");
     uMoonDisc = gl::GetUniformLocation(progSky, "uMoonDisc");
     uStarAmount = gl::GetUniformLocation(progSky, "uStarAmount");
+    uSkyBorderXZ = gl::GetUniformLocation(progSky, "uBorderXZ");
+    uSkyRimHalf = gl::GetUniformLocation(progSky, "uRimHalf");
+    uSkyCamera = gl::GetUniformLocation(progSky, "uCameraPos");
 
     gl::UseProgram(progFlat);
     uFlatMVP = gl::GetUniformLocation(progFlat, "uMVP");
@@ -486,6 +494,7 @@ void Renderer::shutdown() {
     if (atlasTex) gl::DeleteTextures(1, &atlasTex);
     if (whiteTex) gl::DeleteTextures(1, &whiteTex);
     if (cameraIconTex) gl::DeleteTextures(1, &cameraIconTex);
+    if (deployTex) gl::DeleteTextures(1, &deployTex);
     if (skinTex) gl::DeleteTextures(1, &skinTex);
     for (auto& kv : overlayTex) if (kv.second) gl::DeleteTextures(1, &kv.second);
     overlayTex.clear();
@@ -657,7 +666,8 @@ void Renderer::drawMenuPortrait(const World& world, float timeOfDay, UIState& ui
     drawSky(sky, inverse(worldVP));
     gl::Enable(GL_DEPTH_TEST);
     gl::DepthMask(GL_TRUE);
-    drawWorld(world, cam, worldVP, sky, Vec3{ 0, 0, 0 }, 0.0f, 0.0f, Vec3{ 0, 1, 0 });
+    drawWorld(world, cam, worldVP, sky, Vec3{ 0, 0, 0 }, 0.0f, 0.0f, Vec3{ 0, 1, 0 },
+              cfg::FOG_DENSITY, sky.fogColor);
 
     const anim::Clip& idle = anim::playerClips().idle;
     static float idleClock = 0.0f;
@@ -713,7 +723,16 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
     gl::ClearColor(sky.below.x, sky.below.y, sky.below.z, 1.0f);
     gl::Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    drawSky(sky, invVP);
+    float rimHalf = 0.0f, bminX = 0.0f, bmaxX = 0.0f, bminZ = 0.0f, bmaxZ = 0.0f;
+    if (ui.borderActive) {
+        const float S = cfg::BLOCK_SCALE;
+        rimHalf = 0.5f * (float)(matchmap::kRim * cfg::CHUNK_X) * S;
+        bminX = (float)(matchmap::playMin() * cfg::CHUNK_X) * S;
+        bmaxX = (float)((matchmap::playMax() + 1) * cfg::CHUNK_X) * S;
+        bminZ = bminX;
+        bmaxZ = bmaxX;
+    }
+    drawSky(sky, invVP, eye, rimHalf, bminX, bmaxX, bminZ, bmaxZ);
 
     if (ui.appScreen == AppScreen::Playing || menuWorld) {
         gl::Enable(GL_DEPTH_TEST);
@@ -735,7 +754,8 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             const int* n = geo::kFaces[ui.targetFace].n;
             breakNrm = { (float)n[0], (float)n[1], (float)n[2] };
         }
-        drawWorld(world, eye, vp, sky, breakRel, breakProg, breakSod, breakNrm);
+        drawWorld(world, eye, vp, sky, breakRel, breakProg, breakSod, breakNrm,
+                  cfg::FOG_DENSITY, sky.fogColor, rimHalf, bminX, bmaxX, bminZ, bmaxZ);
 
         if (!menuWorld) {
         const bool firstPerson = (ui.camMode == 0);
@@ -771,7 +791,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             shownStrike = anim::strikeFromNet(ui.netStrike);
             shownStrikeAt = ui.netStrikeFrame;
         }
-        if (!ui.spectating) {
+        if (!ui.spectating && !ui.hideAvatar) {
             drawPlayerModel(player.pos, shownBody, shownYaw, shownPitch, eye, vp, firstPerson,
                             &shownClip, shownFrame, heldR, heldL, carried,
                             nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes);
@@ -846,7 +866,8 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
     drawUI(world, player, timeOfDay, ui);
 }
 
-void Renderer::drawSky(const Sky& s, const Mat4& invVP) {
+void Renderer::drawSky(const Sky& s, const Mat4& invVP, const Vec3& eye,
+                       float rimHalf, float bminX, float bmaxX, float bminZ, float bmaxZ) {
     gl::Disable(GL_DEPTH_TEST);
     gl::DepthMask(GL_FALSE);
     gl::Disable(GL_CULL_FACE);
@@ -862,6 +883,9 @@ void Renderer::drawSky(const Sky& s, const Mat4& invVP) {
     gl::Uniform1f(uSunDisc, s.sunDisc);
     gl::Uniform1f(uMoonDisc, s.moonDisc);
     gl::Uniform1f(uStarAmount, s.starAmount);
+    gl::Uniform4f(uSkyBorderXZ, bminX, bmaxX, bminZ, bmaxZ);
+    gl::Uniform1f(uSkyRimHalf, rimHalf);
+    gl::Uniform3f(uSkyCamera, eye.x, eye.y, eye.z);
     gl::BindVertexArray(skyVAO);
     gl::DrawArrays(GL_TRIANGLES, 0, 3);
     gl::BindVertexArray(0);
@@ -869,7 +893,8 @@ void Renderer::drawSky(const Sky& s, const Mat4& invVP) {
 
 void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const Sky& s,
                          const Vec3& breakRel, float breakProgress, float breakSod,
-                         const Vec3& breakNrm) {
+                         const Vec3& breakNrm, float fogDensity, const Vec3& fogColor,
+                         float rimHalf, float bminX, float bmaxX, float bminZ, float bmaxZ) {
     gl::UseProgram(progWorld);
     gl::ActiveTexture(GL_TEXTURE0);
     gl::BindTexture(GL_TEXTURE_2D, atlasTex);
@@ -877,8 +902,11 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::Uniform3f(uSunDir, s.sunDir.x, s.sunDir.y, s.sunDir.z);
     gl::Uniform3f(uSunColor, s.sunColor.x, s.sunColor.y, s.sunColor.z);
     gl::Uniform3f(uAmbient, s.ambient.x, s.ambient.y, s.ambient.z);
-    gl::Uniform3f(uFogColor, s.fogColor.x, s.fogColor.y, s.fogColor.z);
-    gl::Uniform1f(uFogDensity, cfg::FOG_DENSITY);
+    gl::Uniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
+    gl::Uniform1f(uFogDensity, fogDensity);
+    gl::Uniform4f(uBorderXZ, bminX, bmaxX, bminZ, bmaxZ);
+    gl::Uniform1f(uRimHalf, rimHalf);
+    gl::Uniform3f(uCameraPos, eye.x, eye.y, eye.z);
     gl::Uniform3f(uBreakRel, breakRel.x, breakRel.y, breakRel.z);
     gl::Uniform1f(uBreakProgress, breakProgress);
     gl::Uniform1f(uBreakSod, breakSod);
@@ -2002,7 +2030,7 @@ void Renderer::drawRoomLobby(UIState& ui) {
     const int nPlayers = (int)ui.roomPlayers.size();
     const bool enoughPlayers = nPlayers >= ui.roomMinPlayers;
     const bool canStart = ui.roomHost && enoughPlayers;
-    const bool canAddTeam = ui.roomHost && nTeams < 9;
+    const bool canAddTeam = ui.roomHost && nTeams < 1 + matchmap::kCombatTeams;
 
     int lw = 0, lh = 0;
     stringSize("开放端口", lw, lh);
@@ -2672,6 +2700,72 @@ void Renderer::paletteLayout(int& x0, int& y0, int& cell, int& cols, int& rows) 
     y0 = (scrH - h) / 2 + 10;
 }
 
+void Renderer::drawDeploy(UIState& ui) {
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.04f, 0.05f, 0.07f, 1.0f);
+    flushUI(progUI, whiteTex);
+
+    float side = std::min((float)scrW, (float)scrH) * 0.64f;
+    float x = ((float)scrW - side) * 0.5f;
+    float y = ((float)scrH - side) * 0.5f + 18.0f;
+    ui.deployMapX = x;
+    ui.deployMapY = y;
+    ui.deployMapS = side;
+
+    if (ui.deployPixels && ui.deploySpan > 0 && ui.deployStamp != deployTexStamp) {
+        if (deployTex) gl::DeleteTextures(1, &deployTex);
+        deployTex = makeTexture(ui.deployPixels->data(), ui.deploySpan, ui.deploySpan, false, false);
+        deployTexStamp = ui.deployStamp;
+    }
+    if (deployTex) {
+        quad(x, y, side, side, 0, 0, 1, 1, 1, 1, 1, 1);
+        flushUI(progUI, deployTex);
+    }
+    const float bw = 2.0f;
+    quad(x - bw, y - bw, side + bw * 2.0f, bw, 0, 0, 0, 0, 1, 1, 1, 1);
+    quad(x - bw, y + side, side + bw * 2.0f, bw, 0, 0, 0, 0, 1, 1, 1, 1);
+    quad(x - bw, y, bw, side, 0, 0, 0, 0, 1, 1, 1, 1);
+    quad(x + side, y, bw, side, 0, 0, 0, 0, 1, 1, 1, 1);
+    flushUI(progUI, whiteTex);
+
+    float cell = (ui.deploySpan > 0) ? side / (float)ui.deploySpan : 1.0f;
+    for (const DeployPinView& pin : ui.deployPins) {
+        float px = x + ((float)(pin.bx - ui.deployOx) + 0.5f) * cell;
+        float py = y + ((float)(pin.bz - ui.deployOz) + 0.5f) * cell;
+        if (pin.phase == 2) {
+            float a = pin.t;
+            if (a < 0.0f) a = 0.0f;
+            if (a > 1.0f) a = 1.0f;
+            float d = 5.0f;
+            quad(px - 2.0f, py - d, 4.0f, d * 2.0f, 0, 0, 0, 0, ui.deployR, ui.deployG, ui.deployB, a);
+            quad(px - d, py - 2.0f, d * 2.0f, 4.0f, 0, 0, 0, 0, ui.deployR, ui.deployG, ui.deployB, a);
+        } else {
+            float s = 8.0f;
+            for (int i = 0; i < 7; i++) {
+                float t = (float)i / 6.0f;
+                float dx = -s + t * s * 2.0f;
+                float yA = -s + t * s * 2.0f;
+                float yB = s - t * s * 2.0f;
+                quad(px + dx - 2.0f, py + yA - 2.0f, 4.0f, 4.0f, 0, 0, 0, 0, 0, 0, 0, 1);
+                quad(px + dx - 2.0f, py + yB - 2.0f, 4.0f, 4.0f, 0, 0, 0, 0, 0, 0, 0, 1);
+                quad(px + dx - 1.5f, py + yA - 1.5f, 3.0f, 3.0f, 0, 0, 0, 0, ui.deployR, ui.deployG, ui.deployB, 1);
+                quad(px + dx - 1.5f, py + yB - 1.5f, 3.0f, 3.0f, 0, 0, 0, 0, ui.deployR, ui.deployG, ui.deployB, 1);
+            }
+        }
+    }
+    flushUI(progUI, whiteTex);
+    for (const DeployPinView& pin : ui.deployPins) {
+        if (pin.phase == 2) continue;
+        float px = x + ((float)(pin.bx - ui.deployOx) + 0.5f) * cell;
+        float py = y + ((float)(pin.bz - ui.deployOz) + 0.5f) * cell;
+        centeredText(pin.name, px, py + 14.0f, 1.0f, ui.deployR, ui.deployG, ui.deployB, 1);
+    }
+    if (ui.deploySeconds >= 0)
+        centeredText(std::to_string(ui.deploySeconds), (float)scrW * 0.5f, y - 78.0f, 2.4f, 0.96f, 0.96f, 0.96f, 1);
+    centeredText("选择部署位置", (float)scrW * 0.5f, y - 36.0f, 1.4f, 0.92f, 0.93f, 0.95f, 1);
+    centeredText("左键选点并倒计时，结束前可改点，右键取消", (float)scrW * 0.5f, y + side + 22.0f, 1.15f,
+                 0.82f, 0.84f, 0.88f, 1);
+}
+
 void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui) {
     (void)w;
     (void)p;
@@ -2683,6 +2777,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     ui.menuHover = -1;
     ui.settingsHover = -1;
     ui.debugHover = -1;
+    ui.noteHover = false;
+    ui.noteBackHover = false;
     if (ui.appScreen != AppScreen::Playing) {
         if (ui.appScreen == AppScreen::Start) drawStartMenu(ui);
         else if (ui.appScreen == AppScreen::PlayerProfile) drawPlayerProfile(ui);
@@ -2692,6 +2788,22 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         else if (ui.appScreen == AppScreen::RoomLobby) drawRoomLobby(ui);
         else if (ui.appScreen == AppScreen::JoinRoom) drawJoinRoom(ui);
         else if (ui.appScreen == AppScreen::RoomLoading) drawRoomLoading(ui);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
+    if (ui.storyOpen) {
+        quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 1.0f);
+        flushUI(progUI, whiteTex);
+        if (!ui.storySentence.empty())
+            centeredText(ui.storySentence, (float)scrW * 0.5f, (float)scrH * 0.5f, 1.35f,
+                         0.93f, 0.93f, 0.91f, ui.storyFade);
+        if (ui.storyHold)
+            centeredText("单击或按任意键", (float)scrW * 0.5f, (float)scrH - 56.0f, 0.85f, 0.62f, 0.62f, 0.62f, 0.9f);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
+    if (ui.deploying) {
+        drawDeploy(ui);
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
@@ -2752,6 +2864,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     layoutCrosshairPrompts(promptItems, promptCount, cx + 36.0f, cy, promptBoxes);
 
     // ---- solid-color pass (white texture) ----
+    if (ui.borderFog > 0.001f)
+        quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.78f, 0.79f, 0.80f, ui.borderFog);
     quad(cx - 9, cy - 1, 18, 2, 0, 0, 0, 0, 1, 1, 1, 0.9f);
     quad(cx - 1, cy - 9, 2, 18, 0, 0, 0, 0, 1, 1, 1, 0.9f);
     drawCrosshairPromptChrome(promptBoxes);
@@ -2833,6 +2947,44 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         char hb[32];
         snprintf(hb, sizeof(hb), "%d", ui.humidityValue);
         centeredText(hb, ui.humidityScreenX, ui.humidityScreenY - 24.0f, 0.9f, 1, 1, 1, 1);
+    }
+
+    if (!ui.goalText.empty())
+        centeredText(ui.goalText.c_str(), scrW * 0.5f, 28.0f, 1.0f, 0.95f, 0.92f, 0.78f, 1.0f);
+
+    if (ui.structureEdit && ui.blockBarOpen) {
+        std::vector<uint8_t> blocks;
+        structure::collectBuildBlocks(blocks);
+        const float cell = 44.0f, gap = 4.0f;
+        const int cols = 2;
+        const float x0 = 10.0f, y0 = 48.0f;
+        int rowsFit = (int)(((float)scrH - y0 - 12.0f) / (cell + gap));
+        if (rowsFit < 1) rowsFit = 1;
+        int rows = ((int)blocks.size() + cols - 1) / cols;
+        int maxScroll = rows - rowsFit;
+        if (maxScroll < 0) maxScroll = 0;
+        if (ui.blockBarScroll > maxScroll) ui.blockBarScroll = maxScroll;
+        if (ui.blockBarScroll < 0) ui.blockBarScroll = 0;
+        float panelH = (float)rowsFit * (cell + gap) + 8.0f;
+        quad(4, y0 - 8, cols * (cell + gap) + 12, panelH, 0, 0, 0, 0, 0.08f, 0.08f, 0.10f, 0.92f);
+        ui.blockBarHover = -1;
+        flushUI(progUI, whiteTex);
+        for (int i = 0; i < (int)blocks.size(); i++) {
+            int row = i / cols;
+            int col = i % cols;
+            float y = y0 + (float)(row - ui.blockBarScroll) * (cell + gap);
+            float x = x0 + (float)col * (cell + gap);
+            if (y + cell < y0 || y > y0 + panelH - 8.0f) continue;
+            bool hov = ui.mouseX >= x && ui.mouseX < x + cell && ui.mouseY >= y && ui.mouseY < y + cell;
+            if (hov) ui.blockBarHover = i;
+            bool on = blocks[(size_t)i] == ui.structureBlock;
+            if (on || hov) {
+                quad(x - 2, y - 2, cell + 4, cell + 4, 0, 0, 0, 0, on ? 0.95f : 0.55f, on ? 0.82f : 0.55f, 0.28f, 1);
+                flushUI(progUI, whiteTex);
+            }
+            drawBlockIcon(blocks[(size_t)i], x + 4, y + 4, cell - 8);
+        }
+        centeredText("方块", x0 + cell, y0 - 22.0f, 0.8f, 1, 1, 1, 1);
     }
 
     gl::Enable(GL_DEPTH_TEST);
@@ -2962,8 +3114,64 @@ void Renderer::drawInventoryDoll(UIState& ui, float x, float y, float w, float h
     lab(footRX + legW * 0.5f, footY + legH * 0.45f, vitals::FootR);
 }
 
+void Renderer::drawNote(UIState& ui) {
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.55f);
+    float w = std::min(760.0f, (float)scrW - 48.0f);
+    float h = std::min(560.0f, (float)scrH - 48.0f);
+    float x = ((float)scrW - w) * 0.5f;
+    float y = ((float)scrH - h) * 0.5f;
+    quad(x, y, w, h, 0, 0, 0, 0, 0.08f, 0.07f, 0.05f, 0.96f);
+    flushUI(progUI, whiteTex);
+    centeredText(ui.noteTitle.empty() ? "笔记" : ui.noteTitle, x + w * 0.5f, y + 28.0f, 1.4f, 0.95f, 0.9f, 0.75f, 1);
+    for (int i = 0; i < ui.noteLineCount && i < 8; i++)
+        drawString(ui.noteLines[i], x + 36.0f, y + 56.0f + (float)i * 26.0f, 1.0f, 0.9f, 0.88f, 0.8f, 1);
+    float iy = y + 56.0f + (float)ui.noteLineCount * 26.0f + 18.0f;
+    for (int i = 0; i < 3; i++) {
+        if (ui.noteItems[i].empty()) continue;
+        float row = iy + (float)i * 48.0f;
+        quad(x + 36.0f, row, 40.0f, 40.0f, 0, 0, 0, 0, 0.16f, 0.14f, 0.1f, 1);
+        flushUI(progUI, whiteTex);
+        if (ui.noteItemId[i] != 0)
+            drawBlockIcon(ui.noteItemId[i], x + 40.0f, row + 4.0f, 32.0f);
+        flushUI(progUI, atlasTex);
+        drawString(ui.noteItems[i], x + 88.0f, row + 8.0f, 1.05f, 0.95f, 0.93f, 0.86f, 1);
+        const char* mark = "尚未找到";
+        float mr = 0.75f, mg = 0.55f, mb = 0.5f;
+        if (ui.notePlaced[i]) { mark = "已放上祭坛"; mr = 0.55f; mg = 0.85f; mb = 0.55f; }
+        else if (ui.noteHeld[i]) { mark = "已携带"; mr = 0.55f; mg = 0.85f; mb = 0.55f; }
+        drawString(mark, x + w - 160.0f, row + 8.0f, 0.9f, mr, mg, mb, 1);
+    }
+    if (ui.noteDone)
+        centeredText("仪式已完成", x + w * 0.5f, y + h - 78.0f, 1.1f, 0.85f, 0.78f, 0.45f, 1);
+    else
+        centeredText("将三件物品放到祭坛的三角区域", x + w * 0.5f, y + h - 78.0f, 1.0f, 0.75f, 0.72f, 0.62f, 1);
+    float bw = 120.0f, bh = 34.0f;
+    float bx = x + w - bw - 28.0f;
+    float by = y + h - 52.0f;
+    ui.noteBackX = bx; ui.noteBackY = by; ui.noteBackW = bw; ui.noteBackH = bh;
+    bool hov = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= by && ui.mouseY < by + bh;
+    ui.noteBackHover = hov;
+    quad(bx, by, bw, bh, 0, 0, 0, 0, hov ? 0.32f : 0.18f, hov ? 0.28f : 0.16f, hov ? 0.18f : 0.1f, 1);
+    flushUI(progUI, whiteTex);
+    centeredText("返回", bx + bw * 0.5f, by + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+}
+
 void Renderer::drawInventory(UIState& ui) {
     if (!ui.inventory) return;
+    if (ui.noteRitual >= 0) {
+        ui.noteX = 24.0f; ui.noteY = 16.0f; ui.noteW = 88.0f; ui.noteH = 32.0f;
+        bool hov = ui.mouseX >= ui.noteX && ui.mouseX < ui.noteX + ui.noteW
+            && ui.mouseY >= ui.noteY && ui.mouseY < ui.noteY + ui.noteH;
+        ui.noteHover = hov;
+        quad(ui.noteX, ui.noteY, ui.noteW, ui.noteH, 0, 0, 0, 0,
+             hov || ui.noteOpen ? 0.32f : 0.16f, hov || ui.noteOpen ? 0.26f : 0.14f, 0.1f, 1);
+        flushUI(progUI, whiteTex);
+        centeredText("笔记", ui.noteX + ui.noteW * 0.5f, ui.noteY + ui.noteH * 0.5f, 1.0f, 0.95f, 0.9f, 0.75f, 1);
+    }
+    if (ui.noteOpen && ui.noteRitual >= 0) {
+        drawNote(ui);
+        return;
+    }
 
     const bool survival = !ui.privilegeMode;
     const auto& pal = plugin::creativePalette();

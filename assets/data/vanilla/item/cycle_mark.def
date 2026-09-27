@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id cycle_mark
+display 循环刻印
+kind item
+max_stack 1
+hardness 0.4
+durability 2
+efficiency 0
+weight 0.45
+wrong_tool_resist 1
+tags 
+harvest_need none
+harvest_drop cycle_mark 1

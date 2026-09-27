@@ -53,6 +53,14 @@ struct RoomPlayerView {
     uint32_t id = 0;
 };
 
+struct DeployPinView {
+    uint32_t id = 0;
+    std::string name;
+    int bx = 0, bz = 0;
+    uint8_t phase = 0;
+    float t = 0.0f;
+};
+
 struct UIState {
     bool showDebug = false;
     bool inventoryOpen = false;
@@ -107,6 +115,43 @@ struct UIState {
     int debugHover = -1;      // 0 back, 1 humidity, 2 mat, 3 model, 4 dummy, 5 privilege, 6 fly
     bool humidityMode = false; // render air as red/blue humidity blocks
     bool privilegeMode = false; // 权限模式 (debug): skip survival vitals / death
+    float borderFog = 0.0f;     // 0..1 screen fog in the match rim
+    float borderT = 0.0f;       // raw outward progress, 0..1
+    bool borderActive = false;
+    bool hideAvatar = false;
+    bool structureEdit = false;
+    bool blockBarOpen = false;
+    int blockBarHover = -1;
+    int blockBarScroll = 0;
+    uint8_t structureBlock = PLANKS;
+    std::string goalText;
+    bool deploying = false;
+    const std::vector<uint8_t>* deployPixels = nullptr;
+    int deployStamp = 0;
+    int deploySpan = 0;
+    int deployOx = 0, deployOz = 0;
+    float deployMapX = 0, deployMapY = 0, deployMapS = 0;
+    float deployR = 1, deployG = 0.3f, deployB = 0.3f;
+    int deploySeconds = -1;
+    bool noteOpen = false;
+    bool noteHover = false;
+    bool noteBackHover = false;
+    float noteX = 0, noteY = 0, noteW = 0, noteH = 0;
+    float noteBackX = 0, noteBackY = 0, noteBackW = 0, noteBackH = 0;
+    int noteRitual = -1;
+    std::string noteTitle;
+    std::string noteLines[8];
+    int noteLineCount = 0;
+    std::string noteItems[3];
+    bool noteHeld[3] = { false, false, false };
+    bool notePlaced[3] = { false, false, false };
+    uint8_t noteItemId[3] = { 0, 0, 0 };
+    bool noteDone = false;
+    bool storyOpen = false;
+    bool storyHold = false;
+    float storyFade = 1.0f;
+    std::string storySentence;
+    std::vector<DeployPinView> deployPins;
 
     const vitals::Vitals* vitals = nullptr;
     bool playerDead = false;
@@ -225,6 +270,8 @@ private:
     unsigned int progWorld = 0, progSky = 0, progFlat = 0, progUI = 0, progUIText = 0, progHum = 0, progHumTex = 0;
     int uMVP = 0, uChunkOffset = 0, uAtlas = 0, uSunDir = 0, uSunColor = 0, uAmbient = 0;
     int uFogColor = 0, uFogDensity = 0, uBlockScale = 0;
+    int uBorderXZ = 0, uRimHalf = 0, uCameraPos = 0;
+    int uSkyBorderXZ = 0, uSkyRimHalf = 0, uSkyCamera = 0;
     int uBreakRel = 0, uBreakProgress = 0, uBreakSod = 0, uBreakNrm = 0, uCrackReveal = 0;
     int uCrackFolds = 0, uCrackColor = 0, uCrackSeed = 0, uCrackShown = 0;
     int uCrackLenMu0 = 0, uCrackLenMu1 = 0, uCrackLenSig = 0;
@@ -238,7 +285,8 @@ private:
     int uHumTexLit = 0, uHumTexSunDir = 0, uHumTexSunColor = 0, uHumTexAmbient = 0, uHumTexFogColor = 0, uHumTexFogDensity = 0;
     int uUIScreen = 0, uUITex = 0, uUITextScreen = 0, uUITextTex = 0;
 
-    unsigned int atlasTex = 0, whiteTex = 0, cameraIconTex = 0;
+    unsigned int atlasTex = 0, whiteTex = 0, cameraIconTex = 0, deployTex = 0;
+    int deployTexStamp = -1;
     unsigned int skinTex = 0;
     std::unordered_map<int, unsigned int> garmentTex;
     std::unordered_map<std::string, unsigned int> overlayTex;
@@ -259,10 +307,14 @@ private:
     void uploadChunk(ChunkGL& cg, const World::Chunk& ch);
     void destroyChunkGL(ChunkGL& cg);
     unsigned int renderTextTexture(const std::string& utf8, int& outW, int& outH);
-    void drawSky(const Sky& s, const Mat4& invVP);
+    void drawSky(const Sky& s, const Mat4& invVP, const Vec3& eye = Vec3{},
+                 float rimHalf = 0.0f, float bminX = 0.0f, float bmaxX = 0.0f,
+                 float bminZ = 0.0f, float bmaxZ = 0.0f);
     void drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const Sky& s,
                    const Vec3& breakRel, float breakProgress, float breakSod,
-                   const Vec3& breakNrm);
+                   const Vec3& breakNrm, float fogDensity, const Vec3& fogColor,
+                   float rimHalf = 0.0f, float bminX = 0.0f, float bmaxX = 0.0f,
+                   float bminZ = 0.0f, float bmaxZ = 0.0f);
     void drawFallingTrees(const World& w, const Vec3& eye, const Mat4& vp, const Vec3& sunDir);
     void drawDrops(const World& w, const Vec3& eye, const Mat4& vp);
     void drawOutlineOriented(const Mat4& vp, const Vec3& eye, const PhysicsIsland& t,
@@ -285,6 +337,7 @@ private:
                          const Sky* sun = nullptr,
                          uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR);
     void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);
+    void drawDeploy(UIState& ui);
 
     void quad(float x, float y, float w, float h, float u0, float v0, float u1, float v1,
               float r, float g, float b, float a);
@@ -331,6 +384,7 @@ private:
     void drawWorldDetail(UIState& ui);
     void drawCreateWorld(UIState& ui);
     void drawInventory(UIState& ui);
+    void drawNote(UIState& ui);
     void drawInventoryDoll(UIState& ui, float x, float y, float w, float h);
     void drawDeath(UIState& ui);
     void drawMaterialEditor(UIState& ui);

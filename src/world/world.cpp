@@ -3,6 +3,8 @@
 #include "tree_canopy.hpp"
 #include "tree_grow.hpp"
 #include "log_appear.hpp"
+#include "matchmap.hpp"
+#include "structure.hpp"
 #include "../core/noise.hpp"
 #include "../render/textures.hpp"
 #include "../render/block_geo.hpp"
@@ -261,6 +263,8 @@ void World::reset(uint32_t seed) {
     m_authBark.clear();
     m_editedCols.clear();
     m_nextTree = 1;
+    m_mineEpoch = 1;
+    if (m_matchBounds) structure::roll(m_seed);
 }
 
 struct ColumnBuf {
@@ -283,14 +287,57 @@ struct ColumnBuf {
     }
 };
 
+void World::noteBlankColumn(int cx, int cz) {
+    if (columnLoaded(cx, cz)) return;
+    Chunk slice;
+    slice.generated = true;
+    slice.dirty = true;
+    m_chunks.emplace(chunkKey(cx, 0, cz), std::move(slice));
+}
+
+void World::setMatchBounds(bool on) {
+    m_matchBounds = on;
+    m_buildCanvas = false;
+    if (on) structure::roll(m_seed);
+}
+
+void World::setBuildCanvas(bool on) {
+    m_buildCanvas = on;
+    if (on) m_matchBounds = false;
+}
+
 void World::generateColumn(int cx, int cz) {
-    for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
-        Chunk loaded;
-        if (!loadChunkFile(cx, cy, cz, loaded)) continue;
-        m_chunks.emplace(chunkKey(cx, cy, cz), std::move(loaded));
+    const bool canvas = m_buildCanvas;
+    const bool match = m_matchBounds;
+    if (canvas && (cx < -1 || cx > 1 || cz < -1 || cz > 1)) {
+        noteBlankColumn(cx, cz);
+        return;
+    }
+    if (match && !matchmap::columnInside(cx, cz)) {
+        noteBlankColumn(cx, cz);
+        return;
+    }
+    const bool plain = canvas;
+    if (!plain) {
+        for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+            Chunk loaded;
+            if (!loadChunkFile(cx, cy, cz, loaded)) continue;
+            m_chunks.emplace(chunkKey(cx, cy, cz), std::move(loaded));
+        }
     }
 
     ColumnBuf ch;
+    if (plain) {
+        int floorY = canvas ? (structure::kEditY - 1) : cfg::SEA_LEVEL;
+        if (floorY < 1) floorY = 1;
+        if (floorY >= cfg::WORLD_H) floorY = cfg::WORLD_H - 1;
+        for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
+            for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
+                ch.set(lx, 0, lz, BEDROCK);
+                for (int y = 1; y <= floorY; y++) ch.set(lx, y, lz, STONE);
+            }
+        }
+    } else {
 
     // Base terrain (solid fill + water).
     for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
@@ -450,6 +497,22 @@ void World::generateColumn(int cx, int cz) {
             }
         }
     }
+    }
+
+    if (match && matchmap::columnPlayable(cx, cz)) {
+        structure::stampColumn(cx, cz,
+            [&](int x, int z) { return surfaceHeight(x, z); },
+            [&](int x, int y, int z, uint8_t b) {
+                int lx = x - cx * cfg::CHUNK_X;
+                int lz = z - cz * cfg::CHUNK_Z;
+                if (lx < 0 || lx >= cfg::CHUNK_X || lz < 0 || lz >= cfg::CHUNK_Z) return;
+                if (y < 0 || y >= cfg::WORLD_H) return;
+                int i = ch.idx(lx, y, lz);
+                ch.blocks[(size_t)i] = b;
+                ch.flags[(size_t)i] = 0;
+                ch.treeId[(size_t)i] = 0;
+            });
+    }
 
     for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
         bool any = false;
@@ -486,6 +549,10 @@ void World::generateColumn(int cx, int cz) {
 void World::cacheOriginTrees(int ocx, int ocz) {
     int64_t key = columnKey(ocx, ocz);
     if (m_originTrees.find(key) != m_originTrees.end()) return;
+    if (m_matchBounds && !matchmap::columnInside(ocx, ocz)) {
+        m_originTrees.emplace(key, std::vector<OriginTree>{});
+        return;
+    }
 
     std::vector<OriginTree> grown;
     float forest = noise::noise2((float)ocx * 0.2f, (float)ocz * 0.2f, m_seed + 8888u);
@@ -590,6 +657,8 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
         for (int dz = -cfg::LOAD_RADIUS; dz <= cfg::LOAD_RADIUS; dz++) {
             for (int dx = -cfg::LOAD_RADIUS; dx <= cfg::LOAD_RADIUS; dx++) {
                 int cx = a.first + dx, cz = a.second + dz;
+                if (m_matchBounds && !matchmap::columnInside(cx, cz)) continue;
+                if (m_buildCanvas && (cx < -1 || cx > 1 || cz < -1 || cz > 1)) continue;
                 if (!seenCol.insert(columnKey(cx, cz)).second) continue;
                 if (!columnLoaded(cx, cz)) missing.emplace_back(cx, cz);
             }
@@ -1472,10 +1541,12 @@ bool World::breakPhysBlock(int island, int x, int y, int z, uint8_t& dropped) {
         t.flags[(size_t)i] = (uint8_t)(t.flags[(size_t)i] | flagCutFace(oppositeFace(f)));
     }
     tree_fall::setCell(t, x, y, z, AIR, 0);
+    t.contentRev++;
     tree_fall::recomputeMass(t);
     t.meshDirty = true;
     tree_fall::buildMesh(t);
     if (t.cells.empty()) {
+        forgetIslandMines((size_t)island);
         m_phys[(size_t)island] = std::move(m_phys.back());
         m_phys.pop_back();
         return true;
@@ -2028,6 +2099,7 @@ void World::treeFallPhysics(float dt) {
         tree_fall::step(m_phys[i], *this, dt);
         if (m_phys[i].meshDirty) tree_fall::buildMesh(m_phys[i]);
         if (trySettleFalling(m_phys[i])) {
+            forgetIslandMines(i);
             m_phys[i] = std::move(m_phys.back());
             m_phys.pop_back();
         } else {
@@ -2041,6 +2113,7 @@ void World::treeFallGameTick() {
         bool crushed = tree_fall::gameTick(m_phys[i]);
         if (crushed) m_phys[i].contentRev++;
         if (m_phys[i].cells.empty()) {
+            forgetIslandMines(i);
             m_phys[i] = std::move(m_phys.back());
             m_phys.pop_back();
             continue;
@@ -2434,6 +2507,7 @@ bool World::applyMineHit(int phys, int x, int y, int z, uint8_t heldTool, int fa
             auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
             if (it != m_chunks.end()) {
                 applySodHit(it->second, c.lx, c.ly, c.lz, face, heldTool);
+                touchAuthSod(chunkKey(c.cx, c.cy, c.cz));
                 if (it->second.dirty) {
                     buildMeshFor(it->second, c.cx, c.cy, c.cz);
                     it->second.dirty = false;
@@ -2462,6 +2536,8 @@ bool World::applyMineHit(int phys, int x, int y, int z, uint8_t heldTool, int fa
         st.hits[st.nHits] = { dmg, f };
         st.nHits++;
     }
+    st.serial = m_mineEpoch++;
+    if (m_mineEpoch == 0) m_mineEpoch = 1;
     m_blockDur[key] = st;
     return false;
 }
@@ -2603,7 +2679,8 @@ uint32_t World::chunkAuthHash(const Chunk& ch) const {
     sods.reserve(ch.sodFaces.size());
     for (const Chunk::SodFace& sf : ch.sodFaces) {
         if (sf.face >= 6) continue;
-        sods.push_back(AuthSod{ sf.x, sf.z, sf.y, sf.face, sf.stage });
+        AuthSod face{ sf.x, sf.z, sf.y, sf.face, sf.stage, quantSodRem(sf.rem) };
+        sods.push_back(face);
     }
     std::sort(sods.begin(), sods.end(), [](const AuthSod& a, const AuthSod& b) {
         if (a.y != b.y) return a.y < b.y;
@@ -2612,8 +2689,8 @@ uint32_t World::chunkAuthHash(const Chunk& ch) const {
         return a.face < b.face;
     });
     for (const AuthSod& s : sods) {
-        uint8_t b[5] = { s.x, s.z, s.y, s.face, s.stage };
-        mix(b, 5);
+        uint8_t b[6] = { s.x, s.z, s.y, s.face, s.stage, s.rem };
+        mix(b, 6);
     }
     std::vector<AuthBark> barks;
     barks.reserve(ch.barkFaces.size());
@@ -2657,7 +2734,7 @@ std::vector<World::AuthSlice> World::flushAuth() {
         s.sods.reserve(it->second.sodFaces.size());
         for (const Chunk::SodFace& sf : it->second.sodFaces) {
             if (sf.face >= 6) continue;
-            s.sods.push_back(AuthSod{ sf.x, sf.z, sf.y, sf.face, sf.stage });
+            s.sods.push_back(AuthSod{ sf.x, sf.z, sf.y, sf.face, sf.stage, quantSodRem(sf.rem) });
         }
     }
     for (int64_t key : m_authBark) {
@@ -2749,6 +2826,7 @@ void World::writeAuthChunk(int cx, int cy, int cz, const uint8_t* blocks, const 
         sf.y = s.y;
         sf.face = s.face;
         sf.stage = s.stage;
+        sf.rem = dequantSodRem(s.rem);
         ch.sodFaces.push_back(sf);
     }
     ch.sodValid = true;
@@ -2778,8 +2856,10 @@ bool World::writeAuthDelta(int cx, int cy, int cz, const std::vector<AuthCell>& 
         if (cell.block == WATER && cell.water > 0) ch.hasWater = true;
     }
     if (replaceSod) {
+        std::vector<Chunk::SodFace> prev = ch.sodFaces;
         ch.sodFaces.clear();
         ch.sodFaces.reserve(sod.size());
+        float maxD = loot::sodBreak().durability;
         for (const AuthSod& s : sod) {
             if (s.face >= 6) continue;
             Chunk::SodFace sf;
@@ -2788,6 +2868,14 @@ bool World::writeAuthDelta(int cx, int cy, int cz, const std::vector<AuthCell>& 
             sf.y = s.y;
             sf.face = s.face;
             sf.stage = s.stage;
+            sf.rem = dequantSodRem(s.rem);
+            for (const Chunk::SodFace& old : prev) {
+                if (old.x != sf.x || old.z != sf.z || old.y != sf.y || old.face != sf.face) continue;
+                if (old.rem < 0.0f) break;
+                float incoming = (sf.rem < 0.0f) ? maxD : sf.rem;
+                if (old.rem < incoming) sf.rem = old.rem;
+                break;
+            }
             ch.sodFaces.push_back(sf);
         }
         ch.sodValid = true;
@@ -2911,11 +2999,41 @@ static void copyTreePose(PhysicsIsland& t, const World::NetTree& n) {
     t.contentRev = n.rev;
 }
 
+void World::clearIslandMines(size_t index) {
+    std::vector<uint64_t> drop;
+    for (const auto& kv : m_blockDur) {
+        int phys = -1, x = 0, y = 0, z = 0;
+        decodeMineKey(kv.first, phys, x, y, z);
+        if (phys >= 0 && (size_t)phys == index) drop.push_back(kv.first);
+    }
+    for (uint64_t k : drop) m_blockDur.erase(k);
+}
+
+void World::forgetIslandMines(size_t index) {
+    if (index >= m_phys.size()) return;
+    size_t last = m_phys.size() - 1;
+    std::vector<uint64_t> drop;
+    std::vector<std::pair<uint64_t, MineState>> slide;
+    for (const auto& kv : m_blockDur) {
+        int phys = -1, x = 0, y = 0, z = 0;
+        decodeMineKey(kv.first, phys, x, y, z);
+        if (phys < 0) continue;
+        if ((size_t)phys == index) drop.push_back(kv.first);
+        else if (index != last && (size_t)phys == last) {
+            drop.push_back(kv.first);
+            slide.push_back({ makeDurKey((int)index, x, y, z), kv.second });
+        }
+    }
+    for (uint64_t k : drop) m_blockDur.erase(k);
+    for (auto& p : slide) m_blockDur[p.first] = std::move(p.second);
+}
+
 bool World::applyNetTrees(const std::vector<NetTree>& trees, const std::vector<uint32_t>& gone) {
     bool ok = true;
     for (uint32_t id : gone) {
         for (size_t i = 0; i < m_phys.size();) {
             if (m_phys[i].netId == id) {
+                forgetIslandMines(i);
                 m_phys[i] = std::move(m_phys.back());
                 m_phys.pop_back();
             } else {
@@ -2937,6 +3055,7 @@ bool World::applyNetTrees(const std::vector<NetTree>& trees, const std::vector<u
         if (n.body.empty()) {
             if (found) {
                 size_t idx = (size_t)(found - m_phys.data());
+                forgetIslandMines(idx);
                 if (idx + 1 != m_phys.size()) m_phys[idx] = std::move(m_phys.back());
                 m_phys.pop_back();
             }
@@ -2960,9 +3079,82 @@ bool World::applyNetTrees(const std::vector<NetTree>& trees, const std::vector<u
         copyTreePose(built, n);
         built.netId = n.id;
         built.meshDirty = false;
-        if (found) *found = std::move(built);
+        if (found) {
+            clearIslandMines((size_t)(found - m_phys.data()));
+            *found = std::move(built);
+        }
         else m_phys.push_back(std::move(built));
     }
     return ok;
+}
+
+uint8_t World::quantSodRem(float rem) {
+    float maxD = loot::sodBreak().durability;
+    if (rem < 0.0f || maxD <= 0.001f) return 255;
+    float t = rem / maxD;
+    if (t >= 0.999f) return 255;
+    int q = (int)(t * 254.0f + 0.5f);
+    if (q < 0) q = 0;
+    if (q > 254) q = 254;
+    return (uint8_t)q;
+}
+
+float World::dequantSodRem(uint8_t q) {
+    float maxD = loot::sodBreak().durability;
+    if (q >= 255 || maxD <= 0.001f) return -1.0f;
+    return maxD * ((float)q / 254.0f);
+}
+
+static int physOfTree(const std::vector<PhysicsIsland>& islands, uint32_t tree) {
+    if (tree == 0) return -1;
+    for (int i = 0; i < (int)islands.size(); i++)
+        if (islands[(size_t)i].netId == tree) return i;
+    return -2;
+}
+
+void World::collectMineViews(std::vector<MineView>& out) const {
+    out.clear();
+    for (const auto& kv : m_blockDur) {
+        int phys = -1, x = 0, y = 0, z = 0;
+        decodeMineKey(kv.first, phys, x, y, z);
+        MineView v;
+        v.x = x;
+        v.y = y;
+        v.z = z;
+        v.rem = kv.second.rem;
+        v.serial = kv.second.serial;
+        v.nHits = kv.second.nHits;
+        if (v.nHits > kMaxMineHits) v.nHits = kMaxMineHits;
+        for (int i = 0; i < v.nHits; i++) v.hits[i] = kv.second.hits[i];
+        if (phys < 0) {
+            v.tree = 0;
+        } else if (phys < (int)m_phys.size() && m_phys[(size_t)phys].netId != 0) {
+            v.tree = m_phys[(size_t)phys].netId;
+        } else {
+            continue;
+        }
+        out.push_back(v);
+    }
+}
+
+void World::applyMineView(uint32_t tree, int x, int y, int z, float rem, const MineHit* hits, int nHits) {
+    int phys = physOfTree(m_phys, tree);
+    if (phys < -1) return;
+    if (nHits < 0) nHits = 0;
+    if (nHits > kMaxMineHits) nHits = kMaxMineHits;
+    uint64_t key = makeDurKey(phys, x, y, z);
+    auto it = m_blockDur.find(key);
+    if (it != m_blockDur.end() && it->second.nHits > nHits) return;
+    MineState st;
+    st.rem = rem;
+    st.nHits = nHits;
+    for (int i = 0; i < nHits; i++) st.hits[i] = hits ? hits[i] : MineHit{};
+    m_blockDur[key] = st;
+}
+
+void World::clearMineView(uint32_t tree, int x, int y, int z) {
+    int phys = physOfTree(m_phys, tree);
+    if (phys < -1) return;
+    m_blockDur.erase(makeDurKey(phys, x, y, z));
 }
 

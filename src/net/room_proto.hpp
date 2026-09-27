@@ -7,7 +7,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609271056u;
+constexpr uint32_t kRoomProto = 2609271431u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -28,7 +28,17 @@ enum class RoomMsg : uint16_t {
     PlayHello = 6,   // u32 proto, string name
     PlayWelcome = 7, // id, seed, spawn, spectator, team
     PlayInput = 8,   // pose, avatar inputs, block edits, chunk resync asks
-    PlayDelta = 9    // server tick + player state + chunk baseline / delta / hash
+    PlayDelta = 9,   // server tick + player state + chunk baseline / delta / hash
+    Deploy = 10,     // client: set or cancel a deploy pin
+    DeploySync = 11  // server: same-team pins (aiming X or fading dot)
+};
+
+struct DeployPinNet {
+    uint32_t id = 0;
+    std::string name;
+    int bx = 0, bz = 0;
+    uint8_t phase = 0; // 1 = aiming (countdown in t), 2 = landed (fade 1..0 in t)
+    float t = 0.0f;
 };
 
 struct RoomTeamNet {
@@ -82,6 +92,13 @@ struct PlayInputNet {
     struct BarkEdit { int x = 0, y = 0, z = 0; uint8_t face = 0; bool place = false; };
     std::vector<BarkEdit> bark;
     bool treeResync = false;
+    struct MineEdit {
+        int x = 0, y = 0, z = 0;
+        uint8_t face = 0;
+        uint8_t tool = 0;
+        uint32_t tree = 0;
+    };
+    std::vector<MineEdit> mines;
 };
 
 struct AuthCellNet {
@@ -91,6 +108,25 @@ struct AuthCellNet {
 
 struct AuthSodNet {
     uint8_t x = 0, z = 0, y = 0, face = 0, stage = 0;
+    uint8_t rem = 255; // 255 = full; else remaining durability / max * 254
+};
+
+struct MineHitNet {
+    float step = 0;
+    uint8_t face = 0;
+};
+
+struct MineNet {
+    uint32_t tree = 0;
+    int x = 0, y = 0, z = 0;
+    float rem = 0;
+    uint32_t serial = 0;
+    std::vector<MineHitNet> hits;
+};
+
+struct MineGoneNet {
+    uint32_t tree = 0;
+    int x = 0, y = 0, z = 0;
 };
 
 struct AuthBarkNet {
@@ -308,6 +344,55 @@ inline bool decodeJoinTeam(const uint8_t* p, const uint8_t* end, int& team) {
     return true;
 }
 
+inline std::vector<uint8_t> encodeDeploy(uint8_t action, int bx, int bz) {
+    Buf b;
+    b.u8(action);
+    b.i32(bx);
+    b.i32(bz);
+    return b.data();
+}
+
+inline bool decodeDeploy(const uint8_t* p, const uint8_t* end, uint8_t& action, int& bx, int& bz) {
+    int32_t x = 0, z = 0;
+    if (!Buf::u8(p, end, action) || !Buf::i32(p, end, x) || !Buf::i32(p, end, z)) return false;
+    bx = (int)x;
+    bz = (int)z;
+    return true;
+}
+
+inline std::vector<uint8_t> encodeDeploySync(const std::vector<DeployPinNet>& pins) {
+    Buf b;
+    uint8_t n = (uint8_t)(pins.size() > 16 ? 16 : pins.size());
+    b.u8(n);
+    for (uint8_t i = 0; i < n; i++) {
+        b.u32(pins[i].id);
+        b.str(pins[i].name);
+        b.i32(pins[i].bx);
+        b.i32(pins[i].bz);
+        b.u8(pins[i].phase);
+        b.f32(pins[i].t);
+    }
+    return b.data();
+}
+
+inline bool decodeDeploySync(const uint8_t* p, const uint8_t* end, std::vector<DeployPinNet>& pins) {
+    pins.clear();
+    uint8_t n = 0;
+    if (!Buf::u8(p, end, n)) return false;
+    pins.reserve(n);
+    for (uint8_t i = 0; i < n; i++) {
+        DeployPinNet pin;
+        int32_t x = 0, z = 0;
+        if (!Buf::u32(p, end, pin.id) || !Buf::str(p, end, pin.name) || !Buf::i32(p, end, x) ||
+            !Buf::i32(p, end, z) || !Buf::u8(p, end, pin.phase) || !Buf::f32(p, end, pin.t))
+            return false;
+        pin.bx = (int)x;
+        pin.bz = (int)z;
+        pins.push_back(std::move(pin));
+    }
+    return true;
+}
+
 inline std::vector<uint8_t> encodePlayWelcome(uint32_t id, uint32_t seed, float x, float y, float z,
                                               bool spectator, int team) {
     Buf b;
@@ -384,6 +469,16 @@ inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
         b.u8(in.bark[i].place ? 1 : 0);
     }
     b.u8(in.treeResync ? 1 : 0);
+    uint8_t nm = (uint8_t)(in.mines.size() > 8 ? 8 : in.mines.size());
+    b.u8(nm);
+    for (uint8_t i = 0; i < nm; i++) {
+        b.i32(in.mines[i].x);
+        b.i32(in.mines[i].y);
+        b.i32(in.mines[i].z);
+        b.u8(in.mines[i].face);
+        b.u8(in.mines[i].tool);
+        b.u32(in.mines[i].tree);
+    }
     return b.data();
 }
 
@@ -434,6 +529,15 @@ inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& 
     uint8_t tr = 0;
     if (!Buf::u8(p, end, tr)) return false;
     in.treeResync = tr != 0;
+    uint8_t nm = 0;
+    if (!Buf::u8(p, end, nm) || nm > 8) return false;
+    in.mines.resize(nm);
+    for (uint8_t i = 0; i < nm; i++) {
+        if (!Buf::i32(p, end, in.mines[i].x) || !Buf::i32(p, end, in.mines[i].y) ||
+            !Buf::i32(p, end, in.mines[i].z) || !Buf::u8(p, end, in.mines[i].face) ||
+            !Buf::u8(p, end, in.mines[i].tool) || !Buf::u32(p, end, in.mines[i].tree))
+            return false;
+    }
     return true;
 }
 
@@ -448,6 +552,8 @@ struct PlayDeltaNet {
     std::vector<uint32_t> treesGone;
     bool treeCheck = false;
     uint32_t treeHash = 0;
+    std::vector<MineNet> mines;
+    std::vector<MineGoneNet> mineGone;
 };
 
 inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
@@ -495,6 +601,7 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
             b.u8(s.y);
             b.u8(s.face);
             b.u8(s.stage);
+            b.u8(s.rem);
         }
         b.u16((uint16_t)base.bark.size());
         for (const AuthBarkNet& bk : base.bark) {
@@ -528,6 +635,7 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
                 b.u8(s.y);
                 b.u8(s.face);
                 b.u8(s.stage);
+                b.u8(s.rem);
             }
         }
         b.u8(delta.bark ? 1 : 0);
@@ -574,6 +682,30 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
     for (uint32_t id : d.treesGone) b.u32(id);
     b.u8(d.treeCheck ? 1 : 0);
     if (d.treeCheck) b.u32(d.treeHash);
+    uint8_t nm = (uint8_t)(d.mines.size() > 32 ? 32 : d.mines.size());
+    b.u8(nm);
+    for (uint8_t i = 0; i < nm; i++) {
+        const MineNet& m = d.mines[i];
+        b.u32(m.tree);
+        b.i32(m.x);
+        b.i32(m.y);
+        b.i32(m.z);
+        b.f32(m.rem);
+        uint8_t nh = (uint8_t)(m.hits.size() > 12 ? 12 : m.hits.size());
+        b.u8(nh);
+        for (uint8_t h = 0; h < nh; h++) {
+            b.f32(m.hits[h].step);
+            b.u8(m.hits[h].face);
+        }
+    }
+    uint8_t ngone = (uint8_t)(d.mineGone.size() > 32 ? 32 : d.mineGone.size());
+    b.u8(ngone);
+    for (uint8_t i = 0; i < ngone; i++) {
+        b.u32(d.mineGone[i].tree);
+        b.i32(d.mineGone[i].x);
+        b.i32(d.mineGone[i].y);
+        b.i32(d.mineGone[i].z);
+    }
     return b.data();
 }
 
@@ -625,7 +757,8 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
         for (uint16_t s = 0; s < ns; s++) {
             if (!Buf::u8(p, end, base.sod[s].x) || !Buf::u8(p, end, base.sod[s].z) ||
                 !Buf::u8(p, end, base.sod[s].y) || !Buf::u8(p, end, base.sod[s].face) ||
-                !Buf::u8(p, end, base.sod[s].stage))
+                !Buf::u8(p, end, base.sod[s].stage) ||
+                !Buf::u8(p, end, base.sod[s].rem))
                 return false;
         }
         uint16_t nk = 0;
@@ -663,7 +796,8 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
             for (uint16_t s = 0; s < ns; s++) {
                 if (!Buf::u8(p, end, delta.sods[s].x) || !Buf::u8(p, end, delta.sods[s].z) ||
                     !Buf::u8(p, end, delta.sods[s].y) || !Buf::u8(p, end, delta.sods[s].face) ||
-                    !Buf::u8(p, end, delta.sods[s].stage))
+                    !Buf::u8(p, end, delta.sods[s].stage) ||
+                    !Buf::u8(p, end, delta.sods[s].rem))
                     return false;
             }
         }
@@ -730,5 +864,28 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
     if (!Buf::u8(p, end, tc)) return false;
     d.treeCheck = tc != 0;
     if (d.treeCheck && !Buf::u32(p, end, d.treeHash)) return false;
+    uint8_t nm = 0;
+    if (!Buf::u8(p, end, nm) || nm > 32) return false;
+    d.mines.resize(nm);
+    for (uint8_t i = 0; i < nm; i++) {
+        MineNet& m = d.mines[i];
+        uint8_t nh = 0;
+        if (!Buf::u32(p, end, m.tree) || !Buf::i32(p, end, m.x) || !Buf::i32(p, end, m.y) ||
+            !Buf::i32(p, end, m.z) || !Buf::f32(p, end, m.rem) || !Buf::u8(p, end, nh) || nh > 12)
+            return false;
+        m.hits.resize(nh);
+        for (uint8_t h = 0; h < nh; h++) {
+            if (!Buf::f32(p, end, m.hits[h].step) || !Buf::u8(p, end, m.hits[h].face))
+                return false;
+        }
+    }
+    uint8_t ngone = 0;
+    if (!Buf::u8(p, end, ngone) || ngone > 32) return false;
+    d.mineGone.resize(ngone);
+    for (uint8_t i = 0; i < ngone; i++) {
+        if (!Buf::u32(p, end, d.mineGone[i].tree) || !Buf::i32(p, end, d.mineGone[i].x) ||
+            !Buf::i32(p, end, d.mineGone[i].y) || !Buf::i32(p, end, d.mineGone[i].z))
+            return false;
+    }
     return true;
 }

@@ -47,6 +47,21 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "Shirt",         false, false, false, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.40f },
     { "Shorts",        false, false, false, false, TEX_BARK, TEX_BARK, TEX_BARK, TEX_BARK, 0.35f },
     { "Shoes",         false, false, false, false, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, 0.50f },
+    { "元素核心", true, false, true, false, TEX_DIAMOND, TEX_DIAMOND, TEX_DIAMOND, TEX_DIAMOND, 0.40f },
+    { "原始之火", true, false, true, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.40f },
+    { "静滞之水", true, false, true, false, TEX_WATER, TEX_WATER, TEX_WATER, TEX_WATER, 0.40f },
+    { "生命嫩枝", true, false, true, false, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, 0.30f },
+    { "根须织毯", true, false, true, false, TEX_BARK, TEX_BARK, TEX_BARK, TEX_BARK, 0.30f },
+    { "裁决天平", true, false, true, false, TEX_GOLD, TEX_GOLD, TEX_GOLD, TEX_GOLD, 0.50f },
+    { "黄金冠冕", true, false, true, false, TEX_GOLD, TEX_GOLD, TEX_GOLD, TEX_GOLD, 0.50f },
+    { "审判之书", true, false, true, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.35f },
+    { "鳞片沙漏", true, false, true, false, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, 0.40f },
+    { "循环刻印", true, false, true, false, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, 0.45f },
+    { "深渊棱镜", true, false, true, false, TEX_GLASS, TEX_GLASS, TEX_GLASS, TEX_GLASS, 0.40f },
+    { "上古图腾", true, false, true, false, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, 0.45f },
+    { "残响符石", true, false, true, false, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, 0.45f },
+    { "旧神骸骨", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.35f },
+    { "无目雕像", true, false, true, false, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, 0.55f },
 };
 static_assert(sizeof(kBlocks) / sizeof(kBlocks[0]) == BLOCK_COUNT, "BasicConstruction block table size mismatch");
 
@@ -58,10 +73,14 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "wood", "bark", "hand_axe",
     "shears", "hand_pick", "hand_shovel", "grass_item",
     "shirt", "shorts", "shoes",
+    "elem_core", "prim_fire", "still_water", "life_sprout", "root_weave",
+    "judge_scale", "gold_crown", "judge_tome", "scale_glass", "cycle_mark",
+    "abyss_prism", "ancient_totem", "echo_rune", "old_bones", "eyeless",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
 
 bool inCreative(uint8_t id) {
+    if (id >= ITEM_ELEM_CORE) return false;
     switch (id) {
         case AIR:
         case GRASS:
@@ -141,6 +160,7 @@ GrassTuftStrategy g_grassTuft;
 PlayerStrategy g_player;
 
 BlockStrategy* strategyFor(int id) {
+    if (id >= ITEM_ELEM_CORE) return &g_unplaceable;
     switch (id) {
         case BEDROCK:    return &g_bedrock;
         case STICK:

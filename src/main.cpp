@@ -10,6 +10,9 @@
 #include "world/hold_bind.hpp"
 #include "world/vitals.hpp"
 #include "world/wear.hpp"
+#include "world/matchmap.hpp"
+#include "world/ritual.hpp"
+#include "world/structure.hpp"
 #include "render/renderer.hpp"
 #include "core/gl.hpp"
 #include "render/textures.hpp"
@@ -39,6 +42,7 @@ static float g_absScaleX = 1.0f, g_absScaleY = 1.0f;
 static LONG g_prevAbsX = -1, g_prevAbsY = -1;
 static int g_screenW = 1280, g_screenH = 720;
 static bool g_focused = false;
+static bool g_storyAdvance = false;
 static bool g_clipHeld = false;
 static int g_winW = 1280, g_winH = 720;
 static bool g_resized = false;
@@ -146,8 +150,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             return 0;
         }
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            if (windowForeground(h)) g_storyAdvance = true;
+            break;
         case WM_KEYDOWN:
             if (!windowForeground(h)) return 0;
+            if ((l & (1u << 30)) == 0) g_storyAdvance = true;
             if (g_textTarget) {
                 if (w == VK_BACK) { popUtf8(*g_textTarget); return 0; }
                 if (w == VK_RETURN) { g_textSubmit = true; return 0; }
@@ -495,6 +505,7 @@ static bool g_roomRecord = false;
 static bool g_roomApplyNet = false;
 static std::vector<BlockEditNet> g_roomEdits;
 static std::vector<PlayInputNet::BarkEdit> g_roomBark;
+static std::vector<PlayInputNet::MineEdit> g_roomMines;
 static bool g_treeResync = false;
 
 static void noteRoomEdit(int x, int y, int z, uint8_t b) {
@@ -513,6 +524,19 @@ static void noteRoomBark(int x, int y, int z, int face, bool place) {
     e.face = (uint8_t)face;
     e.place = place;
     g_roomBark.push_back(e);
+}
+
+static void noteRoomMine(int x, int y, int z, int face, uint8_t tool, uint32_t tree) {
+    if (!g_roomRecord || g_roomApplyNet || face < 0 || face > 5) return;
+    if (g_roomMines.size() >= 64) g_roomMines.erase(g_roomMines.begin());
+    PlayInputNet::MineEdit e;
+    e.x = x;
+    e.y = y;
+    e.z = z;
+    e.face = (uint8_t)face;
+    e.tool = tool;
+    e.tree = tree;
+    g_roomMines.push_back(e);
 }
 
 static Vec3 cellCenter(int x, int y, int z) {
@@ -1116,6 +1140,83 @@ static NetSample sampleFromPose(const PlayerPoseNet& pose, uint32_t tick) {
     return s;
 }
 
+void clearDeployMap(std::vector<uint8_t>& px, int span) {
+    px.assign((size_t)span * (size_t)span * 4, 0);
+    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+}
+
+void deployBlockColor(uint8_t b, int y, int& r, int& g, int& bl) {
+    if (b == WATER || isLiquid(b)) { r = 42; g = 86; bl = 148; return; }
+    if (b == SAND || b == SANDSTONE) { r = 194; g = 174; bl = 108; return; }
+    if (b == SNOW) { r = 226; g = 230; bl = 234; return; }
+    if (b == STONE || b == COBBLE || b == GRAVEL || b == BEDROCK) { r = 112; g = 112; bl = 116; return; }
+    if (b == LOG || b == WOOD || b == PLANKS || b == BARK) { r = 122; g = 84; bl = 48; return; }
+    if (b == LEAVES || b == SHRUB_LEAF || b == SHRUB_STEM) { r = 46; g = 108; bl = 44; return; }
+    if (b == GRASS || b == DIRT || b == GRASS_TUFT) {
+        float t = (float)(y - cfg::SEA_LEVEL) / 30.0f;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        r = (int)(58.0f + t * 40.0f);
+        g = (int)(124.0f - t * 42.0f);
+        bl = 46;
+        return;
+    }
+    r = 96; g = 96; bl = 100;
+}
+
+bool paintDeployColumns(World& world, int ox, int oz, int span, uint32_t& painted, std::vector<uint8_t>& px) {
+    if (span <= 0) return false;
+    int cx0 = ox / cfg::CHUNK_X;
+    int cz0 = oz / cfg::CHUNK_Z;
+    bool any = false;
+    for (int dz = 0; dz < matchmap::kZoneChunks; dz++) {
+        for (int dx = 0; dx < matchmap::kZoneChunks; dx++) {
+            uint32_t bit = 1u << (dz * matchmap::kZoneChunks + dx);
+            if (painted & bit) continue;
+            int cx = cx0 + dx;
+            int cz = cz0 + dz;
+            if (!world.columnLoaded(cx, cz)) continue;
+            int bx0 = cx * cfg::CHUNK_X;
+            int bz0 = cz * cfg::CHUNK_Z;
+            for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
+                for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
+                    int wx = bx0 + lx;
+                    int wz = bz0 + lz;
+                    int localX = wx - ox;
+                    int localZ = wz - oz;
+                    if (localX < 0 || localZ < 0 || localX >= span || localZ >= span) continue;
+                    int h = world.surfaceHeight(wx, wz);
+                    int yTop = h + 28;
+                    if (yTop >= cfg::WORLD_H) yTop = cfg::WORLD_H - 1;
+                    uint8_t top = AIR;
+                    int topY = h;
+                    for (int y = yTop; y >= 0; y--) {
+                        uint8_t b = world.getBlock(wx, y, wz);
+                        if (b == AIR || b == GRASS_TUFT) continue;
+                        top = b;
+                        topY = y;
+                        break;
+                    }
+                    size_t i = ((size_t)localZ * (size_t)span + (size_t)localX) * 4;
+                    if (top == AIR) {
+                        px[i] = 0; px[i + 1] = 0; px[i + 2] = 0; px[i + 3] = 255;
+                        continue;
+                    }
+                    int r = 0, g = 0, bl = 0;
+                    deployBlockColor(top, topY, r, g, bl);
+                    px[i] = (uint8_t)r;
+                    px[i + 1] = (uint8_t)g;
+                    px[i + 2] = (uint8_t)bl;
+                    px[i + 3] = 255;
+                }
+            }
+            painted |= bit;
+            any = true;
+        }
+    }
+    return any;
+}
+
 int main(int argc, char** argv) {
     plugin::init();
     data::init();
@@ -1130,6 +1231,8 @@ int main(int argc, char** argv) {
     int selfTest = -1;    // -1 = disabled
     bool seedData = false;
     bool roomServer = false;
+    bool editStructure = false;
+    std::string editStructurePath;
     uint16_t roomServerPort = kRoomPortDefault;
     std::string roomHandoff;
 
@@ -1144,6 +1247,10 @@ int main(int argc, char** argv) {
         else if (a == "--withertest") { witherTest = true; }
         else if (a == "--watertest") { waterTest = true; }
         else if (a == "--room-server") { roomServer = true; }
+        else if (a == "--edit-structure") {
+            editStructure = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') editStructurePath = argv[++i];
+        }
         else if (a == "--port" && i + 1 < argc) { roomServerPort = (uint16_t)std::atoi(argv[++i]); }
         else if (a == "--handoff" && i + 1 < argc) { roomHandoff = argv[++i]; }
         else if (a == "--help") {
@@ -1159,6 +1266,7 @@ int main(int argc, char** argv) {
             printf("  --room-server  headless room server (started by the host)\n");
             printf("  --port N       room server port (default 35535)\n");
             printf("  --handoff PATH lobby roster for --room-server\n");
+            printf("  --edit-structure [file]  fly-build a structure file\n");
             return 0;
         }
     }
@@ -1287,6 +1395,24 @@ int main(int argc, char** argv) {
     NetSample selfShown{};
     bool selfShownOk = false;
     bool spectating = false;
+    bool deploying = false;
+    bool deployDeath = false;
+    std::vector<uint8_t> deployPixels;
+    std::vector<DeployPinNet> deployPins;
+    int deployOx = 0, deployOz = 0, deploySpan = 0, deployStamp = 0;
+    uint32_t deployPainted = 0;
+    bool structureEdit = editStructure;
+    std::string structurePath = editStructurePath;
+    uint8_t editBlock = PLANKS;
+    bool blockBarOpen = false;
+    bool ritualDone = false;
+    bool storyShown = false;
+    bool storyOpen = false;
+    int storyIndex = 0;
+    int storyPhase = 0;
+    float storyAlpha = 0.0f;
+    bool structurePainted = false;
+    float saveFlash = 0.0f;
     constexpr int kRoomMinPlayers = 1;
     float tickSpeed = 1.0f;
     float gameTickAccum = 0.0f;
@@ -1347,6 +1473,7 @@ int main(int argc, char** argv) {
         g_roomRecord = false;
         g_roomEdits.clear();
         g_roomBark.clear();
+        g_roomMines.clear();
         g_treeResync = false;
         world.setLocalTrees(true);
         remoteHist.clear();
@@ -1434,6 +1561,14 @@ int main(int argc, char** argv) {
         }
         shutdownRoom();
         spectating = false;
+        deploying = false;
+        deployDeath = false;
+        storyShown = false;
+        storyOpen = false;
+        ui.noteOpen = false;
+        ui.storyOpen = false;
+        deployPins.clear();
+        deployPainted = 0;
         roomSession = false;
         roomTeams.clear();
         roomPlayers.clear();
@@ -1495,7 +1630,7 @@ int main(int argc, char** argv) {
     };
     auto addRoomTeam = [&]() {
         if (!roomHost) return;
-        if (roomTeams.size() >= 9) return;
+        if (roomTeams.size() >= 1 + matchmap::kCombatTeams) return;
         int i = (int)roomTeams.size() - 1;
         if (i < 0) i = 0;
         RoomTeamView t;
@@ -1637,6 +1772,7 @@ int main(int argc, char** argv) {
         g_roomRecord = false;
         g_roomEdits.clear();
         g_roomBark.clear();
+        g_roomMines.clear();
         g_treeResync = false;
         appScreen = AppScreen::RoomLoading;
         ui.appScreen = AppScreen::RoomLoading;
@@ -1651,6 +1787,23 @@ int main(int argc, char** argv) {
             ui.loadStatus = err.empty() ? "无法连接服务器" : err;
         }
     };
+    auto openDeploy = [&](bool death) {
+        int team = gameClient.team();
+        if (spectating || team < 1 || team > matchmap::kCombatTeams) return;
+        matchmap::Zone zone = matchmap::combatZone(team - 1);
+        deployOx = zone.cx0 * cfg::CHUNK_X;
+        deployOz = zone.cz0 * cfg::CHUNK_Z;
+        deploySpan = matchmap::kZoneChunks * cfg::CHUNK_X;
+        clearDeployMap(deployPixels, deploySpan);
+        deployPainted = 0;
+        deployStamp++;
+        deployPins.clear();
+        deploying = true;
+        deployDeath = death;
+        player.vel = { 0, 0, 0 };
+        player.flying = true;
+        if (death) gameClient.sendDeploy(2, 0, 0);
+    };
     auto enterRoomPlay = [&]() {
         int team = gameClient.team();
         for (RoomPlayerView& rp : roomPlayers)
@@ -1660,6 +1813,7 @@ int main(int argc, char** argv) {
         g_roomRecord = true;
         g_roomEdits.clear();
         g_roomBark.clear();
+        g_roomMines.clear();
         g_treeResync = false;
         world.setLocalTrees(false);
         world.clearFallingTrees();
@@ -1697,6 +1851,7 @@ int main(int argc, char** argv) {
         gameTickAccum = 0.0f;
         gameTick = 0;
         roomNetAccum = 0.0f;
+        if (!spectating && team >= 1 && team <= matchmap::kCombatTeams) openDeploy(false);
     };
     auto startRoom = [&]() {
         if (!roomHost) return;
@@ -1787,6 +1942,7 @@ int main(int argc, char** argv) {
                 if (s == 0) s = 1;
                 world.reset(s);
                 world.setSaveEnabled(false);
+                world.setMatchBounds(true);
                 seed = s;
                 currentWorld.clear();
                 player = Player();
@@ -1856,7 +2012,7 @@ int main(int argc, char** argv) {
                         std::vector<World::AuthSod> sod;
                         sod.reserve(base.sod.size());
                         for (const AuthSodNet& s : base.sod)
-                            sod.push_back(World::AuthSod{ s.x, s.z, s.y, s.face, s.stage });
+                            sod.push_back(World::AuthSod{ s.x, s.z, s.y, s.face, s.stage, s.rem });
                         std::vector<World::AuthBark> bark;
                         bark.reserve(base.bark.size());
                         for (const AuthBarkNet& bk : base.bark)
@@ -1892,7 +2048,7 @@ int main(int argc, char** argv) {
                     if (delta.sod) {
                         sod.reserve(delta.sods.size());
                         for (const AuthSodNet& s : delta.sods)
-                            sod.push_back(World::AuthSod{ s.x, s.z, s.y, s.face, s.stage });
+                            sod.push_back(World::AuthSod{ s.x, s.z, s.y, s.face, s.stage, s.rem });
                     }
                     std::vector<World::AuthBark> bark;
                     if (delta.bark) {
@@ -1948,6 +2104,15 @@ int main(int argc, char** argv) {
                 }
                 if (!world.applyNetTrees(trees, d.treesGone)) g_treeResync = true;
                 if (d.treeCheck && world.treeAuthHash() != d.treeHash) g_treeResync = true;
+                for (const MineGoneNet& g : d.mineGone)
+                    world.clearMineView(g.tree, g.x, g.y, g.z);
+                for (const MineNet& m : d.mines) {
+                    World::MineHit hits[World::kMaxMineHits];
+                    int n = (int)m.hits.size();
+                    if (n > World::kMaxMineHits) n = World::kMaxMineHits;
+                    for (int i = 0; i < n; i++) hits[i] = World::MineHit{ m.hits[(size_t)i].step, m.hits[(size_t)i].face };
+                    world.applyMineView(m.tree, m.x, m.y, m.z, m.rem, hits, n);
+                }
             }
             float renderAt = 0.0f;
             if (roomTickInit) {
@@ -2009,6 +2174,41 @@ int main(int argc, char** argv) {
                 selfShown.bodyYaw = selfAv.bodyYaw;
                 selfShownOk = true;
             }
+            if (gameClient.takeDeploy(deployPins) && deploying) {
+                for (const DeployPinNet& pin : deployPins) {
+                    if (pin.id != gameClient.selfId() || pin.phase != 2) continue;
+                    const float S = cfg::BLOCK_SCALE;
+                    int by = world.surfaceHeight(pin.bx, pin.bz);
+                    player.setSpawn({ (pin.bx + 0.5f) * S, (float)(by + 3) * S, (pin.bz + 0.5f) * S });
+                    player.vel = { 0, 0, 0 };
+                    player.flying = spectating;
+                    player.noclip = spectating;
+                    if (player.dead || deployDeath) {
+                        vitals::reset(player.vitals);
+                        vitals::resetFatigue(player.fatigue);
+                        player.dead = false;
+                    }
+                    bool wasDeath = deployDeath;
+                    deployDeath = false;
+                    liftSpawn();
+                    deploying = false;
+                    int lines = 0;
+                    if (!wasDeath && !storyShown)
+                        lines = ritual::storyLineCount(ritual::assignedRitual(gameClient.team()));
+                    if (lines > 0) {
+                        storyShown = true;
+                        storyOpen = true;
+                        storyIndex = 0;
+                        storyPhase = 0;
+                        storyAlpha = 0.0f;
+                        player.flying = true;
+                        player.vel = { 0, 0, 0 };
+                    } else {
+                        firstLook = true;
+                    }
+                    break;
+                }
+            }
             roomNetAccum += frameDt;
             if (roomNetAccum >= 0.05f) {
                 roomNetAccum = 0.0f;
@@ -2054,11 +2254,14 @@ int main(int argc, char** argv) {
                 netIn.edits.assign(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
                 size_t nb = g_roomBark.size() < 8 ? g_roomBark.size() : 8;
                 netIn.bark.assign(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
+                size_t nm = g_roomMines.size() < 8 ? g_roomMines.size() : 8;
+                netIn.mines.assign(g_roomMines.begin(), g_roomMines.begin() + (std::ptrdiff_t)nm);
                 netIn.treeResync = g_treeResync;
                 g_treeResync = false;
                 gameClient.sendInput(netIn);
                 g_roomEdits.erase(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
                 g_roomBark.erase(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
+                g_roomMines.erase(g_roomMines.begin(), g_roomMines.begin() + (std::ptrdiff_t)nm);
             }
         }
     };
@@ -2221,6 +2424,19 @@ int main(int argc, char** argv) {
         }
     };
 
+    if (structureEdit) {
+        structure::ensureLibrary();
+        if (structurePath.empty()) structurePath = structure::defaultPath();
+        world.setSaveEnabled(false);
+        world.setBuildCanvas(true);
+        player.privilegeMode = true;
+        player.flying = true;
+        player.setSpawn({ 12.0f, 10.0f, 18.0f });
+        appScreen = AppScreen::Playing;
+        ui.appScreen = AppScreen::Playing;
+        firstLook = true;
+    }
+
     auto t0 = std::chrono::steady_clock::now();
     float fps = 0.0f, fpsAccum = 0.0f;
     int fpsFrames = 0;
@@ -2261,8 +2477,13 @@ int main(int argc, char** argv) {
             ui.dummyActive = false;
             tickSpeed = 1.0f;
         }
-        bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead);
-        bool lookLocked = (canMove && !inventoryOpen);
+        if (structureEdit) {
+            player.privilegeMode = true;
+            player.flying = true;
+            player.dead = false;
+        }
+        bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen);
+        bool lookLocked = (canMove && !inventoryOpen && !(structureEdit && blockBarOpen));
 
         InputState in;
         if (canMove) {
@@ -2288,18 +2509,29 @@ int main(int argc, char** argv) {
         bool fPressed = playing && f && !prevF;
         prevF = f;
         bool f5 = keyDown(VK_F5);
-        if (playing && f5 && !prevF5 && !spectating) ui.camMode = (ui.camMode + 1) % 3;
+        if (playing && f5 && !prevF5 && !spectating && !structureEdit) ui.camMode = (ui.camMode + 1) % 3;
+        if (structureEdit && playing && f5 && !prevF5 && structurePainted) {
+            if (structure::saveFile(world, structurePath)) saveFlash = 2.0f;
+        }
         if (spectating) ui.camMode = 0;
         prevF5 = f5;
         bool e = keyDown('E');
-        if (playing && e && !prevE && !spectating) {
-            if (!paused) {
+        if (playing && e && !prevE && !spectating && !deploying) {
+            if (structureEdit) {
+                blockBarOpen = !blockBarOpen;
+            } else if (!paused) {
                 if (inventoryOpen && drag.active) endDrag(inv, worn, -1, -1, drag);
                 inventoryOpen = !inventoryOpen;
+                ui.noteOpen = false;
                 if (inventoryOpen) { drag.active = false; drag.block = AIR; drag.count = 0; drag.sourceSlot = -1; drag.sourceWear = -1; }
             }
         }
         prevE = e;
+        if (playing && roomSession && !ritualDone && !paused && !storyOpen && !deploying) {
+            int rid = ritual::assignedRitual(gameClient.team());
+            if (rid >= 0 && structure::offeringReady(world, rid))
+                ritualDone = true;
+        }
         bool esc = keyDown(VK_ESCAPE);
         if (esc && !prevEsc) {
             if (!playing) {
@@ -2340,6 +2572,10 @@ int main(int argc, char** argv) {
             } else if (ui.matEditorOpen) ui.matEditorOpen = false;
             else if (debugMenuOpen) debugMenuOpen = false;
             else if (settingsOpen) settingsOpen = false;
+            else if (deploying) {
+            }
+            else if (storyOpen) {
+            }
             else if (inventoryOpen) {
                 if (drag.active) endDrag(inv, worn, -1, -1, drag);
                 inventoryOpen = false;
@@ -2355,6 +2591,10 @@ int main(int argc, char** argv) {
                 if (appScreen == AppScreen::Worlds) ui.worldScroll -= steps;
                 if (appScreen == AppScreen::WorldDetail) ui.backupScroll -= steps;
             }
+        } else if (g_wheel != 0 && structureEdit && blockBarOpen) {
+            int steps = g_wheel / 120;
+            if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
+            ui.blockBarScroll -= steps;
         } else if (g_wheel != 0) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
@@ -2399,6 +2639,57 @@ int main(int argc, char** argv) {
 
         bool lmb = keyDown(VK_LBUTTON);
         bool rmb = keyDown(VK_RBUTTON);
+        if (storyOpen && playing) {
+            bool advance = g_storyAdvance || (lmb && !prevLmb) || (rmb && !prevRmb);
+            g_storyAdvance = false;
+            const float fade = 0.4f;
+            int count = ritual::storyLineCount(ritual::assignedRitual(gameClient.team()));
+            if (count < 1) {
+                storyOpen = false;
+                player.flying = spectating;
+                player.noclip = spectating;
+                firstLook = true;
+            } else if (storyPhase == 0) {
+                storyAlpha += dt / fade;
+                if (storyAlpha >= 1.0f) { storyAlpha = 1.0f; storyPhase = 1; }
+                if (advance && storyAlpha > 0.2f) storyPhase = 2;
+            } else if (storyPhase == 1) {
+                if (advance) storyPhase = 2;
+            } else {
+                storyAlpha -= dt / fade;
+                if (storyAlpha <= 0.0f) {
+                    storyAlpha = 0.0f;
+                    storyIndex++;
+                    if (storyIndex >= count) {
+                        storyOpen = false;
+                        player.flying = spectating;
+                        player.noclip = spectating;
+                        player.vel = { 0, 0, 0 };
+                        firstLook = true;
+                    } else {
+                        storyPhase = 0;
+                    }
+                }
+            }
+        } else {
+            g_storyAdvance = false;
+        }
+        if (deploying && playing && !paused && deploySpan > 0) {
+            if (lmb && !prevLmb && ui.deployMapS > 1.0f) {
+                float lx = ui.mouseX - ui.deployMapX;
+                float ly = ui.mouseY - ui.deployMapY;
+                if (lx >= 0.0f && ly >= 0.0f && lx < ui.deployMapS && ly < ui.deployMapS) {
+                    int localX = (int)(lx / ui.deployMapS * (float)deploySpan);
+                    int localZ = (int)(ly / ui.deployMapS * (float)deploySpan);
+                    if (localX < 0) localX = 0;
+                    if (localZ < 0) localZ = 0;
+                    if (localX >= deploySpan) localX = deploySpan - 1;
+                    if (localZ >= deploySpan) localZ = deploySpan - 1;
+                    gameClient.sendDeploy(1, deployOx + localX, deployOz + localZ);
+                }
+            }
+            if (rmb && !prevRmb) gameClient.sendDeploy(0, 0, 0);
+        }
         if (sim) {
             if (frameCounter % 240 == 0) lmb = true;          // break a block
             if (frameCounter % 480 == 120) rmb = true;        // place a block
@@ -2934,7 +3225,12 @@ int main(int argc, char** argv) {
                 if (moving && drag.active && (drag.sourceWear >= 0 || drag.sourceSlot >= cfg::HOTBAR_SLOTS || drag.sourceSlot < 0))
                     endDrag(inv, worn, -1, -1, drag);
                 bool shift = keyDown(VK_SHIFT);
-                if (lmb && !prevLmb) {
+                if (lmb && !prevLmb && ui.noteHover) {
+                    if (drag.active) endDrag(inv, worn, -1, -1, drag);
+                    ui.noteOpen = !ui.noteOpen;
+                } else if (ui.noteOpen && lmb && !prevLmb && ui.noteBackHover) {
+                    ui.noteOpen = false;
+                } else if (!ui.noteOpen && lmb && !prevLmb) {
                     if (!moving && player.privilegeMode && ui.hoveredBlock > 0 && !drag.active) {
                         drag.block = (uint8_t)ui.hoveredBlock;
                         drag.count = (int)loot::maxStack((uint8_t)ui.hoveredBlock);
@@ -2959,7 +3255,7 @@ int main(int argc, char** argv) {
                     if (drag.active) endDrag(inv, worn, -1, -1, drag);
                     else inventoryOpen = false;
                 }
-            } else if (player.dead) {
+            } else if (player.dead && !deploying) {
                 player.strikeName.clear();
                 player.pickRaised = false;
                 player.mineCharge = 0.0f;
@@ -3007,7 +3303,18 @@ int main(int argc, char** argv) {
 
                 bool canMine = false;
                 uint8_t heldMine = AIR;
-                if (lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
+                if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.blockBarHover >= 0) {
+                    std::vector<uint8_t> blocks;
+                    structure::collectBuildBlocks(blocks);
+                    if (ui.blockBarHover < (int)blocks.size())
+                        editBlock = blocks[(size_t)ui.blockBarHover];
+                }
+                if (structureEdit && lookLocked && hitOk && lmb && !prevLmb && structure::inVolume(hit.x, hit.y, hit.z))
+                    world.setBlock(hit.x, hit.y, hit.z, AIR, false, true);
+                if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
+                    && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
+                    world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
+                if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
                     heldMine = inv[ui.selectedSlot].block;
                     canMine = true;
                     if (physHit < 0) {
@@ -3065,15 +3372,35 @@ int main(int argc, char** argv) {
                         player.mineCooldown = recover;
                         if (hasItemTags(heldMine, TAG_PICK)) player.pickRaised = true;
                         int face = world.faceFromHitNormal(nrm);
-                        if (world.applyMineHit(physHit, hit.x, hit.y, hit.z, heldMine, face))
-                            finishMinedBlock(world, heldMine, physHit, hit);
+                        if (roomSession) {
+                            uint32_t tree = 0;
+                            if (physHit >= 0) {
+                                const std::vector<PhysicsIsland>& islands = world.physicsIslands();
+                                if (physHit < (int)islands.size()) tree = islands[(size_t)physHit].netId;
+                            }
+                            if (physHit < 0 || tree != 0)
+                                noteRoomMine(hit.x, hit.y, hit.z, face, heldMine, tree);
+                        }
+                        if (world.applyMineHit(physHit, hit.x, hit.y, hit.z, heldMine, face)) {
+                            if (roomSession && physHit >= 0) {
+                                uint8_t b = world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
+                                if (b != AIR && loot::isHarvestBreak(b, heldMine) &&
+                                    physHit < (int)world.physicsIslands().size()) {
+                                    Vec3 dropPos = tree_fall::worldOf(
+                                        world.physicsIslands()[(size_t)physHit], hit.x, hit.y, hit.z);
+                                    spawnHarvestDrops(world, dropPos, b, heldMine);
+                                }
+                            } else {
+                                finishMinedBlock(world, heldMine, physHit, hit);
+                            }
+                        }
                     }
                 }
                 if (player.mineCharge <= 0.0f && player.mineCooldown <= 0.0f) {
                     player.strikeName.clear();
                     player.pickRaised = false;
                 }
-                if (rmb && !prevRmb && hitOk) {
+                if (!structureEdit && rmb && !prevRmb && hitOk) {
                     if (physHit >= 0) {
                         ItemSlot& sel = inv[ui.selectedSlot];
                         if (!sel.empty() && sel.block != BARK && plugin::blockStrategy(sel.block)->canPlace(sel.block)) {
@@ -3095,9 +3422,12 @@ int main(int argc, char** argv) {
                             uint8_t target = world.getBlock(hit.x, hit.y, hit.z);
                             plugin::BlockEvent ev{ &world, hit.x, hit.y, hit.z, target, target };
                             if (!plugin::blockStrategy(target)->onInteract(ev)) {
-                                if (!sel.empty() && plugin::blockStrategy(sel.block)->canPlace(sel.block)) {
-                                    IVec3 place = hit;
-                                    if (!isLiquid(world.getBlock(hit.x, hit.y, hit.z))) place = prev;
+                                bool relic = sel.block >= ITEM_ELEM_CORE && sel.block < BLOCK_COUNT;
+                                IVec3 place = hit;
+                                if (!isLiquid(world.getBlock(hit.x, hit.y, hit.z))) place = prev;
+                                int rid = ritual::assignedRitual(gameClient.team());
+                                bool offering = relic && structure::isOfferingCell(world, rid, place.x, place.y, place.z);
+                                if (!sel.empty() && (offering || plugin::blockStrategy(sel.block)->canPlace(sel.block))) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
                                         world.setBlock(place.x, place.y, place.z, sel.block, true);
@@ -3131,11 +3461,18 @@ int main(int argc, char** argv) {
             player.noclip = true;
             player.dead = false;
         }
-        if (playing && !paused && !ui.matEditorOpen && !player.dead) {
-            accumulator += dt;
+        if (deploying || storyOpen) {
+            player.flying = true;
+            player.vel = { 0, 0, 0 };
+        }
+        if (playing && !paused && !ui.matEditorOpen && (!player.dead || deploying || storyOpen)) {
+            if (deploying || storyOpen) accumulator = 0.0f;
+            else accumulator += dt;
             int sub = 0;
-            while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS) {
+            while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS && !deploying && !storyOpen) {
                 player.update(world, in, cfg::FIXED_DT);
+                if (roomSession && !structureEdit)
+                    matchmap::clampOutside(player.pos, player.vel);
                 if (!roomSession) world.treeFallPhysics(cfg::FIXED_DT);
                 world.updateDrops(cfg::FIXED_DT);
                 if (const plugin::EntityModule* em = plugin::findEntity("player")) {
@@ -3153,10 +3490,13 @@ int main(int argc, char** argv) {
                     vin.mining = lmb && ui.hasTarget && lookLocked && carry.empty();
                     vin.flying = player.flying;
                     vin.landImpact = player.landImpact;
+                    if (roomSession)
+                        vin.borderDrain = matchmap::vitalRate(matchmap::outwardT(player.pos.x, player.pos.z));
                     vitals::tick(player.vitals, player.fatigue, vin, cfg::FIXED_DT);
                     if (vitals::isDead(player.vitals)) {
                         player.dead = true;
                         player.vel = { 0, 0, 0 };
+                        if (roomSession && !deploying) openDeploy(true);
                     }
                 }
                 accumulator -= cfg::FIXED_DT;
@@ -3165,6 +3505,21 @@ int main(int argc, char** argv) {
             if (sub == cfg::MAX_SUBSTEPS) accumulator = 0.0f;
 
             world.update(player.pos, 6);
+            if (deploying && deploySpan > 0) {
+                const float S = cfg::BLOCK_SCALE;
+                Vec3 zone{
+                    (deployOx + deploySpan * 0.5f) * S,
+                    player.pos.y,
+                    (deployOz + deploySpan * 0.5f) * S
+                };
+                world.update(zone, 6);
+                if (paintDeployColumns(world, deployOx, deployOz, deploySpan, deployPainted, deployPixels))
+                    deployStamp++;
+            }
+            if (structureEdit && !structurePainted && world.columnLoaded(0, 0)) {
+                structure::paintFile(world, structurePath);
+                structurePainted = true;
+            }
 
             if (player.privilegeMode) {
                 vitals::reset(player.vitals);
@@ -3228,7 +3583,101 @@ int main(int argc, char** argv) {
         ui.debugMenuOpen = roomSession ? false : debugMenuOpen;
         ui.tickSpeed = tickSpeed;
         ui.humidityMode = roomSession ? false : humidityMode;
-        ui.privilegeMode = roomSession ? false : player.privilegeMode;
+        ui.privilegeMode = (roomSession && !structureEdit) ? false : player.privilegeMode;
+        ui.hideAvatar = structureEdit || deploying || storyOpen;
+        ui.deploying = deploying;
+        ui.deployPixels = deploying ? &deployPixels : nullptr;
+        ui.deployStamp = deployStamp;
+        ui.deploySpan = deploySpan;
+        ui.deployOx = deployOx;
+        ui.deployOz = deployOz;
+        ui.deploySeconds = -1;
+        ui.deployPins.clear();
+        if (deploying) {
+            int ti = gameClient.team();
+            if (ti >= 0 && ti < (int)roomTeams.size()) {
+                ui.deployR = roomTeams[ti].r;
+                ui.deployG = roomTeams[ti].g;
+                ui.deployB = roomTeams[ti].b;
+            }
+            for (const DeployPinNet& pin : deployPins) {
+                DeployPinView v;
+                v.id = pin.id;
+                v.name = pin.name;
+                v.bx = pin.bx;
+                v.bz = pin.bz;
+                v.phase = pin.phase;
+                v.t = pin.t;
+                if (pin.id == gameClient.selfId() && pin.phase == 1) {
+                    int sec = (int)std::ceil(pin.t - 0.001f);
+                    if (sec < 1) sec = 1;
+                    ui.deploySeconds = sec;
+                }
+                ui.deployPins.push_back(std::move(v));
+            }
+        }
+        ui.structureEdit = structureEdit;
+        ui.blockBarOpen = structureEdit && blockBarOpen;
+        ui.structureBlock = editBlock;
+        if (roomSession) {
+            float t = matchmap::outwardT(player.pos.x, player.pos.z);
+            ui.borderT = t;
+            ui.borderFog = matchmap::visualFog(t);
+            ui.borderActive = true;
+        } else {
+            ui.borderT = 0.0f;
+            ui.borderFog = 0.0f;
+            ui.borderActive = false;
+        }
+        ui.storyOpen = storyOpen && playing;
+        ui.storyHold = storyOpen && storyPhase == 1;
+        ui.storyFade = storyAlpha;
+        ui.storySentence.clear();
+        if (storyOpen) {
+            int rid = ritual::assignedRitual(gameClient.team());
+            if (storyIndex >= 0 && storyIndex < ritual::storyLineCount(rid))
+                ui.storySentence = ritual::storyLine(rid, storyIndex);
+        }
+        ui.noteRitual = -1;
+        ui.noteDone = ritualDone;
+        ui.noteLineCount = 0;
+        ui.noteTitle.clear();
+        for (int i = 0; i < 3; i++) {
+            ui.noteItems[i].clear();
+            ui.noteHeld[i] = false;
+            ui.notePlaced[i] = false;
+            ui.noteItemId[i] = 0;
+        }
+        if (roomSession) {
+            int rid = ritual::assignedRitual(gameClient.team());
+            ui.noteRitual = rid;
+            if (rid >= 0) {
+                ui.noteTitle = ritual::ritualName(rid);
+                int lines = ritual::storyLineCount(rid);
+                if (lines > 8) lines = 8;
+                ui.noteLineCount = lines;
+                for (int i = 0; i < lines; i++) ui.noteLines[i] = ritual::storyLine(rid, i);
+                int relics[3];
+                ritual::recipeRelics(rid, relics);
+                for (int i = 0; i < 3; i++) {
+                    if (relics[i] < 0) continue;
+                    ui.noteItems[i] = ritual::relicName(relics[i]);
+                    ui.noteItemId[i] = (uint8_t)ritual::blockId(relics[i]);
+                    ui.noteHeld[i] = false;
+                    ui.notePlaced[i] = structure::offeringPlaced(world, rid, relics[i]);
+                    for (int s = 0; s < cfg::INVENTORY_SLOTS; s++) {
+                        if (!inv[s].empty() && inv[s].block == ui.noteItemId[i] && inv[s].count > 0)
+                            ui.noteHeld[i] = true;
+                    }
+                }
+            }
+        }
+        if (saveFlash > 0.0f) saveFlash -= dt;
+        if (structureEdit) {
+            ui.goalText = (saveFlash > 0.0f) ? "已保存建筑" : "E 打开方块栏   左键拆除   右键放置   F5 保存";
+        } else {
+            ui.goalText.clear();
+        }
         ui.vitals = &player.vitals;
         ui.playerDead = player.dead;
         if (drag.active) { ui.held.block = drag.block; ui.held.count = (uint8_t)drag.count; }
