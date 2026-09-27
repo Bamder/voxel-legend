@@ -1894,6 +1894,84 @@ inline const Clip& clipByName(const std::string& name) {
     return L.idle;
 }
 
+// Stable ids for the server tick. The same id on every client is the same clip frame.
+constexpr uint8_t kNetNone = 0;
+constexpr uint8_t kNetIdle = 1;
+constexpr uint8_t kNetWalk = 2;
+constexpr uint8_t kNetRun = 3;
+constexpr uint8_t kNetPunch = 4;
+constexpr uint8_t kNetAxe = 5;
+constexpr uint8_t kNetMineDown = 6;
+constexpr uint8_t kNetMineUp = 7;
+constexpr uint8_t kNetPickRaise = 8;
+constexpr uint8_t kNetTwoHand = 9;
+constexpr uint8_t kNetHold = 10;
+constexpr uint8_t kNetTuckR = 11;
+constexpr uint8_t kNetTuckL = 12;
+constexpr uint8_t kNetTwoHandReady = 13;
+constexpr float kNetFrameScale = 64.0f;
+
+inline uint16_t quantizeFrame(float frame) {
+    if (frame < 0.0f) frame = 0.0f;
+    float q = frame * kNetFrameScale;
+    if (q > 65535.0f) q = 65535.0f;
+    return (uint16_t)std::lround(q);
+}
+
+inline float dequantFrame(uint16_t q) { return (float)q / kNetFrameScale; }
+
+inline uint8_t netId(const Clip& c) {
+    const PlayerClips& L = playerClips();
+    if (&c == &L.idle) return kNetIdle;
+    if (&c == &L.walk) return kNetWalk;
+    if (&c == &L.run) return kNetRun;
+    if (&c == &L.punch) return kNetPunch;
+    if (&c == &L.axeChop) return kNetAxe;
+    if (&c == &L.mineDown) return kNetMineDown;
+    if (&c == &L.mineUp) return kNetMineUp;
+    if (&c == &L.pickRaise) return kNetPickRaise;
+    if (&c == &L.twoHandStrike) return kNetTwoHand;
+    if (&c == &L.twoHandReady) return kNetTwoHandReady;
+    if (&c == &L.holdBlock) return kNetHold;
+    if (&c == &L.tuckR) return kNetTuckR;
+    if (&c == &L.tuckL) return kNetTuckL;
+    return kNetIdle;
+}
+
+inline const Clip& clipFromNet(uint8_t id) {
+    const PlayerClips& L = playerClips();
+    switch (id) {
+        case kNetWalk: return L.walk;
+        case kNetRun: return L.run;
+        case kNetPunch: return L.punch;
+        case kNetAxe: return L.axeChop;
+        case kNetMineDown: return L.mineDown;
+        case kNetMineUp: return L.mineUp;
+        case kNetPickRaise: return L.pickRaise;
+        case kNetTwoHand: return L.twoHandStrike;
+        case kNetTwoHandReady: return L.twoHandReady;
+        case kNetHold: return L.holdBlock;
+        case kNetTuckR: return L.tuckR;
+        case kNetTuckL: return L.tuckL;
+        default: return L.idle;
+    }
+}
+
+inline const Clip* strikeFromNet(uint8_t id) {
+    switch (id) {
+        case kNetPunch:
+        case kNetAxe:
+        case kNetMineDown:
+        case kNetMineUp:
+        case kNetPickRaise:
+        case kNetTwoHand:
+        case kNetTwoHandReady:
+            return &clipFromNet(id);
+        default:
+            return nullptr;
+    }
+}
+
 inline const Clip* holdOverlayClip(const std::string& name) {
     PlayerClips& L = playerClips();
     if (name == "hold_block") return &L.holdBlock;

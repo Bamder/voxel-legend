@@ -38,6 +38,8 @@ struct PhysicsIsland {
     float stillTime = 0.0f;
     bool meshDirty = true;
     std::vector<Vertex> meshOpaque;
+    uint32_t netId = 0;
+    uint32_t contentRev = 0;
 
     int index(int x, int y, int z) const { return (y * sz + z) * sx + x; }
     bool inBounds(int x, int y, int z) const {

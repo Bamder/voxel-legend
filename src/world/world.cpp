@@ -34,10 +34,24 @@ constexpr int SOD_FACES[SOD_FACE_COUNT] = { 0, 2, 3, 4, 5 };
 // "Surface" dirt = dirt with a see-through block above (air/water/leaves/etc.).
 // Only surface dirt grows sod; deep cave/cliff dirt stays bare even when its side
 // face happens to touch air.
-static bool isSurfaceDirt(const World::Chunk& ch, int x, int y, int z) {
+static bool isSurfaceDirt(const World::Chunk& ch, int x, int y, int z, int aboveBlock) {
     if (ch.get(x, y, z) != DIRT) return false;
-    int above = (y + 1 < cfg::CHUNK_H) ? ch.get(x, y + 1, z) : (int)AIR;
-    return !isOpaque((uint8_t)above);
+    return !isOpaque((uint8_t)aboveBlock);
+}
+
+struct CellLoc {
+    int cx = 0, cy = 0, cz = 0, lx = 0, ly = 0, lz = 0;
+};
+
+static bool cellLoc(int x, int y, int z, CellLoc& o) {
+    if (y < 0 || y >= cfg::WORLD_H) return false;
+    o.cx = floorDiv(x, cfg::CHUNK_X);
+    o.cy = floorDiv(y, cfg::CHUNK_Y);
+    o.cz = floorDiv(z, cfg::CHUNK_Z);
+    o.lx = x - o.cx * cfg::CHUNK_X;
+    o.ly = y - o.cy * cfg::CHUNK_Y;
+    o.lz = z - o.cz * cfg::CHUNK_Z;
+    return true;
 }
 
 // Face id whose normal points along (axis, sign): +Y=0, -Y=1, +X=2, -X=3, +Z=4, -Z=5.
@@ -50,26 +64,20 @@ static int faceForNormal(int axis, int sign) {
 } // namespace
 
 uint8_t World::getBlock(int x, int y, int z) const {
-    if (y < 0 || y >= cfg::CHUNK_H) return AIR;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return AIR;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return AIR;
-    return it->second.get(lx, y, lz);
+    return it->second.get(c.lx, c.ly, c.lz);
 }
 
 uint8_t World::getFlags(int x, int y, int z) const {
-    if (y < 0 || y >= cfg::CHUNK_H) return 0;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return 0;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0;
     if (it->second.flags.size() != (size_t)cfg::CHUNK_VOLUME) return 0;
-    return it->second.flagAt(lx, y, lz);
+    return it->second.flagAt(c.lx, c.ly, c.lz);
 }
 
 bool World::isAlive(int x, int y, int z) const {
@@ -77,57 +85,71 @@ bool World::isAlive(int x, int y, int z) const {
 }
 
 uint32_t World::getTreeId(int x, int y, int z) const {
-    if (y < 0 || y >= cfg::CHUNK_H) return 0;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return 0;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0;
-    return it->second.treeIdAt(lx, y, lz);
+    return it->second.treeIdAt(c.lx, c.ly, c.lz);
 }
 
 uint8_t World::getWaterLevel(int x, int y, int z) const {
-    if (y < 0 || y >= cfg::CHUNK_H) return 0;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return 0;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0;
-    return it->second.levelAt(lx, y, lz);
+    return it->second.levelAt(c.lx, c.ly, c.lz);
 }
 
 int World::humidityAt(int x, int y, int z) const {
     return airHumidity(x, y, z);
 }
 
-World::Chunk* World::getChunk(int cx, int cz) {
-    auto it = m_chunks.find(chunkKey(cx, cz));
+World::Chunk* World::getChunk(int cx, int cy, int cz) {
+    auto it = m_chunks.find(chunkKey(cx, cy, cz));
     return it == m_chunks.end() ? nullptr : &it->second;
 }
 
-bool World::chunkExists(int cx, int cz) const {
-    return m_chunks.find(chunkKey(cx, cz)) != m_chunks.end();
+bool World::chunkExists(int cx, int cy, int cz) const {
+    return m_chunks.find(chunkKey(cx, cy, cz)) != m_chunks.end();
+}
+
+bool World::columnLoaded(int cx, int cz) const {
+    for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++)
+        if (chunkExists(cx, cy, cz)) return true;
+    return false;
+}
+
+World::Chunk* World::ensureLoadedSlice(int cx, int cy, int cz) {
+    if (cy < 0 || cy >= cfg::CHUNK_LAYERS) return nullptr;
+    int64_t key = chunkKey(cx, cy, cz);
+    auto it = m_chunks.find(key);
+    if (it != m_chunks.end()) return &it->second;
+    if (!columnLoaded(cx, cz)) return nullptr;
+    Chunk slice;
+    slice.generated = true;
+    auto [ins, ok] = m_chunks.emplace(key, std::move(slice));
+    (void)ok;
+    return &ins->second;
 }
 
 void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh) {
-    if (y < 0 || y >= cfg::CHUNK_H) return;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    int64_t key = chunkKey(cx, cz);
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return;
+    int cx = c.cx, cy = c.cy, cz = c.cz, lx = c.lx, ly = c.ly, lz = c.lz;
+    int64_t key = chunkKey(cx, cy, cz);
     auto it = m_chunks.find(key);
-    if (it == m_chunks.end()) return;
-    uint8_t prev = it->second.get(lx, y, lz);
-    uint8_t prevFlags = it->second.flagAt(lx, y, lz);
-    uint32_t prevBind = it->second.treeIdAt(lx, y, lz);
+    if (it == m_chunks.end()) {
+        if (!ensureLoadedSlice(cx, cy, cz)) return;
+        it = m_chunks.find(key);
+    }
+    uint8_t prev = it->second.get(lx, ly, lz);
+    uint8_t prevFlags = it->second.flagAt(lx, ly, lz);
+    uint32_t prevBind = it->second.treeIdAt(lx, ly, lz);
     bool cutAliveWood = isTreeWood(prev) && (prevFlags & FLAG_ALIVE) && b != prev;
     bool cutTallGrass = (prev == GRASS_TUFT && b != prev);
-    it->second.set(lx, y, lz, b);
-    it->second.setFlag(lx, y, lz, 0); // player / other placement is death
-    it->second.setTreeId(lx, y, lz, 0);
+    it->second.set(lx, ly, lz, b);
+    it->second.setFlag(lx, ly, lz, 0); // player / other placement is death
+    it->second.setTreeId(lx, ly, lz, 0);
     if (prev != b) clearBlockDur(-1, x, y, z);
 
     if (isTreeWood(prev) && b != prev) {
@@ -135,49 +157,56 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
             const geo::FaceDef& F = geo::kFaces[f];
             int nx = x + F.n[0], ny = y + F.n[1], nz = z + F.n[2];
             if (!isTreeWood(getBlock(nx, ny, nz))) continue;
-            int ncx = floorDiv(nx, cfg::CHUNK_X);
-            int ncz = floorDiv(nz, cfg::CHUNK_Z);
-            auto nit = m_chunks.find(chunkKey(ncx, ncz));
+            CellLoc nc;
+            if (!cellLoc(nx, ny, nz, nc)) continue;
+            auto nit = m_chunks.find(chunkKey(nc.cx, nc.cy, nc.cz));
             if (nit == m_chunks.end()) continue;
-            int nlx = nx - ncx * cfg::CHUNK_X;
-            int nlz = nz - ncz * cfg::CHUNK_Z;
-            uint8_t nf = nit->second.flagAt(nlx, ny, nlz);
-            nit->second.setFlag(nlx, ny, nlz, nf | flagCutFace(oppositeFace(f)));
+            uint8_t nf = nit->second.flagAt(nc.lx, nc.ly, nc.lz);
+            nit->second.setFlag(nc.lx, nc.ly, nc.lz, nf | flagCutFace(oppositeFace(f)));
             nit->second.dirty = true;
             if (markModified) nit->second.modified = true;
+            touchAuth(nx, ny, nz);
         }
     }
 
     // Water: placing water creates a temporary source (level 16); any other block
     // clears the dynamic-water level. Generated ocean water keeps level 0 (static).
     if (b == WATER) {
-        it->second.setLevel(lx, y, lz, cfg::WATER_SOURCE_LEVEL);
+        it->second.setLevel(lx, ly, lz, cfg::WATER_SOURCE_LEVEL);
         it->second.hasWater = true;
     } else {
-        it->second.setLevel(lx, y, lz, 0);
+        it->second.setLevel(lx, ly, lz, 0);
     }
 
     // Sod is attached to its dirt block: breaking or replacing that block removes
     // its sod immediately. Freshly exposed dirt stays bare (no instant regrowth) —
     // sod is only created at world generation (rebuildSod).
-    removeSodAt(it->second, lx, y, lz);
-    removeBarkAt(it->second, lx, y, lz);
+    removeSodAt(it->second, lx, ly, lz);
+    removeBarkAt(it->second, lx, ly, lz);
 
-    if (markModified) it->second.modified = true;
+    if (markModified) {
+        it->second.modified = true;
+        rememberEdited(cx, cz);
+    }
+    touchAuth(x, y, z);
+    touchAuthSod(key);
+    touchAuthBark(key);
 
-    auto rebuildNow = [&](int ncx, int ncz) {
-        auto nit = m_chunks.find(chunkKey(ncx, ncz));
+    auto rebuildNow = [&](int ncx, int ncy, int ncz) {
+        auto nit = m_chunks.find(chunkKey(ncx, ncy, ncz));
         if (nit != m_chunks.end()) {
-            buildMeshFor(nit->second, ncx, ncz);
+            buildMeshFor(nit->second, ncx, ncy, ncz);
             nit->second.dirty = false;
         }
     };
     if (updateMesh) {
-        rebuildNow(cx, cz);
-        if (lx == 0) rebuildNow(cx - 1, cz);
-        if (lx == cfg::CHUNK_X - 1) rebuildNow(cx + 1, cz);
-        if (lz == 0) rebuildNow(cx, cz - 1);
-        if (lz == cfg::CHUNK_Z - 1) rebuildNow(cx, cz + 1);
+        rebuildNow(cx, cy, cz);
+        if (lx == 0) rebuildNow(cx - 1, cy, cz);
+        if (lx == cfg::CHUNK_X - 1) rebuildNow(cx + 1, cy, cz);
+        if (lz == 0) rebuildNow(cx, cy, cz - 1);
+        if (lz == cfg::CHUNK_Z - 1) rebuildNow(cx, cy, cz + 1);
+        if (ly == 0) rebuildNow(cx, cy - 1, cz);
+        if (ly == cfg::CHUNK_Y - 1) rebuildNow(cx, cy + 1, cz);
     } else {
         it->second.dirty = true;
         m_meshQueue.push_back(key);
@@ -212,7 +241,7 @@ int World::computeHeight(int wx, int wz) const {
     float h = (float)(cfg::SEA_LEVEL - 10) + e * 72.0f;
     int hi = (int)h;
     if (hi < 1) hi = 1;
-    if (hi > cfg::CHUNK_H - 3) hi = cfg::CHUNK_H - 3;
+    if (hi > cfg::WORLD_H - 3) hi = cfg::WORLD_H - 3;
     return hi;
 }
 
@@ -227,10 +256,41 @@ void World::reset(uint32_t seed) {
     m_drops.clear();
     m_blockDur.clear();
     m_originTrees.clear();
+    m_authCells.clear();
+    m_authSod.clear();
+    m_authBark.clear();
+    m_editedCols.clear();
+    m_nextTree = 1;
 }
 
-void World::generateChunk(Chunk& ch, int cx, int cz) {
-    ch.generated = true;
+struct ColumnBuf {
+    std::vector<uint8_t> blocks;
+    std::vector<uint8_t> flags;
+    std::vector<uint32_t> treeId;
+    ColumnBuf()
+        : blocks((size_t)cfg::CHUNK_X * cfg::WORLD_H * cfg::CHUNK_Z, (uint8_t)AIR),
+          flags((size_t)cfg::CHUNK_X * cfg::WORLD_H * cfg::CHUNK_Z, 0),
+          treeId((size_t)cfg::CHUNK_X * cfg::WORLD_H * cfg::CHUNK_Z, 0) {}
+    int idx(int lx, int y, int lz) const {
+        return (y * cfg::CHUNK_Z + lz) * cfg::CHUNK_X + lx;
+    }
+    uint8_t get(int lx, int y, int lz) const { return blocks[(size_t)idx(lx, y, lz)]; }
+    void set(int lx, int y, int lz, uint8_t b) { blocks[(size_t)idx(lx, y, lz)] = b; }
+    void markAlive(int lx, int y, int lz) { flags[(size_t)idx(lx, y, lz)] |= FLAG_ALIVE; }
+    void bindAlive(int lx, int y, int lz, uint32_t id) {
+        markAlive(lx, y, lz);
+        treeId[(size_t)idx(lx, y, lz)] = id;
+    }
+};
+
+void World::generateColumn(int cx, int cz) {
+    for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+        Chunk loaded;
+        if (!loadChunkFile(cx, cy, cz, loaded)) continue;
+        m_chunks.emplace(chunkKey(cx, cy, cz), std::move(loaded));
+    }
+
+    ColumnBuf ch;
 
     // Base terrain (solid fill + water).
     for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
@@ -239,7 +299,7 @@ void World::generateChunk(Chunk& ch, int cx, int cz) {
             int wz = cz * cfg::CHUNK_Z + lz;
             int h = computeHeight(wx, wz);
             bool beach = (h <= cfg::SEA_LEVEL + 1);
-            for (int y = 0; y < cfg::CHUNK_H; y++) {
+            for (int y = 0; y < cfg::WORLD_H; y++) {
                 uint8_t b;
                 if (y == 0) b = BEDROCK;
                 else if (y == h) b = beach ? SAND : DIRT;
@@ -288,8 +348,28 @@ void World::generateChunk(Chunk& ch, int cx, int cz) {
     // Trees can spill ~18 blocks into neighboring columns. Stamp this chunk's
     // trees plus overflow from a 2-chunk neighborhood so canopies are not
     // sliced at chunk borders.
-    float forest = noise::noise2((float)cx * 0.1f, (float)cz * 0.1f, m_seed + 8888u);
-    stampTreesInto(ch, cx, cz);
+    // 0.1 per 16-block chunk; scale so a 32-wide chunk keeps the same biome size.
+    float forest = noise::noise2((float)cx * 0.2f, (float)cz * 0.2f, m_seed + 8888u);
+    auto putTree = [&](int wx, int wy, int wz, uint8_t b, uint32_t bind) {
+        if (wy < 0 || wy >= cfg::WORLD_H) return;
+        if (floorDiv(wx, cfg::CHUNK_X) != cx || floorDiv(wz, cfg::CHUNK_Z) != cz) return;
+        int lx = wx - cx * cfg::CHUNK_X;
+        int lz = wz - cz * cfg::CHUNK_Z;
+        if (ch.get(lx, wy, lz) != AIR) return;
+        ch.set(lx, wy, lz, b);
+        ch.bindAlive(lx, wy, lz, bind);
+    };
+    for (int ncz = cz - 2; ncz <= cz + 2; ncz++) {
+        for (int ncx = cx - 2; ncx <= cx + 2; ncx++) {
+            cacheOriginTrees(ncx, ncz);
+            auto it = m_originTrees.find(columnKey(ncx, ncz));
+            if (it == m_originTrees.end()) continue;
+            for (const OriginTree& t : it->second) {
+                for (const IVec3& w : t.woods) putTree(w.x, w.y, w.z, LOG, t.bindId);
+                for (const IVec3& L : t.leaves) putTree(L.x, L.y, L.z, LEAVES, t.bindId);
+            }
+        }
+    }
 
     // Shrubs: low bushes (shrub-leaf wrapping shrub-stem) as small clumps or
     // elongated strips, only inside the forest biome.
@@ -299,16 +379,17 @@ void World::generateChunk(Chunk& ch, int cx, int cz) {
 
     for (int i = 0; i < shrubCount; i++) {
         uint32_t sh = noise::hash2(cx * 911 + i * 31, cz * 733 + i * 53, m_seed + 4321u);
-        int sx = 2 + (int)(noise::hash01(sh) * 12.0f);          // 2..13
-        int sz = 2 + (int)(noise::hash01(sh ^ 0x5A5Au) * 12.0f);
+        int span = cfg::CHUNK_X - 4;
+        int sx = 2 + (int)(noise::hash01(sh) * (float)span);
+        int sz = 2 + (int)(noise::hash01(sh ^ 0x5A5Au) * (float)span);
         int wx = cx * cfg::CHUNK_X + sx;
         int wz = cz * cfg::CHUNK_Z + sz;
         int h = computeHeight(wx, wz);
-        if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::CHUNK_H - 8) continue;
+        if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::WORLD_H - 8) continue;
         if (ch.get(sx, h, sz) != DIRT) continue;
 
         auto inC = [&](int x, int y, int z) {
-            return x >= 0 && x < cfg::CHUNK_X && y >= 0 && y < cfg::CHUNK_H && z >= 0 && z < cfg::CHUNK_Z;
+            return x >= 0 && x < cfg::CHUNK_X && y >= 0 && y < cfg::WORLD_H && z >= 0 && z < cfg::CHUNK_Z;
         };
         auto leaf = [&](int x, int y, int z) {
             if (inC(x, y, z) && ch.get(x, y, z) == AIR) {
@@ -353,7 +434,7 @@ void World::generateChunk(Chunk& ch, int cx, int cz) {
     for (int gz = 0; gz < cfg::CHUNK_Z; gz++) {
         for (int gx = 0; gx < cfg::CHUNK_X; gx++) {
             int gh = computeHeight(cx * cfg::CHUNK_X + gx, cz * cfg::CHUNK_Z + gz);
-            if (gh <= cfg::SEA_LEVEL + 1 || gh >= cfg::CHUNK_H - 2) continue;
+            if (gh <= cfg::SEA_LEVEL + 1 || gh >= cfg::WORLD_H - 2) continue;
             if (ch.get(gx, gh, gz) != DIRT || ch.get(gx, gh + 1, gz) != AIR) continue;
             int h = airHumidity(cx * cfg::CHUNK_X + gx, gh + 1, cz * cfg::CHUNK_Z + gz);
             if (h < 0) h = 0;
@@ -363,20 +444,51 @@ void World::generateChunk(Chunk& ch, int cx, int cz) {
             int wz = cz * cfg::CHUNK_Z + gz;
             if (noise::hash01(noise::hash2(wx, wz, m_seed + 987u)) < density) {
                 ch.set(gx, gh + 1, gz, GRASS_TUFT);
-                bool room = (gh + 2 < cfg::CHUNK_H) && ch.get(gx, gh + 2, gz) == AIR;
+                bool room = (gh + 2 < cfg::WORLD_H) && ch.get(gx, gh + 2, gz) == AIR;
                 if (room && noise::hash01(noise::hash2(wx, wz, m_seed + 211u)) < 0.75f)
                     ch.set(gx, gh + 2, gz, GRASS_TUFT);
             }
         }
     }
+
+    for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+        bool any = false;
+        int base = cy * cfg::CHUNK_Y;
+        for (int ly = 0; ly < cfg::CHUNK_Y && !any; ly++) {
+            for (int lz = 0; lz < cfg::CHUNK_Z && !any; lz++) {
+                for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
+                    if (ch.get(lx, base + ly, lz) != AIR) { any = true; break; }
+                }
+            }
+        }
+        if (!any) continue;
+        Chunk slice;
+        slice.generated = true;
+        slice.dirty = true;
+        for (int ly = 0; ly < cfg::CHUNK_Y; ly++) {
+            for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
+                for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
+                    int src = ch.idx(lx, base + ly, lz);
+                    int dst = (ly * cfg::CHUNK_Z + lz) * cfg::CHUNK_X + lx;
+                    slice.blocks[(size_t)dst] = ch.blocks[(size_t)src];
+                    slice.flags[(size_t)dst] = ch.flags[(size_t)src];
+                    if (ch.treeId[(size_t)src] != 0) slice.setTreeId(lx, ly, lz, ch.treeId[(size_t)src]);
+                    if (slice.blocks[(size_t)dst] == WATER) slice.hasWater = true;
+                }
+            }
+        }
+        int64_t key = chunkKey(cx, cy, cz);
+        if (m_chunks.find(key) == m_chunks.end())
+            m_chunks.emplace(key, std::move(slice));
+    }
 }
 
 void World::cacheOriginTrees(int ocx, int ocz) {
-    int64_t key = chunkKey(ocx, ocz);
+    int64_t key = columnKey(ocx, ocz);
     if (m_originTrees.find(key) != m_originTrees.end()) return;
 
     std::vector<OriginTree> grown;
-    float forest = noise::noise2((float)ocx * 0.1f, (float)ocz * 0.1f, m_seed + 8888u);
+    float forest = noise::noise2((float)ocx * 0.2f, (float)ocz * 0.2f, m_seed + 8888u);
     int treeCount = 0;
     if (forest > 0.52f) treeCount = 1 + (int)((forest - 0.52f) * 6.0f);
     if (treeCount > 4) treeCount = 4;
@@ -403,7 +515,7 @@ void World::cacheOriginTrees(int ocx, int ocz) {
             int wx = ocx * cfg::CHUNK_X + ax;
             int wz = ocz * cfg::CHUNK_Z + az;
             h = computeHeight(wx, wz);
-            if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::CHUNK_H - 28) continue;
+            if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::WORLD_H - 28) continue;
             tx = ax;
             tz = az;
             placed = true;
@@ -438,73 +550,76 @@ void World::cacheOriginTrees(int ocx, int ocz) {
     m_originTrees.emplace(key, std::move(grown));
 }
 
-void World::stampTreesInto(Chunk& dest, int dcx, int dcz) {
-    auto put = [&](int wx, int wy, int wz, uint8_t b, uint32_t bind) {
-        if (wy < 0 || wy >= cfg::CHUNK_H) return;
-        if (floorDiv(wx, cfg::CHUNK_X) != dcx || floorDiv(wz, cfg::CHUNK_Z) != dcz) return;
-        int lx = wx - dcx * cfg::CHUNK_X;
-        int lz = wz - dcz * cfg::CHUNK_Z;
-        if (dest.get(lx, wy, lz) != AIR) return;
-        dest.set(lx, wy, lz, b);
-        dest.bindAlive(lx, wy, lz, bind);
-    };
-    for (int ncz = dcz - 2; ncz <= dcz + 2; ncz++) {
-        for (int ncx = dcx - 2; ncx <= dcx + 2; ncx++) {
-            cacheOriginTrees(ncx, ncz);
-            auto it = m_originTrees.find(chunkKey(ncx, ncz));
-            if (it == m_originTrees.end()) continue;
-            for (const OriginTree& t : it->second) {
-                for (const IVec3& w : t.woods) put(w.x, w.y, w.z, LOG, t.bindId);
-                for (const IVec3& L : t.leaves) put(L.x, L.y, L.z, LEAVES, t.bindId);
-            }
-        }
-    }
+void World::update(const Vec3& playerPos, int meshBudget) {
+    updateAnchors(&playerPos, 1, meshBudget);
 }
 
-void World::update(const Vec3& playerPos, int meshBudget) {
-    int pcx = floorDiv((int)std::floor(playerPos.x / cfg::BLOCK_SCALE), cfg::CHUNK_X);
-    int pcz = floorDiv((int)std::floor(playerPos.z / cfg::BLOCK_SCALE), cfg::CHUNK_Z);
+void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
+    std::vector<std::pair<int, int>> anchors;
+    if (pos && count > 0) {
+        anchors.reserve((size_t)count);
+        for (int i = 0; i < count; i++) {
+            int pcx = floorDiv((int)std::floor(pos[i].x / cfg::BLOCK_SCALE), cfg::CHUNK_X);
+            int pcz = floorDiv((int)std::floor(pos[i].z / cfg::BLOCK_SCALE), cfg::CHUNK_Z);
+            anchors.emplace_back(pcx, pcz);
+        }
+    }
+    if (anchors.empty()) anchors.emplace_back(0, 0);
 
-    // Collect missing chunk columns, nearest first, so the player's own column
+    auto colDist = [&](int cx, int cz) {
+        int best = 1 << 30;
+        for (const auto& a : anchors) {
+            int d = (cx - a.first) * (cx - a.first) + (cz - a.second) * (cz - a.second);
+            if (d < best) best = d;
+        }
+        return best;
+    };
+    auto nearAny = [&](int cx, int cz, int radius) {
+        for (const auto& a : anchors) {
+            int dist = std::max(std::abs(cx - a.first), std::abs(cz - a.second));
+            if (dist <= radius) return true;
+        }
+        return false;
+    };
+
+    // Collect missing chunk columns, nearest first, so a player's own column
     // is generated immediately (prevents falling through ungenerated terrain).
     std::vector<std::pair<int, int>> missing;
-    missing.reserve((size_t)(2 * cfg::LOAD_RADIUS + 1) * (2 * cfg::LOAD_RADIUS + 1));
-    for (int dz = -cfg::LOAD_RADIUS; dz <= cfg::LOAD_RADIUS; dz++) {
-        for (int dx = -cfg::LOAD_RADIUS; dx <= cfg::LOAD_RADIUS; dx++) {
-            int cx = pcx + dx, cz = pcz + dz;
-            if (m_chunks.find(chunkKey(cx, cz)) == m_chunks.end()) {
-                missing.emplace_back(cx, cz);
+    std::unordered_set<int64_t> seenCol;
+    for (const auto& a : anchors) {
+        for (int dz = -cfg::LOAD_RADIUS; dz <= cfg::LOAD_RADIUS; dz++) {
+            for (int dx = -cfg::LOAD_RADIUS; dx <= cfg::LOAD_RADIUS; dx++) {
+                int cx = a.first + dx, cz = a.second + dz;
+                if (!seenCol.insert(columnKey(cx, cz)).second) continue;
+                if (!columnLoaded(cx, cz)) missing.emplace_back(cx, cz);
             }
         }
     }
     std::sort(missing.begin(), missing.end(), [&](const std::pair<int, int>& a, const std::pair<int, int>& b) {
-        int da = (a.first - pcx) * (a.first - pcx) + (a.second - pcz) * (a.second - pcz);
-        int db = (b.first - pcx) * (b.first - pcx) + (b.second - pcz) * (b.second - pcz);
-        return da < db;
+        return colDist(a.first, a.second) < colDist(b.first, b.second);
     });
 
-    int genBudget = 16;
+    int genBudget = 4 * (int)anchors.size();
+    if (genBudget > 12) genBudget = 12;
     for (const auto& [cx, cz] : missing) {
         if (genBudget-- <= 0) break;
-        int64_t key = chunkKey(cx, cz);
-        Chunk ch;
-        bool loaded = loadChunkFile(cx, cz, ch);
-        if (!loaded) generateChunk(ch, cx, cz);
-        ch.dirty = true;
-        m_chunks.emplace(key, std::move(ch));
-        // Build sod after emplace so same-chunk neighbors resolve through getBlock
-        // (generateChunk runs before the chunk is in m_chunks).
-        Chunk& placed = m_chunks.find(key)->second;
-        if (!loaded || !placed.sodValid) rebuildSod(placed, cx, cz);
-        addBorderSod(cx, cz); // fill side sod deferred while this chunk was missing
-        m_meshQueue.push_back(key);
+        generateColumn(cx, cz);
+        for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+            auto it = m_chunks.find(chunkKey(cx, cy, cz));
+            if (it == m_chunks.end()) continue;
+            if (!it->second.sodValid) rebuildSod(it->second, cx, cy, cz);
+            addBorderSod(cx, cy, cz);
+            m_meshQueue.push_back(it->first);
+        }
         for (int nz = -1; nz <= 1; nz++) {
             for (int nx = -1; nx <= 1; nx++) {
                 if (nx == 0 && nz == 0) continue;
-                auto nit = m_chunks.find(chunkKey(cx + nx, cz + nz));
-                if (nit != m_chunks.end() && !nit->second.dirty) {
-                    nit->second.dirty = true;
-                    m_meshQueue.push_back(nit->first);
+                for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+                    auto nit = m_chunks.find(chunkKey(cx + nx, cy, cz + nz));
+                    if (nit != m_chunks.end() && !nit->second.dirty) {
+                        nit->second.dirty = true;
+                        m_meshQueue.push_back(nit->first);
+                    }
                 }
             }
         }
@@ -512,20 +627,21 @@ void World::update(const Vec3& playerPos, int meshBudget) {
 
     for (auto it = m_chunks.begin(); it != m_chunks.end();) {
         int cx = chunkCX(it->first), cz = chunkCZ(it->first);
-        int dist = std::max(std::abs(cx - pcx), std::abs(cz - pcz));
-        if (dist > cfg::UNLOAD_RADIUS) {
-            if (it->second.modified && m_saveEnabled) saveChunkFile(cx, cz, it->second);
+        bool keep = nearAny(cx, cz, cfg::UNLOAD_RADIUS);
+        if (!keep && m_keepEdited && m_editedCols.count(columnKey(cx, cz))) keep = true;
+        if (!keep) {
+            if (it->second.modified && m_saveEnabled)
+                saveChunkFile(cx, chunkCY(it->first), cz, it->second);
             it = m_chunks.erase(it);
         } else {
             ++it;
         }
     }
 
-    int keep = cfg::UNLOAD_RADIUS + 2;
+    int treeKeep = cfg::UNLOAD_RADIUS + 2;
     for (auto it = m_originTrees.begin(); it != m_originTrees.end();) {
-        int ocx = chunkCX(it->first), ocz = chunkCZ(it->first);
-        int dist = std::max(std::abs(ocx - pcx), std::abs(ocz - pcz));
-        if (dist > keep) it = m_originTrees.erase(it);
+        int ocx = columnCX(it->first), ocz = columnCZ(it->first);
+        if (!nearAny(ocx, ocz, treeKeep)) it = m_originTrees.erase(it);
         else ++it;
     }
 
@@ -535,7 +651,7 @@ void World::update(const Vec3& playerPos, int meshBudget) {
         m_meshQueue.pop_front();
         auto it = m_chunks.find(key);
         if (it != m_chunks.end() && it->second.dirty) {
-            buildMeshFor(it->second, chunkCX(key), chunkCZ(key));
+            buildMeshFor(it->second, chunkCX(key), chunkCY(key), chunkCZ(key));
             it->second.dirty = false;
         }
     }
@@ -561,7 +677,7 @@ float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, in
     return 1.0f - 0.25f * (float)ao; // 1.0, 0.75, 0.5, 0.25
 }
 
-void World::buildMeshFor(Chunk& ch, int cx, int cz) {
+void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
     ch.meshOpaque.clear();
     ch.meshTransparent.clear();
     ch.meshOpaque.reserve(8192);
@@ -576,7 +692,8 @@ void World::buildMeshFor(Chunk& ch, int cx, int cz) {
         sodMask[idx] |= (1u << sf.face);
     }
 
-    for (int y = 0; y < cfg::CHUNK_H; y++) {
+    for (int y = 0; y < cfg::CHUNK_Y; y++) {
+        int wy = cy * cfg::CHUNK_Y + y;
         for (int z = 0; z < cfg::CHUNK_Z; z++) {
             for (int x = 0; x < cfg::CHUNK_X; x++) {
                 uint8_t b = ch.get(x, y, z);
@@ -596,11 +713,11 @@ void World::buildMeshFor(Chunk& ch, int cx, int cz) {
                 uint8_t fl = ch.flagAt(x, y, z);
                 int trunk = 1;
                 auto isWood = [&](int ix, int iy, int iz) { return isTreeWood(getBlock(ix, iy, iz)); };
-                if (b == LOG) trunk = logTrunkAxis(wx, y, wz, fl, isWood);
+                if (b == LOG) trunk = logTrunkAxis(wx, wy, wz, fl, isWood);
 
                 for (int f = 0; f < 6; f++) {
                     const geo::FaceDef& F = geo::kFaces[f];
-                    int nx = wx + F.n[0], ny = y + F.n[1], nz = wz + F.n[2];
+                    int nx = wx + F.n[0], ny = wy + F.n[1], nz = wz + F.n[2];
                     uint8_t nb = getBlock(nx, ny, nz);
                     // Render a face when the neighbor is see-through (air, water,
                     // glass, leaves). Same-block faces are culled except for passable
@@ -620,7 +737,7 @@ void World::buildMeshFor(Chunk& ch, int cx, int cz) {
                         auto hasCut = [&](int ix, int iy, int iz, int fc) {
                             return hasCutFace(getFlags(ix, iy, iz), fc);
                         };
-                        spliceKind = spliceEndRing(wx, y, wz, f, trunk, qa, qb, longAxis, isWood, hasCut);
+                        spliceKind = spliceEndRing(wx, wy, wz, f, trunk, qa, qb, longAxis, isWood, hasCut);
                     }
                     LogFaceTex lf = (b == LOG)
                         ? logFaceTex(fl, f, trunk, spliceKind, qa, qb, longAxis)
@@ -649,7 +766,7 @@ void World::buildMeshFor(Chunk& ch, int cx, int cz) {
                             u = u0 + (u1 - u0) * F.t[c][0];
                             v = v0 + (v1 - v0) * F.t[c][1];
                         }
-                        float aof = vertexAO(wx, y, wz, F.n[0], F.n[1], F.n[2],
+                        float aof = vertexAO(wx, wy, wz, F.n[0], F.n[1], F.n[2],
                                             (int)F.p[c][0], (int)F.p[c][1], (int)F.p[c][2]);
                         vv[c] = { px, py, pz, u, v, (float)F.n[0], (float)F.n[1], (float)F.n[2],
                                   F.shade, aof, alpha };
@@ -806,54 +923,51 @@ int World::faceFromHitNormal(const Vec3& n) const {
 }
 
 bool World::hasBarkFace(int x, int y, int z, int face) const {
-    if (y < 0 || y >= cfg::CHUNK_H || face < 0 || face > 5) return false;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c) || face < 0 || face > 5) return false;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return false;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
     for (const Chunk::BarkFace& bf : it->second.barkFaces) {
-        if ((int)bf.x == lx && (int)bf.y == y && (int)bf.z == lz && (int)bf.face == face)
+        if ((int)bf.x == c.lx && (int)bf.y == c.ly && (int)bf.z == c.lz && (int)bf.face == face)
             return true;
     }
     return false;
 }
 
 bool World::addBarkFace(int x, int y, int z, int face) {
-    if (y < 0 || y >= cfg::CHUNK_H || face < 0 || face > 5) return false;
+    CellLoc c;
+    if (!cellLoc(x, y, z, c) || face < 0 || face > 5) return false;
     if (!isSolid(getBlock(x, y, z))) return false;
     if (hasBarkFace(x, y, z, face)) return false;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return false;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    it->second.barkFaces.push_back({ (uint8_t)lx, (uint8_t)lz, (uint8_t)y, (uint8_t)face });
+    it->second.barkFaces.push_back({ (uint8_t)c.lx, (uint8_t)c.lz, (uint8_t)c.ly, (uint8_t)face });
     it->second.dirty = true;
     it->second.modified = true;
     it->second.uploaded = false;
+    rememberEdited(c.cx, c.cz);
+    touchAuthBark(chunkKey(c.cx, c.cy, c.cz));
+    m_meshQueue.push_back(chunkKey(c.cx, c.cy, c.cz));
     return true;
 }
 
 bool World::takeBarkFace(int x, int y, int z, int face) {
-    if (y < 0 || y >= cfg::CHUNK_H || face < 0 || face > 5) return false;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c) || face < 0 || face > 5) return false;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return false;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
     Chunk& ch = it->second;
     for (size_t i = 0; i < ch.barkFaces.size(); i++) {
         const Chunk::BarkFace& bf = ch.barkFaces[i];
-        if ((int)bf.x == lx && (int)bf.y == y && (int)bf.z == lz && (int)bf.face == face) {
+        if ((int)bf.x == c.lx && (int)bf.y == c.ly && (int)bf.z == c.lz && (int)bf.face == face) {
             ch.barkFaces[i] = ch.barkFaces.back();
             ch.barkFaces.pop_back();
             ch.dirty = true;
             ch.modified = true;
             ch.uploaded = false;
+            rememberEdited(c.cx, c.cz);
+            touchAuthBark(chunkKey(c.cx, c.cy, c.cz));
+            m_meshQueue.push_back(chunkKey(c.cx, c.cy, c.cz));
             return true;
         }
     }
@@ -861,18 +975,15 @@ bool World::takeBarkFace(int x, int y, int z, int face) {
 }
 
 int World::takeAllBarkAt(int x, int y, int z) {
-    if (y < 0 || y >= cfg::CHUNK_H) return 0;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return 0;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
     Chunk& ch = it->second;
     int n = 0;
     for (size_t i = 0; i < ch.barkFaces.size();) {
         const Chunk::BarkFace& bf = ch.barkFaces[i];
-        if ((int)bf.x == lx && (int)bf.y == y && (int)bf.z == lz) {
+        if ((int)bf.x == c.lx && (int)bf.y == c.ly && (int)bf.z == c.lz) {
             ch.barkFaces[i] = ch.barkFaces.back();
             ch.barkFaces.pop_back();
             n++;
@@ -884,30 +995,31 @@ int World::takeAllBarkAt(int x, int y, int z) {
         ch.dirty = true;
         ch.modified = true;
         ch.uploaded = false;
+        rememberEdited(c.cx, c.cz);
+        touchAuthBark(chunkKey(c.cx, c.cy, c.cz));
+        m_meshQueue.push_back(chunkKey(c.cx, c.cy, c.cz));
     }
     return n;
 }
 
-void World::rebuildSod(Chunk& ch, int cx, int cz) {
+void World::rebuildSod(Chunk& ch, int cx, int cy, int cz) {
     ch.sodFaces.clear();
-    for (int y = 0; y < cfg::CHUNK_H; y++) {
+    for (int y = 0; y < cfg::CHUNK_Y; y++) {
+        int wy = cy * cfg::CHUNK_Y + y;
         for (int z = 0; z < cfg::CHUNK_Z; z++) {
             for (int x = 0; x < cfg::CHUNK_X; x++) {
-                // Only surface dirt grows sod; deep cave/cliff dirt stays bare.
-                if (!isSurfaceDirt(ch, x, y, z)) continue;
                 int wx = cx * cfg::CHUNK_X + x;
                 int wz = cz * cfg::CHUNK_Z + z;
+                if (!isSurfaceDirt(ch, x, y, z, getBlock(wx, wy + 1, wz))) continue;
                 for (int i = 0; i < SOD_FACE_COUNT; i++) {
                     int f = SOD_FACES[i];
                     const geo::FaceDef& F = geo::kFaces[f];
-                    int nx = wx + F.n[0], ny = y + F.n[1], nz = wz + F.n[2];
-                    // Side faces span chunks: only decide them once the neighbor
-                    // chunk exists. Otherwise we'd invent sod against unseen
-                    // terrain that may later turn out to be solid.
+                    int nx = wx + F.n[0], ny = wy + F.n[1], nz = wz + F.n[2];
                     if (F.n[1] == 0) {
                         int ncx = floorDiv(nx, cfg::CHUNK_X);
+                        int ncy = floorDiv(ny, cfg::CHUNK_Y);
                         int ncz = floorDiv(nz, cfg::CHUNK_Z);
-                        if (!chunkExists(ncx, ncz)) continue;
+                        if (!chunkExists(ncx, ncy, ncz)) continue;
                     }
                     if (isSodAir(getBlock(nx, ny, nz))) {
                         ch.sodFaces.push_back({ (uint8_t)x, (uint8_t)z, (uint8_t)y, (uint8_t)f, 0 });
@@ -919,7 +1031,7 @@ void World::rebuildSod(Chunk& ch, int cx, int cz) {
     ch.sodValid = true;
 }
 
-void World::addBorderSod(int cx, int cz) {
+void World::addBorderSod(int cx, int cy, int cz) {
     // A chunk's border side faces could not be decided until this chunk existed
     // (rebuildSod defers them). Now that (cx,cz) is loaded, fill in the side sod
     // of its four neighbors whose surface-dirt border faces touch air in here.
@@ -931,18 +1043,19 @@ void World::addBorderSod(int cx, int cz) {
         { cx,     cz + 1, 2, 0,                  5 }, // south neighbor, lz=0,  -Z face
     };
     for (const Dir& d : dirs) {
-        Chunk* nch = getChunk(d.ncx, d.ncz);
+        Chunk* nch = getChunk(d.ncx, cy, d.ncz);
         if (!nch) continue;
         bool changed = false;
         const geo::FaceDef& F = geo::kFaces[d.face];
-        for (int y = 0; y < cfg::CHUNK_H; y++) {
+        for (int y = 0; y < cfg::CHUNK_Y; y++) {
+            int wy = cy * cfg::CHUNK_Y + y;
             for (int v = 0; v < cfg::CHUNK_X; v++) {
                 int lx = (d.fixAxis == 0) ? d.fixVal : v;
                 int lz = (d.fixAxis == 2) ? d.fixVal : v;
-                if (!isSurfaceDirt(*nch, lx, y, lz)) continue;
                 int wx = d.ncx * cfg::CHUNK_X + lx;
                 int wz = d.ncz * cfg::CHUNK_Z + lz;
-                if (!isSodAir(getBlock(wx + F.n[0], y + F.n[1], wz + F.n[2]))) continue;
+                if (!isSurfaceDirt(*nch, lx, y, lz, getBlock(wx, wy + 1, wz))) continue;
+                if (!isSodAir(getBlock(wx + F.n[0], wy + F.n[1], wz + F.n[2]))) continue;
                 bool present = false;
                 for (const auto& sf : nch->sodFaces) {
                     if ((int)sf.x == lx && (int)sf.y == y && (int)sf.z == lz && (int)sf.face == d.face) {
@@ -957,7 +1070,7 @@ void World::addBorderSod(int cx, int cz) {
         }
         if (changed) {
             nch->dirty = true;
-            m_meshQueue.push_back(chunkKey(d.ncx, d.ncz));
+            m_meshQueue.push_back(chunkKey(d.ncx, cy, d.ncz));
         }
     }
 }
@@ -977,7 +1090,7 @@ void World::sodTick(int budget, uint64_t tick) {
         auto it = m_chunks.find(key);
         if (it == m_chunks.end() || it->second.sodFaces.empty()) continue;
         Chunk& ch = it->second;
-        int cx = chunkCX(key), cz = chunkCZ(key);
+        int cx = chunkCX(key), cy = chunkCY(key), cz = chunkCZ(key);
 
         size_t i = 0;
         while (i < ch.sodFaces.size() && processed < budget) {
@@ -986,11 +1099,19 @@ void World::sodTick(int budget, uint64_t tick) {
             int wx = cx * cfg::CHUNK_X + sf.x;
             int wz = cz * cfg::CHUNK_Z + sf.z;
             const geo::FaceDef& F = geo::kFaces[sf.face];
-            uint8_t nb = getBlock(wx + F.n[0], (int)sf.y + F.n[1], wz + F.n[2]);
+            int wy = cy * cfg::CHUNK_Y + (int)sf.y;
+            uint8_t nb = getBlock(wx + F.n[0], wy + F.n[1], wz + F.n[2]);
 
             if (isSodAir(nb)) {
                 // Re-exposed: regrow green and forget any wither progress.
-                if (sf.stage != 0) { sf.stage = 0; ch.dirty = true; m_meshQueue.push_back(key); }
+                if (sf.stage != 0) {
+                    sf.stage = 0;
+                    ch.dirty = true;
+                    ch.modified = true;
+                    rememberEdited(cx, cz);
+                    touchAuthSod(key);
+                    m_meshQueue.push_back(key);
+                }
                 sf.coveredTick = UINT64_MAX;
                 i++;
             } else {
@@ -1003,11 +1124,17 @@ void World::sodTick(int budget, uint64_t tick) {
                         ch.sodFaces[i] = ch.sodFaces.back();
                         ch.sodFaces.pop_back();
                         ch.dirty = true;
+                        ch.modified = true;
+                        rememberEdited(cx, cz);
+                        touchAuthSod(key);
                         m_meshQueue.push_back(key);
                         continue; // do not advance i: a different face moved into this slot
                     } else {
                         sf.stage++;
                         ch.dirty = true;
+                        ch.modified = true;
+                        rememberEdited(cx, cz);
+                        touchAuthSod(key);
                         m_meshQueue.push_back(key);
                     }
                 }
@@ -1030,25 +1157,27 @@ int World::airHumidity(int x, int y, int z) const {
 }
 
 void World::setWaterCell(int x, int y, int z, uint8_t level, bool markModified) {
-    if (y < 0 || y >= cfg::CHUNK_H) return;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return;
+    if (!ensureLoadedSlice(c.cx, c.cy, c.cz)) return;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    int64_t key = chunkKey(cx, cz);
+    int64_t key = chunkKey(c.cx, c.cy, c.cz);
     if (level == 0) {
-        it->second.set(lx, y, lz, AIR);
-        it->second.setLevel(lx, y, lz, 0);
+        it->second.set(c.lx, c.ly, c.lz, AIR);
+        it->second.setLevel(c.lx, c.ly, c.lz, 0);
     } else {
         if (level > cfg::WATER_MAX_LEVEL) level = cfg::WATER_MAX_LEVEL;
-        it->second.set(lx, y, lz, WATER);
-        it->second.setLevel(lx, y, lz, level);
+        it->second.set(c.lx, c.ly, c.lz, WATER);
+        it->second.setLevel(c.lx, c.ly, c.lz, level);
         it->second.hasWater = true;
     }
     it->second.dirty = true;
-    if (markModified) it->second.modified = true;
+    if (markModified) {
+        it->second.modified = true;
+        rememberEdited(c.cx, c.cz);
+    }
+    touchAuth(x, y, z);
     m_meshQueue.push_back(key);
 }
 
@@ -1196,14 +1325,15 @@ void World::waterTick(uint64_t tick) {
     std::vector<Cell> cells;
     for (auto& [key, ch] : m_chunks) {
         if (!ch.hasWater) continue;
-        int cx = chunkCX(key), cz = chunkCZ(key);
+        int cx = chunkCX(key), cy = chunkCY(key), cz = chunkCZ(key);
         bool any = false;
-        for (int y = 0; y < cfg::CHUNK_H; y++) {
+        for (int y = 0; y < cfg::CHUNK_Y; y++) {
+            int wy = cy * cfg::CHUNK_Y + y;
             for (int z = 0; z < cfg::CHUNK_Z; z++) {
                 for (int x = 0; x < cfg::CHUNK_X; x++) {
                     int idx = (y * cfg::CHUNK_Z + z) * cfg::CHUNK_X + x;
                     if (ch.blocks[idx] == WATER && ch.waterLevel[idx] > 0) {
-                        cells.push_back({ cx * cfg::CHUNK_X + x, y, cz * cfg::CHUNK_Z + z });
+                        cells.push_back({ cx * cfg::CHUNK_X + x, wy, cz * cfg::CHUNK_Z + z });
                         any = true;
                     }
                 }
@@ -1444,45 +1574,52 @@ struct IVec3Hash {
 } // namespace
 
 void World::writeCell(int x, int y, int z, uint8_t b, uint8_t flags, bool markModified) {
-    if (y < 0 || y >= cfg::CHUNK_H) return;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
-    if (it == m_chunks.end()) return;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
-    it->second.set(lx, y, lz, b);
-    it->second.setFlag(lx, y, lz, flags);
-    it->second.setTreeId(lx, y, lz, 0);
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return;
+    Chunk* ch = ensureLoadedSlice(c.cx, c.cy, c.cz);
+    if (!ch) return;
+    ch->set(c.lx, c.ly, c.lz, b);
+    ch->setFlag(c.lx, c.ly, c.lz, flags);
+    ch->setTreeId(c.lx, c.ly, c.lz, 0);
     if (b == WATER) {
-        it->second.setLevel(lx, y, lz, cfg::WATER_SOURCE_LEVEL);
-        it->second.hasWater = true;
+        ch->setLevel(c.lx, c.ly, c.lz, cfg::WATER_SOURCE_LEVEL);
+        ch->hasWater = true;
     } else {
-        it->second.setLevel(lx, y, lz, 0);
+        ch->setLevel(c.lx, c.ly, c.lz, 0);
     }
-    if (b != DIRT) removeSodAt(it->second, lx, y, lz);
-    removeBarkAt(it->second, lx, y, lz);
-    it->second.dirty = true;
-    if (markModified) it->second.modified = true;
+    if (b != DIRT) removeSodAt(*ch, c.lx, c.ly, c.lz);
+    removeBarkAt(*ch, c.lx, c.ly, c.lz);
+    ch->dirty = true;
+    if (markModified) {
+        ch->modified = true;
+        rememberEdited(c.cx, c.cz);
+    }
+    touchAuth(x, y, z);
+    touchAuthSod(chunkKey(c.cx, c.cy, c.cz));
+    touchAuthBark(chunkKey(c.cx, c.cy, c.cz));
 }
 
 void World::rebuildTouched(const std::vector<IVec3>& cells) {
     std::unordered_set<int64_t> keys;
+    auto add = [&](int cx, int cy, int cz) {
+        if (cy < 0 || cy >= cfg::CHUNK_LAYERS) return;
+        keys.insert(chunkKey(cx, cy, cz));
+    };
     for (const IVec3& c : cells) {
-        int cx = floorDiv(c.x, cfg::CHUNK_X);
-        int cz = floorDiv(c.z, cfg::CHUNK_Z);
-        keys.insert(chunkKey(cx, cz));
-        int lx = c.x - cx * cfg::CHUNK_X;
-        int lz = c.z - cz * cfg::CHUNK_Z;
-        if (lx == 0) keys.insert(chunkKey(cx - 1, cz));
-        if (lx == cfg::CHUNK_X - 1) keys.insert(chunkKey(cx + 1, cz));
-        if (lz == 0) keys.insert(chunkKey(cx, cz - 1));
-        if (lz == cfg::CHUNK_Z - 1) keys.insert(chunkKey(cx, cz + 1));
+        CellLoc loc;
+        if (!cellLoc(c.x, c.y, c.z, loc)) continue;
+        add(loc.cx, loc.cy, loc.cz);
+        if (loc.lx == 0) add(loc.cx - 1, loc.cy, loc.cz);
+        if (loc.lx == cfg::CHUNK_X - 1) add(loc.cx + 1, loc.cy, loc.cz);
+        if (loc.lz == 0) add(loc.cx, loc.cy, loc.cz - 1);
+        if (loc.lz == cfg::CHUNK_Z - 1) add(loc.cx, loc.cy, loc.cz + 1);
+        if (loc.ly == 0) add(loc.cx, loc.cy - 1, loc.cz);
+        if (loc.ly == cfg::CHUNK_Y - 1) add(loc.cx, loc.cy + 1, loc.cz);
     }
     for (int64_t key : keys) {
         auto it = m_chunks.find(key);
         if (it == m_chunks.end()) continue;
-        buildMeshFor(it->second, chunkCX(key), chunkCZ(key));
+        buildMeshFor(it->second, chunkCX(key), chunkCY(key), chunkCZ(key));
         it->second.dirty = false;
     }
 }
@@ -1537,12 +1674,14 @@ void World::spawnFallingTree(const std::vector<IVec3>& cells, int cutX, int cutY
     for (const IVec3& c : kept) writeCell(c.x, c.y, c.z, AIR, 0, true);
     rebuildTouched(kept);
     m_phys.push_back(std::move(t));
+    tagIsland(m_phys.back());
     splitIsland(m_phys.size() - 1);
 }
 
 void World::detachAliveTree(int x, int y, int z, uint32_t bindId) {
+    if (!m_localTrees) return;
     auto alivePart = [&](int px, int py, int pz) {
-        if (py < 0 || py >= cfg::CHUNK_H) return false;
+        if (py < 0 || py >= cfg::WORLD_H) return false;
         uint8_t b = getBlock(px, py, pz);
         return isTreePart(b) && isAlive(px, py, pz);
     };
@@ -1553,7 +1692,7 @@ void World::detachAliveTree(int x, int y, int z, uint32_t bindId) {
         return id == 0;
     };
     auto ownedWood = [&](int px, int py, int pz) {
-        if (py < 0 || py >= cfg::CHUNK_H) return false;
+        if (py < 0 || py >= cfg::WORLD_H) return false;
         if (!isTreeWood(getBlock(px, py, pz)) || !isAlive(px, py, pz)) return false;
         uint32_t id = getTreeId(px, py, pz);
         if (bindId != 0) return id == bindId;
@@ -1633,7 +1772,7 @@ void World::detachAliveTree(int x, int y, int z, uint32_t bindId) {
             miny = std::min(miny, c.y); maxy = std::max(maxy, c.y);
             minz = std::min(minz, c.z); maxz = std::max(maxz, c.z);
         }
-        minx--; maxx++; miny = std::max(0, miny - 1); maxy = std::min(cfg::CHUNK_H - 1, maxy + 1); minz--; maxz++;
+        minx--; maxx++; miny = std::max(0, miny - 1); maxy = std::min(cfg::WORLD_H - 1, maxy + 1); minz--; maxz++;
         for (int py = miny; py <= maxy; py++) {
             for (int pz = minz; pz <= maxz; pz++) {
                 for (int px = minx; px <= maxx; px++) {
@@ -1779,7 +1918,7 @@ bool World::trySettleFalling(PhysicsIsland& t) {
 
     const float S = cfg::BLOCK_SCALE;
     auto freeAt = [&](int bx, int by, int bz) {
-        if (by < 0 || by >= cfg::CHUNK_H) return false;
+        if (by < 0 || by >= cfg::WORLD_H) return false;
         uint8_t dest = getBlock(bx, by, bz);
         return dest == AIR || isLiquid(dest) || isPassableCutout(dest);
     };
@@ -1874,11 +2013,13 @@ void World::splitIsland(size_t index) {
     }
     tree_fall::recomputeMass(t);
     t.meshDirty = true;
+    t.contentRev++;
     tree_fall::buildMesh(t);
     for (PhysicsIsland& e : extra) {
         if (e.cells.empty()) continue;
         tree_fall::buildMesh(e);
         m_phys.push_back(std::move(e));
+        tagIsland(m_phys.back());
     }
 }
 
@@ -1897,7 +2038,8 @@ void World::treeFallPhysics(float dt) {
 
 void World::treeFallGameTick() {
     for (size_t i = 0; i < m_phys.size();) {
-        tree_fall::gameTick(m_phys[i]);
+        bool crushed = tree_fall::gameTick(m_phys[i]);
+        if (crushed) m_phys[i].contentRev++;
         if (m_phys[i].cells.empty()) {
             m_phys[i] = std::move(m_phys.back());
             m_phys.pop_back();
@@ -1908,21 +2050,22 @@ void World::treeFallGameTick() {
     }
 }
 
-bool World::saveChunkFile(int cx, int cz, const Chunk& ch) const {
+bool World::saveChunkFile(int cx, int cy, int cz, const Chunk& ch) const {
     if (!m_saveEnabled) return true;
     std::error_code ec;
     auto dir = saves::utf8Path(m_saveDir);
     std::filesystem::create_directories(dir, ec);
-    auto path = dir / (std::to_string(cx) + "." + std::to_string(cz) + ".bin");
+    auto path = dir / (std::to_string(cx) + "." + std::to_string(cy) + "." + std::to_string(cz) + ".bin");
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return false;
-    char magic[4] = { 'V', 'L', 'V', '1' };
+    char magic[4] = { 'V', 'L', 'V', '2' };
     uint32_t seed = m_seed, len = cfg::CHUNK_VOLUME;
-    int32_t scx = cx, scz = cz;
+    int32_t scx = cx, scy = cy, scz = cz;
     uint32_t chk = fnv1a(ch.blocks.data(), ch.blocks.size());
     f.write(magic, 4);
     f.write((const char*)&seed, 4);
     f.write((const char*)&scx, 4);
+    f.write((const char*)&scy, 4);
     f.write((const char*)&scz, 4);
     f.write((const char*)&len, 4);
     f.write((const char*)ch.blocks.data(), (std::streamsize)ch.blocks.size());
@@ -1971,7 +2114,7 @@ bool World::saveChunkFile(int cx, int cz, const Chunk& ch) const {
     std::vector<uint8_t> binds;
     if (ch.treeId.size() == (size_t)cfg::CHUNK_VOLUME) {
         binds.reserve(256 * 7);
-        for (int y = 0; y < cfg::CHUNK_H; y++) {
+        for (int y = 0; y < cfg::CHUNK_Y; y++) {
             for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
                 for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
                     uint32_t id = ch.treeIdAt(lx, y, lz);
@@ -1998,21 +2141,22 @@ bool World::saveChunkFile(int cx, int cz, const Chunk& ch) const {
     return (bool)f;
 }
 
-bool World::loadChunkFile(int cx, int cz, Chunk& ch) const {
+bool World::loadChunkFile(int cx, int cy, int cz, Chunk& ch) const {
     if (!m_saveEnabled) return false;
-    auto path = saves::utf8Path(m_saveDir) / (std::to_string(cx) + "." + std::to_string(cz) + ".bin");
+    auto path = saves::utf8Path(m_saveDir) / (std::to_string(cx) + "." + std::to_string(cy) + "." + std::to_string(cz) + ".bin");
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     char magic[4] = { 0, 0, 0, 0 };
     uint32_t seed = 0, len = 0, chk = 0;
-    int32_t scx = 0, scz = 0;
+    int32_t scx = 0, scy = 0, scz = 0;
     f.read(magic, 4);
     f.read((char*)&seed, 4);
     f.read((char*)&scx, 4);
+    f.read((char*)&scy, 4);
     f.read((char*)&scz, 4);
     f.read((char*)&len, 4);
     if (!f) return false;
-    if (std::memcmp(magic, "VLV1", 4) != 0 || seed != m_seed || scx != cx || scz != cz || len != cfg::CHUNK_VOLUME) {
+    if (std::memcmp(magic, "VLV2", 4) != 0 || seed != m_seed || scx != cx || scy != cy || scz != cz || len != cfg::CHUNK_VOLUME) {
         return false;
     }
     f.read((char*)ch.blocks.data(), (std::streamsize)ch.blocks.size());
@@ -2043,7 +2187,13 @@ bool World::loadChunkFile(int cx, int cz, Chunk& ch) const {
     size_t w = 0;
     for (size_t r = 0; r < ch.sodFaces.size(); r++) {
         const Chunk::SodFace& sf = ch.sodFaces[r];
-        if (isSurfaceDirt(ch, sf.x, sf.y, sf.z)) ch.sodFaces[w++] = sf;
+        int above = AIR;
+        if ((int)sf.y + 1 < cfg::CHUNK_Y) above = ch.get(sf.x, sf.y + 1, sf.z);
+        else {
+            auto up = m_chunks.find(chunkKey(cx, cy + 1, cz));
+            if (up != m_chunks.end()) above = up->second.get(sf.x, 0, sf.z);
+        }
+        if (isSurfaceDirt(ch, sf.x, sf.y, sf.z, above)) ch.sodFaces[w++] = sf;
     }
     ch.sodFaces.resize(w);
     ch.sodValid = true;
@@ -2099,7 +2249,7 @@ bool World::loadChunkFile(int cx, int cz, Chunk& ch) const {
     for (uint32_t i = 0; i < bindCount; i++) {
         const uint8_t* b = bindBytes.data() + (size_t)i * 7;
         int lx = b[0], lz = b[1], y = b[2];
-        if (lx >= cfg::CHUNK_X || lz >= cfg::CHUNK_Z || y >= cfg::CHUNK_H) continue;
+        if (lx >= cfg::CHUNK_X || lz >= cfg::CHUNK_Z || y >= cfg::CHUNK_Y) continue;
         uint32_t id = (uint32_t)b[3] | ((uint32_t)b[4] << 8) | ((uint32_t)b[5] << 16) | ((uint32_t)b[6] << 24);
         if (id == 0 || !isTreePart(ch.get(lx, y, lz))) continue;
         ch.setTreeId(lx, y, lz, id);
@@ -2111,7 +2261,7 @@ bool World::loadChunkFile(int cx, int cz, Chunk& ch) const {
 void World::saveAll() {
     if (!m_saveEnabled) return;
     for (const auto& [key, ch] : m_chunks) {
-        if (ch.modified) saveChunkFile(chunkCX(key), chunkCZ(key), ch);
+        if (ch.modified) saveChunkFile(chunkCX(key), chunkCY(key), chunkCZ(key), ch);
     }
 }
 
@@ -2225,32 +2375,26 @@ float World::blockDurProgress(int phys, int x, int y, int z) const {
 }
 
 bool World::hasSodFace(int x, int y, int z, int face) const {
-    if (y < 0 || y >= cfg::CHUNK_H || face < 0 || face > 5) return false;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c) || face < 0 || face > 5) return false;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return false;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
     for (const Chunk::SodFace& sf : it->second.sodFaces) {
-        if ((int)sf.x == lx && (int)sf.y == y && (int)sf.z == lz && (int)sf.face == face)
+        if ((int)sf.x == c.lx && (int)sf.y == c.ly && (int)sf.z == c.lz && (int)sf.face == face)
             return true;
     }
     return false;
 }
 
 float World::sodDurProgress(int x, int y, int z, int face) const {
-    if (y < 0 || y >= cfg::CHUNK_H || face < 0 || face > 5) return 0.0f;
-    int cx = floorDiv(x, cfg::CHUNK_X);
-    int cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = m_chunks.find(chunkKey(cx, cz));
+    CellLoc c;
+    if (!cellLoc(x, y, z, c) || face < 0 || face > 5) return 0.0f;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0.0f;
-    int lx = x - cx * cfg::CHUNK_X;
-    int lz = z - cz * cfg::CHUNK_Z;
     float maxD = loot::sodBreak().durability;
     if (maxD <= 0.001f) return 0.0f;
     for (const Chunk::SodFace& sf : it->second.sodFaces) {
-        if ((int)sf.x != lx || (int)sf.y != y || (int)sf.z != lz || (int)sf.face != face)
+        if ((int)sf.x != c.lx || (int)sf.y != c.ly || (int)sf.z != c.lz || (int)sf.face != face)
             continue;
         float rem = (sf.rem < 0.0f) ? maxD : sf.rem;
         return clampf(1.0f - rem / maxD, 0.0f, 1.0f);
@@ -2285,16 +2429,15 @@ static bool applySodHit(World::Chunk& ch, int lx, int y, int lz, int face, uint8
 
 bool World::applyMineHit(int phys, int x, int y, int z, uint8_t heldTool, int face) {
     if (phys < 0 && face >= 0 && hasSodFace(x, y, z, face)) {
-        int cx = floorDiv(x, cfg::CHUNK_X);
-        int cz = floorDiv(z, cfg::CHUNK_Z);
-        auto it = m_chunks.find(chunkKey(cx, cz));
-        if (it != m_chunks.end()) {
-            int lx = x - cx * cfg::CHUNK_X;
-            int lz = z - cz * cfg::CHUNK_Z;
-            applySodHit(it->second, lx, y, lz, face, heldTool);
-            if (it->second.dirty) {
-                buildMeshFor(it->second, cx, cz);
-                it->second.dirty = false;
+        CellLoc c;
+        if (cellLoc(x, y, z, c)) {
+            auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
+            if (it != m_chunks.end()) {
+                applySodHit(it->second, c.lx, c.ly, c.lz, face, heldTool);
+                if (it->second.dirty) {
+                    buildMeshFor(it->second, c.cx, c.cy, c.cz);
+                    it->second.dirty = false;
+                }
             }
         }
         return false; // sod is not the dirt block
@@ -2399,5 +2542,427 @@ void World::updateDrops(float dt) {
         }
         i++;
     }
+}
+
+void World::touchAuth(int x, int y, int z) {
+    if (!m_authCapture) return;
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
+    if (it == m_chunks.end()) return;
+    AuthCell cell;
+    cell.x = x;
+    cell.y = y;
+    cell.z = z;
+    cell.block = it->second.get(c.lx, c.ly, c.lz);
+    cell.water = it->second.levelAt(c.lx, c.ly, c.lz);
+    cell.flags = it->second.flagAt(c.lx, c.ly, c.lz);
+    m_authCells[AuthCellKey{ x, y, z }] = cell;
+    rememberEdited(c.cx, c.cz);
+}
+
+void World::touchAuthSod(int64_t key) {
+    if (!m_authCapture) return;
+    m_authSod.insert(key);
+    rememberEdited(chunkCX(key), chunkCZ(key));
+}
+
+void World::touchAuthBark(int64_t key) {
+    if (!m_authCapture) return;
+    m_authBark.insert(key);
+    rememberEdited(chunkCX(key), chunkCZ(key));
+}
+
+void World::rememberEdited(int cx, int cz) {
+    if (!m_keepEdited) return;
+    m_editedCols.insert(columnKey(cx, cz));
+}
+
+void World::remeshChunk(int cx, int cy, int cz) {
+    const int n[7][3] = {
+        { 0, 0, 0 }, { -1, 0, 0 }, { 1, 0, 0 }, { 0, 0, -1 }, { 0, 0, 1 }, { 0, -1, 0 }, { 0, 1, 0 }
+    };
+    for (int i = 0; i < 7; i++) {
+        int x = cx + n[i][0], y = cy + n[i][1], z = cz + n[i][2];
+        auto it = m_chunks.find(chunkKey(x, y, z));
+        if (it == m_chunks.end()) continue;
+        buildMeshFor(it->second, x, y, z);
+        it->second.dirty = false;
+    }
+}
+
+uint32_t World::chunkAuthHash(const Chunk& ch) const {
+    uint32_t h = 2166136261u;
+    auto mix = [&](const uint8_t* p, size_t n) {
+        for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    };
+    mix(ch.blocks.data(), ch.blocks.size());
+    mix(ch.waterLevel.data(), ch.waterLevel.size());
+    mix(ch.flags.data(), ch.flags.size());
+    std::vector<AuthSod> sods;
+    sods.reserve(ch.sodFaces.size());
+    for (const Chunk::SodFace& sf : ch.sodFaces) {
+        if (sf.face >= 6) continue;
+        sods.push_back(AuthSod{ sf.x, sf.z, sf.y, sf.face, sf.stage });
+    }
+    std::sort(sods.begin(), sods.end(), [](const AuthSod& a, const AuthSod& b) {
+        if (a.y != b.y) return a.y < b.y;
+        if (a.z != b.z) return a.z < b.z;
+        if (a.x != b.x) return a.x < b.x;
+        return a.face < b.face;
+    });
+    for (const AuthSod& s : sods) {
+        uint8_t b[5] = { s.x, s.z, s.y, s.face, s.stage };
+        mix(b, 5);
+    }
+    std::vector<AuthBark> barks;
+    barks.reserve(ch.barkFaces.size());
+    for (const Chunk::BarkFace& bf : ch.barkFaces)
+        barks.push_back(AuthBark{ bf.x, bf.z, bf.y, bf.face });
+    std::sort(barks.begin(), barks.end(), [](const AuthBark& a, const AuthBark& b) {
+        if (a.y != b.y) return a.y < b.y;
+        if (a.z != b.z) return a.z < b.z;
+        if (a.x != b.x) return a.x < b.x;
+        return a.face < b.face;
+    });
+    for (const AuthBark& bk : barks) {
+        uint8_t b[4] = { bk.x, bk.z, bk.y, bk.face };
+        mix(b, 4);
+    }
+    return h;
+}
+
+std::vector<World::AuthSlice> World::flushAuth() {
+    std::unordered_map<int64_t, AuthSlice> slices;
+    for (const auto& kv : m_authCells) {
+        const AuthCell& cell = kv.second;
+        CellLoc c;
+        if (!cellLoc(cell.x, cell.y, cell.z, c)) continue;
+        int64_t key = chunkKey(c.cx, c.cy, c.cz);
+        AuthSlice& s = slices[key];
+        s.cx = c.cx;
+        s.cy = c.cy;
+        s.cz = c.cz;
+        s.cells.push_back(cell);
+    }
+    for (int64_t key : m_authSod) {
+        auto it = m_chunks.find(key);
+        if (it == m_chunks.end()) continue;
+        AuthSlice& s = slices[key];
+        s.cx = chunkCX(key);
+        s.cy = chunkCY(key);
+        s.cz = chunkCZ(key);
+        s.sod = true;
+        s.sods.clear();
+        s.sods.reserve(it->second.sodFaces.size());
+        for (const Chunk::SodFace& sf : it->second.sodFaces) {
+            if (sf.face >= 6) continue;
+            s.sods.push_back(AuthSod{ sf.x, sf.z, sf.y, sf.face, sf.stage });
+        }
+    }
+    for (int64_t key : m_authBark) {
+        auto it = m_chunks.find(key);
+        if (it == m_chunks.end()) continue;
+        AuthSlice& s = slices[key];
+        s.cx = chunkCX(key);
+        s.cy = chunkCY(key);
+        s.cz = chunkCZ(key);
+        s.bark = true;
+        s.barks.clear();
+        s.barks.reserve(it->second.barkFaces.size());
+        for (const Chunk::BarkFace& bf : it->second.barkFaces)
+            s.barks.push_back(AuthBark{ bf.x, bf.z, bf.y, bf.face });
+    }
+    m_authCells.clear();
+    m_authSod.clear();
+    m_authBark.clear();
+    std::vector<AuthSlice> out;
+    out.reserve(slices.size());
+    for (auto& kv : slices) out.push_back(std::move(kv.second));
+    return out;
+}
+
+void World::ensureColumn(int cx, int cz) {
+    if (columnLoaded(cx, cz)) return;
+    generateColumn(cx, cz);
+    for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+        auto it = m_chunks.find(chunkKey(cx, cy, cz));
+        if (it == m_chunks.end()) continue;
+        if (!it->second.sodValid) rebuildSod(it->second, cx, cy, cz);
+        addBorderSod(cx, cy, cz);
+        m_meshQueue.push_back(it->first);
+    }
+}
+
+void World::acceptSeedChunk(int cx, int cy, int cz) {
+    int64_t key = chunkKey(cx, cy, cz);
+    auto it = m_chunks.find(key);
+    bool changed = false;
+    if (it != m_chunks.end() && it->second.modified) {
+        m_chunks.erase(it);
+        changed = true;
+    }
+    if (!chunkExists(cx, cy, cz)) {
+        generateColumn(cx, cz);
+        changed = true;
+    }
+    it = m_chunks.find(key);
+    if (it == m_chunks.end()) return;
+    if (!it->second.sodValid) {
+        rebuildSod(it->second, cx, cy, cz);
+        addBorderSod(cx, cy, cz);
+        changed = true;
+    }
+    if (changed) remeshChunk(cx, cy, cz);
+}
+
+void World::writeAuthChunk(int cx, int cy, int cz, const uint8_t* blocks, const uint8_t* water,
+                           const uint8_t* flags, const std::vector<AuthSod>& sod,
+                           const std::vector<AuthBark>& bark) {
+    if (!blocks || !water || !flags) return;
+    if (!columnLoaded(cx, cz)) ensureColumn(cx, cz);
+    int64_t key = chunkKey(cx, cy, cz);
+    auto it = m_chunks.find(key);
+    if (it == m_chunks.end()) {
+        Chunk slice;
+        slice.generated = true;
+        it = m_chunks.emplace(key, std::move(slice)).first;
+    }
+    Chunk& ch = it->second;
+    ch.blocks.assign(blocks, blocks + cfg::CHUNK_VOLUME);
+    ch.waterLevel.assign(water, water + cfg::CHUNK_VOLUME);
+    ch.flags.assign(flags, flags + cfg::CHUNK_VOLUME);
+    ch.treeId.clear();
+    ch.barkFaces.clear();
+    ch.barkFaces.reserve(bark.size());
+    for (const AuthBark& bk : bark) {
+        if (bk.face >= 6) continue;
+        ch.barkFaces.push_back(Chunk::BarkFace{ bk.x, bk.z, bk.y, bk.face });
+    }
+    ch.sodFaces.clear();
+    ch.sodFaces.reserve(sod.size());
+    for (const AuthSod& s : sod) {
+        if (s.face >= 6) continue;
+        Chunk::SodFace sf;
+        sf.x = s.x;
+        sf.z = s.z;
+        sf.y = s.y;
+        sf.face = s.face;
+        sf.stage = s.stage;
+        ch.sodFaces.push_back(sf);
+    }
+    ch.sodValid = true;
+    ch.generated = true;
+    ch.modified = true;
+    ch.hasWater = false;
+    for (uint8_t lvl : ch.waterLevel) {
+        if (lvl > 0) { ch.hasWater = true; break; }
+    }
+    rememberEdited(cx, cz);
+    remeshChunk(cx, cy, cz);
+}
+
+bool World::writeAuthDelta(int cx, int cy, int cz, const std::vector<AuthCell>& cells,
+                           bool replaceSod, const std::vector<AuthSod>& sod,
+                           bool replaceBark, const std::vector<AuthBark>& bark) {
+    auto it = m_chunks.find(chunkKey(cx, cy, cz));
+    if (it == m_chunks.end()) return false;
+    Chunk& ch = it->second;
+    for (const AuthCell& cell : cells) {
+        CellLoc c;
+        if (!cellLoc(cell.x, cell.y, cell.z, c)) continue;
+        if (c.cx != cx || c.cy != cy || c.cz != cz) continue;
+        ch.set(c.lx, c.ly, c.lz, cell.block);
+        ch.setLevel(c.lx, c.ly, c.lz, cell.water);
+        ch.setFlag(c.lx, c.ly, c.lz, cell.flags);
+        if (cell.block == WATER && cell.water > 0) ch.hasWater = true;
+    }
+    if (replaceSod) {
+        ch.sodFaces.clear();
+        ch.sodFaces.reserve(sod.size());
+        for (const AuthSod& s : sod) {
+            if (s.face >= 6) continue;
+            Chunk::SodFace sf;
+            sf.x = s.x;
+            sf.z = s.z;
+            sf.y = s.y;
+            sf.face = s.face;
+            sf.stage = s.stage;
+            ch.sodFaces.push_back(sf);
+        }
+        ch.sodValid = true;
+    }
+    if (replaceBark) {
+        ch.barkFaces.clear();
+        ch.barkFaces.reserve(bark.size());
+        for (const AuthBark& bk : bark) {
+            if (bk.face >= 6) continue;
+            ch.barkFaces.push_back(Chunk::BarkFace{ bk.x, bk.z, bk.y, bk.face });
+        }
+    }
+    ch.generated = true;
+    ch.modified = true;
+    ch.dirty = true;
+    rememberEdited(cx, cz);
+    remeshChunk(cx, cy, cz);
+    return true;
+}
+
+void World::tagIsland(PhysicsIsland& t) {
+    if (!m_tagTrees || t.netId != 0) return;
+    t.netId = m_nextTree++;
+    if (m_nextTree == 0) m_nextTree = 1;
+    if (t.contentRev == 0) t.contentRev = 1;
+}
+
+static void mixByte(uint32_t& h, uint8_t v) { h ^= v; h *= 16777619u; }
+
+static uint32_t hashTreeCells(uint32_t h, const PhysicsIsland& t) {
+    mixByte(h, (uint8_t)t.netId);
+    mixByte(h, (uint8_t)(t.netId >> 8));
+    mixByte(h, (uint8_t)(t.netId >> 16));
+    mixByte(h, (uint8_t)(t.netId >> 24));
+    std::vector<IVec3> cells = t.cells;
+    std::sort(cells.begin(), cells.end(), [](const IVec3& a, const IVec3& b) {
+        if (a.y != b.y) return a.y < b.y;
+        if (a.z != b.z) return a.z < b.z;
+        return a.x < b.x;
+    });
+    for (const IVec3& c : cells) {
+        if (c.x < 0 || c.y < 0 || c.z < 0 || c.x > 255 || c.y > 255 || c.z > 255) continue;
+        mixByte(h, (uint8_t)c.x);
+        mixByte(h, (uint8_t)c.y);
+        mixByte(h, (uint8_t)c.z);
+        mixByte(h, t.get(c.x, c.y, c.z));
+        mixByte(h, t.flagAt(c.x, c.y, c.z));
+    }
+    return h;
+}
+
+uint32_t World::treeAuthHash() const {
+    std::vector<const PhysicsIsland*> list;
+    list.reserve(m_phys.size());
+    for (const PhysicsIsland& t : m_phys)
+        if (t.netId) list.push_back(&t);
+    std::sort(list.begin(), list.end(), [](const PhysicsIsland* a, const PhysicsIsland* b) {
+        return a->netId < b->netId;
+    });
+    uint32_t h = 2166136261u;
+    for (const PhysicsIsland* t : list) h = hashTreeCells(h, *t);
+    return h;
+}
+
+uint32_t World::treeAuthHashOf(const std::vector<uint32_t>& ids) const {
+    std::vector<uint32_t> order = ids;
+    std::sort(order.begin(), order.end());
+    uint32_t h = 2166136261u;
+    for (uint32_t id : order) {
+        for (const PhysicsIsland& t : m_phys) {
+            if (t.netId != id) continue;
+            h = hashTreeCells(h, t);
+            break;
+        }
+    }
+    return h;
+}
+
+void World::exportNetTree(const PhysicsIsland& t, NetTree& out, bool withCells) const {
+    out = NetTree{};
+    out.id = t.netId;
+    out.rev = t.contentRev;
+    out.cells = withCells;
+    out.ox = t.originX;
+    out.oy = t.originY;
+    out.oz = t.originZ;
+    out.com = t.com;
+    out.vel = t.vel;
+    out.omega = t.omega;
+    out.ax = t.ax;
+    out.ay = t.ay;
+    out.az = t.az;
+    out.pivot = t.pivotRest;
+    out.hold = t.holdPivot;
+    out.still = t.stillTime;
+    if (!withCells) return;
+    out.body.reserve(t.cells.size());
+    for (const IVec3& c : t.cells) {
+        if (c.x < 0 || c.y < 0 || c.z < 0 || c.x > 255 || c.y > 255 || c.z > 255) continue;
+        NetTreeCell cell;
+        cell.x = (uint8_t)c.x;
+        cell.y = (uint8_t)c.y;
+        cell.z = (uint8_t)c.z;
+        cell.block = t.get(c.x, c.y, c.z);
+        cell.flags = t.flagAt(c.x, c.y, c.z);
+        if (cell.block == AIR) continue;
+        out.body.push_back(cell);
+    }
+}
+
+static void copyTreePose(PhysicsIsland& t, const World::NetTree& n) {
+    t.com = n.com;
+    t.vel = n.vel;
+    t.omega = n.omega;
+    t.ax = n.ax;
+    t.ay = n.ay;
+    t.az = n.az;
+    t.pivotRest = n.pivot;
+    t.holdPivot = n.hold;
+    t.stillTime = n.still;
+    t.contentRev = n.rev;
+}
+
+bool World::applyNetTrees(const std::vector<NetTree>& trees, const std::vector<uint32_t>& gone) {
+    bool ok = true;
+    for (uint32_t id : gone) {
+        for (size_t i = 0; i < m_phys.size();) {
+            if (m_phys[i].netId == id) {
+                m_phys[i] = std::move(m_phys.back());
+                m_phys.pop_back();
+            } else {
+                i++;
+            }
+        }
+    }
+    for (const NetTree& n : trees) {
+        if (n.id == 0) continue;
+        PhysicsIsland* found = nullptr;
+        for (PhysicsIsland& t : m_phys) {
+            if (t.netId == n.id) { found = &t; break; }
+        }
+        if (!n.cells) {
+            if (!found) { ok = false; continue; }
+            copyTreePose(*found, n);
+            continue;
+        }
+        if (n.body.empty()) {
+            if (found) {
+                size_t idx = (size_t)(found - m_phys.data());
+                if (idx + 1 != m_phys.size()) m_phys[idx] = std::move(m_phys.back());
+                m_phys.pop_back();
+            }
+            continue;
+        }
+        int maxx = 1, maxy = 1, maxz = 1;
+        for (const NetTreeCell& c : n.body) {
+            maxx = std::max(maxx, (int)c.x + 1);
+            maxy = std::max(maxy, (int)c.y + 1);
+            maxz = std::max(maxz, (int)c.z + 1);
+        }
+        PhysicsIsland built;
+        tree_fall::allocate(built, maxx, maxy, maxz);
+        built.originX = n.ox;
+        built.originY = n.oy;
+        built.originZ = n.oz;
+        for (const NetTreeCell& c : n.body)
+            tree_fall::setCell(built, c.x, c.y, c.z, c.block, c.flags);
+        tree_fall::recomputeMass(built);
+        tree_fall::buildMesh(built);
+        copyTreePose(built, n);
+        built.netId = n.id;
+        built.meshDirty = false;
+        if (found) *found = std::move(built);
+        else m_phys.push_back(std::move(built));
+    }
+    return ok;
 }
 

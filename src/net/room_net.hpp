@@ -119,8 +119,7 @@ public:
     float spawnZ() const { return sz; }
     bool spectator() const { return spec; }
     int team() const { return teamId; }
-    void sendInput(float x, float y, float z, float yaw, float pitch, bool spectator, uint32_t ack,
-                   const std::vector<BlockEditNet>& edits);
+    void sendInput(const PlayInputNet& in);
     std::vector<PlayDeltaNet> takeDeltas();
 
 private:

@@ -3,21 +3,32 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "../core/config.hpp"
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint16_t kRoomProto = 1;
+constexpr uint32_t kRoomProto = 2609271056u;
+
+// PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
+constexpr uint8_t kPfSprint = 1;
+constexpr uint8_t kPfFly = 2;
+constexpr uint8_t kPfGround = 4;
+
+constexpr uint8_t kStrikeNone = 0;
+constexpr uint8_t kStrikePunch = 1;
+constexpr uint8_t kStrikeAxe = 2;
+constexpr uint8_t kStrikePick = 3;
 
 enum class RoomMsg : uint16_t {
-    Hello = 1,       // lobby: u16 proto, string name
+    Hello = 1,       // lobby: u32 proto, string name
     Welcome = 2,     // u32 id
     Lobby = 3,       // port, teams, players
     JoinTeam = 4,    // i32 team
     MatchStart = 5,  // empty; guests reconnect to the dedicated server
-    PlayHello = 6,   // u16 proto, string name
+    PlayHello = 6,   // u32 proto, string name
     PlayWelcome = 7, // id, seed, spawn, spectator, team
-    PlayInput = 8,   // pose + block edits + world ack
-    PlayDelta = 9    // per-client player/world increment
+    PlayInput = 8,   // pose, avatar inputs, block edits, chunk resync asks
+    PlayDelta = 9    // server tick + player state + chunk baseline / delta / hash
 };
 
 struct RoomTeamNet {
@@ -38,11 +49,100 @@ struct BlockEditNet {
     uint8_t block = 0;
 };
 
+// One player's visible state at a server tick.
+// clip/frameQ/strike/strikeQ is the animation frame drawn for that tick
+// (clip id + quantized frame, plus the strike overlay).
 struct PlayerPoseNet {
     uint32_t id = 0;
     std::string name;
-    float x = 0, y = 0, z = 0, yaw = 0, pitch = 0;
+    float x = 0, y = 0, z = 0, yaw = 0, pitch = 0, bodyYaw = 0;
     bool spectator = false;
+    uint8_t clip = 1;
+    uint16_t frameQ = 0;
+    uint8_t strike = 0;
+    uint16_t strikeQ = 0;
+    uint8_t heldL = 0, heldR = 0, carried = 0;
+    uint8_t wearU = 0, wearL = 0, wearS = 0;
+};
+
+struct PlayInputNet {
+    float x = 0, y = 0, z = 0, yaw = 0, pitch = 0, bodyYaw = 0;
+    float vx = 0, vz = 0;
+    bool spectator = false;
+    uint32_t ack = 0;
+    uint8_t flags = 0;
+    uint8_t heldL = 0, heldR = 0, carried = 0;
+    uint8_t wearU = 0, wearL = 0, wearS = 0;
+    uint8_t strikeKind = 0;
+    float strikeCharge = 0, strikeCool = 0, mineCharge = 0, mineCooldown = 0;
+    bool pickRaised = false;
+    std::vector<BlockEditNet> edits;
+    struct ChunkAsk { int cx = 0, cy = 0, cz = 0; };
+    std::vector<ChunkAsk> resync;
+    struct BarkEdit { int x = 0, y = 0, z = 0; uint8_t face = 0; bool place = false; };
+    std::vector<BarkEdit> bark;
+    bool treeResync = false;
+};
+
+struct AuthCellNet {
+    int x = 0, y = 0, z = 0;
+    uint8_t block = 0, water = 0, flags = 0;
+};
+
+struct AuthSodNet {
+    uint8_t x = 0, z = 0, y = 0, face = 0, stage = 0;
+};
+
+struct AuthBarkNet {
+    uint8_t x = 0, z = 0, y = 0, face = 0;
+};
+
+struct TreeCellNet {
+    uint8_t x = 0, y = 0, z = 0, block = 0, flags = 0;
+};
+
+struct TreeNet {
+    uint32_t id = 0;
+    uint32_t rev = 0;
+    bool cells = false;
+    int ox = 0, oy = 0, oz = 0;
+    float cx = 0, cy = 0, cz = 0;
+    float vx = 0, vy = 0, vz = 0;
+    float wx = 0, wy = 0, wz = 0;
+    float ax = 1, ay = 0, az = 0;
+    float bx = 0, by = 1, bz = 0;
+    float dx = 0, dy = 0, dz = 1;
+    float px = 0, py = 0, pz = 0;
+    bool hold = false;
+    float still = 0;
+    std::vector<TreeCellNet> body;
+};
+
+struct ChunkBaseNet {
+    int cx = 0, cy = 0, cz = 0;
+    uint32_t rev = 0;
+    bool pristine = false;
+    std::vector<uint8_t> blocks;
+    std::vector<uint8_t> water;
+    std::vector<uint8_t> flags;
+    std::vector<AuthSodNet> sod;
+    std::vector<AuthBarkNet> bark;
+};
+
+struct ChunkDeltaNet {
+    int cx = 0, cy = 0, cz = 0;
+    uint32_t rev = 0;
+    std::vector<AuthCellNet> cells;
+    bool sod = false;
+    std::vector<AuthSodNet> sods;
+    bool bark = false;
+    std::vector<AuthBarkNet> barks;
+};
+
+struct ChunkHashNet {
+    int cx = 0, cy = 0, cz = 0;
+    uint32_t rev = 0;
+    uint32_t hash = 0;
 };
 
 class Buf {
@@ -69,6 +169,7 @@ public:
         u16(n);
         d.insert(d.end(), s.begin(), s.begin() + n);
     }
+    void bytes(const uint8_t* p, size_t n) { if (n) d.insert(d.end(), p, p + n); }
     const std::vector<uint8_t>& data() const { return d; }
 
     static bool u8(const uint8_t*& p, const uint8_t* end, uint8_t& o) {
@@ -107,6 +208,12 @@ public:
         p += n;
         return true;
     }
+    static bool bytes(const uint8_t*& p, const uint8_t* end, uint8_t* dst, size_t n) {
+        if (n > (size_t)(end - p)) return false;
+        if (n) std::memcpy(dst, p, n);
+        p += n;
+        return true;
+    }
 
 private:
     std::vector<uint8_t> d;
@@ -114,14 +221,14 @@ private:
 
 inline std::vector<uint8_t> encodeHello(const std::string& name) {
     Buf b;
-    b.u16(kRoomProto);
+    b.u32(kRoomProto);
     b.str(name);
     return b.data();
 }
 
 inline bool decodeHello(const uint8_t* p, const uint8_t* end, std::string& name) {
-    uint16_t proto = 0;
-    if (!Buf::u16(p, end, proto) || proto != kRoomProto) return false;
+    uint32_t proto = 0;
+    if (!Buf::u32(p, end, proto) || proto != kRoomProto) return false;
     return Buf::str(p, end, name);
 }
 
@@ -227,58 +334,125 @@ inline bool decodePlayWelcome(const uint8_t* p, const uint8_t* end, uint32_t& id
     return true;
 }
 
-inline std::vector<uint8_t> encodePlayInput(float x, float y, float z, float yaw, float pitch,
-                                            bool spectator, uint32_t ack,
-                                            const std::vector<BlockEditNet>& edits) {
+inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
     Buf b;
-    b.f32(x);
-    b.f32(y);
-    b.f32(z);
-    b.f32(yaw);
-    b.f32(pitch);
-    b.u8(spectator ? 1 : 0);
-    b.u32(ack);
-    uint16_t n = (uint16_t)(edits.size() > 32 ? 32 : edits.size());
+    b.f32(in.x);
+    b.f32(in.y);
+    b.f32(in.z);
+    b.f32(in.yaw);
+    b.f32(in.pitch);
+    b.u8(in.spectator ? 1 : 0);
+    b.u32(in.ack);
+    uint16_t n = (uint16_t)(in.edits.size() > 32 ? 32 : in.edits.size());
     b.u16(n);
     for (uint16_t i = 0; i < n; i++) {
-        b.i32(edits[i].x);
-        b.i32(edits[i].y);
-        b.i32(edits[i].z);
-        b.u8(edits[i].block);
+        b.i32(in.edits[i].x);
+        b.i32(in.edits[i].y);
+        b.i32(in.edits[i].z);
+        b.u8(in.edits[i].block);
     }
+    b.f32(in.bodyYaw);
+    b.f32(in.vx);
+    b.f32(in.vz);
+    b.u8(in.flags);
+    b.u8(in.heldL);
+    b.u8(in.heldR);
+    b.u8(in.carried);
+    b.u8(in.wearU);
+    b.u8(in.wearL);
+    b.u8(in.wearS);
+    b.u8(in.strikeKind);
+    b.f32(in.strikeCharge);
+    b.f32(in.strikeCool);
+    b.f32(in.mineCharge);
+    b.f32(in.mineCooldown);
+    b.u8(in.pickRaised ? 1 : 0);
+    uint8_t nr = (uint8_t)(in.resync.size() > 8 ? 8 : in.resync.size());
+    b.u8(nr);
+    for (uint8_t i = 0; i < nr; i++) {
+        b.i32(in.resync[i].cx);
+        b.i32(in.resync[i].cy);
+        b.i32(in.resync[i].cz);
+    }
+    uint8_t nbk = (uint8_t)(in.bark.size() > 8 ? 8 : in.bark.size());
+    b.u8(nbk);
+    for (uint8_t i = 0; i < nbk; i++) {
+        b.i32(in.bark[i].x);
+        b.i32(in.bark[i].y);
+        b.i32(in.bark[i].z);
+        b.u8(in.bark[i].face);
+        b.u8(in.bark[i].place ? 1 : 0);
+    }
+    b.u8(in.treeResync ? 1 : 0);
     return b.data();
 }
 
-inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, float& x, float& y, float& z,
-                            float& yaw, float& pitch, bool& spectator, uint32_t& ack,
-                            std::vector<BlockEditNet>& edits) {
-    edits.clear();
+inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& in) {
+    in = PlayInputNet{};
     uint8_t spec = 0;
     uint16_t n = 0;
-    if (!Buf::f32(p, end, x) || !Buf::f32(p, end, y) || !Buf::f32(p, end, z) ||
-        !Buf::f32(p, end, yaw) || !Buf::f32(p, end, pitch) || !Buf::u8(p, end, spec) ||
-        !Buf::u32(p, end, ack) || !Buf::u16(p, end, n) || n > 32)
+    uint8_t raised = 0;
+    if (!Buf::f32(p, end, in.x) || !Buf::f32(p, end, in.y) || !Buf::f32(p, end, in.z) ||
+        !Buf::f32(p, end, in.yaw) || !Buf::f32(p, end, in.pitch) || !Buf::u8(p, end, spec) ||
+        !Buf::u32(p, end, in.ack) || !Buf::u16(p, end, n) || n > 32)
         return false;
-    spectator = spec != 0;
-    edits.resize(n);
+    in.spectator = spec != 0;
+    in.edits.resize(n);
     for (uint16_t i = 0; i < n; i++) {
-        if (!Buf::i32(p, end, edits[i].x) || !Buf::i32(p, end, edits[i].y) ||
-            !Buf::i32(p, end, edits[i].z) || !Buf::u8(p, end, edits[i].block))
+        if (!Buf::i32(p, end, in.edits[i].x) || !Buf::i32(p, end, in.edits[i].y) ||
+            !Buf::i32(p, end, in.edits[i].z) || !Buf::u8(p, end, in.edits[i].block))
             return false;
     }
+    if (!Buf::f32(p, end, in.bodyYaw) || !Buf::f32(p, end, in.vx) || !Buf::f32(p, end, in.vz) ||
+        !Buf::u8(p, end, in.flags) || !Buf::u8(p, end, in.heldL) || !Buf::u8(p, end, in.heldR) ||
+        !Buf::u8(p, end, in.carried) || !Buf::u8(p, end, in.wearU) || !Buf::u8(p, end, in.wearL) ||
+        !Buf::u8(p, end, in.wearS) || !Buf::u8(p, end, in.strikeKind) ||
+        !Buf::f32(p, end, in.strikeCharge) || !Buf::f32(p, end, in.strikeCool) ||
+        !Buf::f32(p, end, in.mineCharge) || !Buf::f32(p, end, in.mineCooldown) ||
+        !Buf::u8(p, end, raised))
+        return false;
+    in.pickRaised = raised != 0;
+    uint8_t nr = 0;
+    if (!Buf::u8(p, end, nr) || nr > 8) return false;
+    in.resync.resize(nr);
+    for (uint8_t i = 0; i < nr; i++) {
+        if (!Buf::i32(p, end, in.resync[i].cx) || !Buf::i32(p, end, in.resync[i].cy) ||
+            !Buf::i32(p, end, in.resync[i].cz))
+            return false;
+    }
+    uint8_t nbk = 0;
+    if (!Buf::u8(p, end, nbk) || nbk > 8) return false;
+    in.bark.resize(nbk);
+    for (uint8_t i = 0; i < nbk; i++) {
+        uint8_t place = 0;
+        if (!Buf::i32(p, end, in.bark[i].x) || !Buf::i32(p, end, in.bark[i].y) ||
+            !Buf::i32(p, end, in.bark[i].z) || !Buf::u8(p, end, in.bark[i].face) ||
+            !Buf::u8(p, end, place))
+            return false;
+        in.bark[i].place = place != 0;
+    }
+    uint8_t tr = 0;
+    if (!Buf::u8(p, end, tr)) return false;
+    in.treeResync = tr != 0;
     return true;
 }
 
 struct PlayDeltaNet {
-    uint32_t baseRev = 0;
+    uint32_t serverTick = 0;
     std::vector<uint32_t> removed;
     std::vector<PlayerPoseNet> players;
-    std::vector<BlockEditNet> edits;
+    std::vector<ChunkBaseNet> bases;
+    std::vector<ChunkDeltaNet> deltas;
+    std::vector<ChunkHashNet> checks;
+    std::vector<TreeNet> trees;
+    std::vector<uint32_t> treesGone;
+    bool treeCheck = false;
+    uint32_t treeHash = 0;
 };
 
 inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
     Buf b;
-    b.u32(d.baseRev);
+    b.u32(d.serverTick);
     b.u16((uint16_t)d.removed.size());
     for (uint32_t id : d.removed) b.u32(id);
     b.u16((uint16_t)d.players.size());
@@ -290,45 +464,271 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
         b.f32(pl.z);
         b.f32(pl.yaw);
         b.f32(pl.pitch);
+        b.f32(pl.bodyYaw);
         b.u8(pl.spectator ? 1 : 0);
+        b.u8(pl.clip);
+        b.u16(pl.frameQ);
+        b.u8(pl.strike);
+        b.u16(pl.strikeQ);
+        b.u8(pl.heldL);
+        b.u8(pl.heldR);
+        b.u8(pl.carried);
+        b.u8(pl.wearU);
+        b.u8(pl.wearL);
+        b.u8(pl.wearS);
     }
-    b.u16((uint16_t)d.edits.size());
-    for (const BlockEditNet& e : d.edits) {
-        b.i32(e.x);
-        b.i32(e.y);
-        b.i32(e.z);
-        b.u8(e.block);
+    b.u16((uint16_t)d.bases.size());
+    for (const ChunkBaseNet& base : d.bases) {
+        b.i32(base.cx);
+        b.i32(base.cy);
+        b.i32(base.cz);
+        b.u32(base.rev);
+        b.u8(base.pristine ? 1 : 0);
+        if (base.pristine) continue;
+        b.bytes(base.blocks.data(), base.blocks.size());
+        b.bytes(base.water.data(), base.water.size());
+        b.bytes(base.flags.data(), base.flags.size());
+        b.u16((uint16_t)base.sod.size());
+        for (const AuthSodNet& s : base.sod) {
+            b.u8(s.x);
+            b.u8(s.z);
+            b.u8(s.y);
+            b.u8(s.face);
+            b.u8(s.stage);
+        }
+        b.u16((uint16_t)base.bark.size());
+        for (const AuthBarkNet& bk : base.bark) {
+            b.u8(bk.x);
+            b.u8(bk.z);
+            b.u8(bk.y);
+            b.u8(bk.face);
+        }
     }
+    b.u16((uint16_t)d.deltas.size());
+    for (const ChunkDeltaNet& delta : d.deltas) {
+        b.i32(delta.cx);
+        b.i32(delta.cy);
+        b.i32(delta.cz);
+        b.u32(delta.rev);
+        b.u16((uint16_t)delta.cells.size());
+        for (const AuthCellNet& c : delta.cells) {
+            b.i32(c.x);
+            b.i32(c.y);
+            b.i32(c.z);
+            b.u8(c.block);
+            b.u8(c.water);
+            b.u8(c.flags);
+        }
+        b.u8(delta.sod ? 1 : 0);
+        if (delta.sod) {
+            b.u16((uint16_t)delta.sods.size());
+            for (const AuthSodNet& s : delta.sods) {
+                b.u8(s.x);
+                b.u8(s.z);
+                b.u8(s.y);
+                b.u8(s.face);
+                b.u8(s.stage);
+            }
+        }
+        b.u8(delta.bark ? 1 : 0);
+        if (delta.bark) {
+            b.u16((uint16_t)delta.barks.size());
+            for (const AuthBarkNet& bk : delta.barks) {
+                b.u8(bk.x);
+                b.u8(bk.z);
+                b.u8(bk.y);
+                b.u8(bk.face);
+            }
+        }
+    }
+    b.u16((uint16_t)d.checks.size());
+    for (const ChunkHashNet& chk : d.checks) {
+        b.i32(chk.cx);
+        b.i32(chk.cy);
+        b.i32(chk.cz);
+        b.u32(chk.rev);
+        b.u32(chk.hash);
+    }
+    b.u16((uint16_t)d.trees.size());
+    for (const TreeNet& t : d.trees) {
+        b.u32(t.id);
+        b.u32(t.rev);
+        b.u8(t.cells ? 1 : 0);
+        b.f32(t.cx); b.f32(t.cy); b.f32(t.cz);
+        b.f32(t.vx); b.f32(t.vy); b.f32(t.vz);
+        b.f32(t.wx); b.f32(t.wy); b.f32(t.wz);
+        b.f32(t.ax); b.f32(t.ay); b.f32(t.az);
+        b.f32(t.bx); b.f32(t.by); b.f32(t.bz);
+        b.f32(t.dx); b.f32(t.dy); b.f32(t.dz);
+        b.f32(t.px); b.f32(t.py); b.f32(t.pz);
+        b.u8(t.hold ? 1 : 0);
+        b.f32(t.still);
+        if (!t.cells) continue;
+        b.i32(t.ox); b.i32(t.oy); b.i32(t.oz);
+        b.u16((uint16_t)t.body.size());
+        for (const TreeCellNet& c : t.body) {
+            b.u8(c.x); b.u8(c.y); b.u8(c.z); b.u8(c.block); b.u8(c.flags);
+        }
+    }
+    b.u16((uint16_t)d.treesGone.size());
+    for (uint32_t id : d.treesGone) b.u32(id);
+    b.u8(d.treeCheck ? 1 : 0);
+    if (d.treeCheck) b.u32(d.treeHash);
     return b.data();
 }
 
 inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& d) {
     d = PlayDeltaNet{};
-    if (!Buf::u32(p, end, d.baseRev)) return false;
+    if (!Buf::u32(p, end, d.serverTick)) return false;
     uint16_t nr = 0;
-    if (!Buf::u16(p, end, nr) || nr > 32) return false;
+    if (!Buf::u16(p, end, nr) || nr > 64) return false;
     d.removed.resize(nr);
     for (uint16_t i = 0; i < nr; i++)
         if (!Buf::u32(p, end, d.removed[i])) return false;
     uint16_t np = 0;
-    if (!Buf::u16(p, end, np) || np > 32) return false;
+    if (!Buf::u16(p, end, np) || np > 64) return false;
     d.players.resize(np);
     for (uint16_t i = 0; i < np; i++) {
         uint8_t spec = 0;
         PlayerPoseNet& pl = d.players[i];
         if (!Buf::u32(p, end, pl.id) || !Buf::str(p, end, pl.name) || !Buf::f32(p, end, pl.x) ||
             !Buf::f32(p, end, pl.y) || !Buf::f32(p, end, pl.z) || !Buf::f32(p, end, pl.yaw) ||
-            !Buf::f32(p, end, pl.pitch) || !Buf::u8(p, end, spec))
+            !Buf::f32(p, end, pl.pitch) || !Buf::f32(p, end, pl.bodyYaw) || !Buf::u8(p, end, spec) ||
+            !Buf::u8(p, end, pl.clip) || !Buf::u16(p, end, pl.frameQ) ||
+            !Buf::u8(p, end, pl.strike) || !Buf::u16(p, end, pl.strikeQ) ||
+            !Buf::u8(p, end, pl.heldL) || !Buf::u8(p, end, pl.heldR) || !Buf::u8(p, end, pl.carried) ||
+            !Buf::u8(p, end, pl.wearU) || !Buf::u8(p, end, pl.wearL) || !Buf::u8(p, end, pl.wearS))
             return false;
         pl.spectator = spec != 0;
     }
-    uint16_t ne = 0;
-    if (!Buf::u16(p, end, ne) || ne > 48) return false;
-    d.edits.resize(ne);
-    for (uint16_t i = 0; i < ne; i++) {
-        if (!Buf::i32(p, end, d.edits[i].x) || !Buf::i32(p, end, d.edits[i].y) ||
-            !Buf::i32(p, end, d.edits[i].z) || !Buf::u8(p, end, d.edits[i].block))
+    uint16_t nb = 0;
+    if (!Buf::u16(p, end, nb) || nb > 32) return false;
+    d.bases.resize(nb);
+    for (uint16_t i = 0; i < nb; i++) {
+        ChunkBaseNet& base = d.bases[i];
+        uint8_t pristine = 0;
+        if (!Buf::i32(p, end, base.cx) || !Buf::i32(p, end, base.cy) || !Buf::i32(p, end, base.cz) ||
+            !Buf::u32(p, end, base.rev) || !Buf::u8(p, end, pristine))
+            return false;
+        base.pristine = pristine != 0;
+        if (base.pristine) continue;
+        base.blocks.resize((size_t)cfg::CHUNK_VOLUME);
+        base.water.resize((size_t)cfg::CHUNK_VOLUME);
+        base.flags.resize((size_t)cfg::CHUNK_VOLUME);
+        if (!Buf::bytes(p, end, base.blocks.data(), base.blocks.size()) ||
+            !Buf::bytes(p, end, base.water.data(), base.water.size()) ||
+            !Buf::bytes(p, end, base.flags.data(), base.flags.size()))
+            return false;
+        uint16_t ns = 0;
+        if (!Buf::u16(p, end, ns) || ns > 20000) return false;
+        base.sod.resize(ns);
+        for (uint16_t s = 0; s < ns; s++) {
+            if (!Buf::u8(p, end, base.sod[s].x) || !Buf::u8(p, end, base.sod[s].z) ||
+                !Buf::u8(p, end, base.sod[s].y) || !Buf::u8(p, end, base.sod[s].face) ||
+                !Buf::u8(p, end, base.sod[s].stage))
+                return false;
+        }
+        uint16_t nk = 0;
+        if (!Buf::u16(p, end, nk) || nk > 20000) return false;
+        base.bark.resize(nk);
+        for (uint16_t k = 0; k < nk; k++) {
+            if (!Buf::u8(p, end, base.bark[k].x) || !Buf::u8(p, end, base.bark[k].z) ||
+                !Buf::u8(p, end, base.bark[k].y) || !Buf::u8(p, end, base.bark[k].face))
+                return false;
+        }
+    }
+    uint16_t nd = 0;
+    if (!Buf::u16(p, end, nd) || nd > 64) return false;
+    d.deltas.resize(nd);
+    for (uint16_t i = 0; i < nd; i++) {
+        ChunkDeltaNet& delta = d.deltas[i];
+        uint16_t nc = 0;
+        if (!Buf::i32(p, end, delta.cx) || !Buf::i32(p, end, delta.cy) || !Buf::i32(p, end, delta.cz) ||
+            !Buf::u32(p, end, delta.rev) || !Buf::u16(p, end, nc) || nc > 8192)
+            return false;
+        delta.cells.resize(nc);
+        for (uint16_t c = 0; c < nc; c++) {
+            if (!Buf::i32(p, end, delta.cells[c].x) || !Buf::i32(p, end, delta.cells[c].y) ||
+                !Buf::i32(p, end, delta.cells[c].z) || !Buf::u8(p, end, delta.cells[c].block) ||
+                !Buf::u8(p, end, delta.cells[c].water) || !Buf::u8(p, end, delta.cells[c].flags))
+                return false;
+        }
+        uint8_t sod = 0;
+        if (!Buf::u8(p, end, sod)) return false;
+        delta.sod = sod != 0;
+        if (delta.sod) {
+            uint16_t ns = 0;
+            if (!Buf::u16(p, end, ns) || ns > 20000) return false;
+            delta.sods.resize(ns);
+            for (uint16_t s = 0; s < ns; s++) {
+                if (!Buf::u8(p, end, delta.sods[s].x) || !Buf::u8(p, end, delta.sods[s].z) ||
+                    !Buf::u8(p, end, delta.sods[s].y) || !Buf::u8(p, end, delta.sods[s].face) ||
+                    !Buf::u8(p, end, delta.sods[s].stage))
+                    return false;
+            }
+        }
+        uint8_t bark = 0;
+        if (!Buf::u8(p, end, bark)) return false;
+        delta.bark = bark != 0;
+        if (delta.bark) {
+            uint16_t nk = 0;
+            if (!Buf::u16(p, end, nk) || nk > 20000) return false;
+            delta.barks.resize(nk);
+            for (uint16_t k = 0; k < nk; k++) {
+                if (!Buf::u8(p, end, delta.barks[k].x) || !Buf::u8(p, end, delta.barks[k].z) ||
+                    !Buf::u8(p, end, delta.barks[k].y) || !Buf::u8(p, end, delta.barks[k].face))
+                    return false;
+            }
+        }
+    }
+    uint16_t nh = 0;
+    if (!Buf::u16(p, end, nh) || nh > 32) return false;
+    d.checks.resize(nh);
+    for (uint16_t i = 0; i < nh; i++) {
+        if (!Buf::i32(p, end, d.checks[i].cx) || !Buf::i32(p, end, d.checks[i].cy) ||
+            !Buf::i32(p, end, d.checks[i].cz) || !Buf::u32(p, end, d.checks[i].rev) ||
+            !Buf::u32(p, end, d.checks[i].hash))
             return false;
     }
+    uint16_t nt = 0;
+    if (!Buf::u16(p, end, nt) || nt > 32) return false;
+    d.trees.resize(nt);
+    for (uint16_t i = 0; i < nt; i++) {
+        TreeNet& t = d.trees[i];
+        uint8_t full = 0, hold = 0;
+        if (!Buf::u32(p, end, t.id) || !Buf::u32(p, end, t.rev) || !Buf::u8(p, end, full) ||
+            !Buf::f32(p, end, t.cx) || !Buf::f32(p, end, t.cy) || !Buf::f32(p, end, t.cz) ||
+            !Buf::f32(p, end, t.vx) || !Buf::f32(p, end, t.vy) || !Buf::f32(p, end, t.vz) ||
+            !Buf::f32(p, end, t.wx) || !Buf::f32(p, end, t.wy) || !Buf::f32(p, end, t.wz) ||
+            !Buf::f32(p, end, t.ax) || !Buf::f32(p, end, t.ay) || !Buf::f32(p, end, t.az) ||
+            !Buf::f32(p, end, t.bx) || !Buf::f32(p, end, t.by) || !Buf::f32(p, end, t.bz) ||
+            !Buf::f32(p, end, t.dx) || !Buf::f32(p, end, t.dy) || !Buf::f32(p, end, t.dz) ||
+            !Buf::f32(p, end, t.px) || !Buf::f32(p, end, t.py) || !Buf::f32(p, end, t.pz) ||
+            !Buf::u8(p, end, hold) || !Buf::f32(p, end, t.still))
+            return false;
+        t.cells = full != 0;
+        t.hold = hold != 0;
+        if (!t.cells) continue;
+        uint16_t nc = 0;
+        if (!Buf::i32(p, end, t.ox) || !Buf::i32(p, end, t.oy) || !Buf::i32(p, end, t.oz) ||
+            !Buf::u16(p, end, nc) || nc > 8000)
+            return false;
+        t.body.resize(nc);
+        for (uint16_t c = 0; c < nc; c++) {
+            if (!Buf::u8(p, end, t.body[c].x) || !Buf::u8(p, end, t.body[c].y) ||
+                !Buf::u8(p, end, t.body[c].z) || !Buf::u8(p, end, t.body[c].block) ||
+                !Buf::u8(p, end, t.body[c].flags))
+                return false;
+        }
+    }
+    uint16_t ng = 0;
+    if (!Buf::u16(p, end, ng) || ng > 32) return false;
+    d.treesGone.resize(ng);
+    for (uint16_t i = 0; i < ng; i++)
+        if (!Buf::u32(p, end, d.treesGone[i])) return false;
+    uint8_t tc = 0;
+    if (!Buf::u8(p, end, tc)) return false;
+    d.treeCheck = tc != 0;
+    if (d.treeCheck && !Buf::u32(p, end, d.treeHash)) return false;
     return true;
 }

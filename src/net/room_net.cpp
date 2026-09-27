@@ -609,10 +609,9 @@ void GameClient::poll() {
     if (phase == Phase::WaitWelcome || phase == Phase::Play) pumpWelcome();
 }
 
-void GameClient::sendInput(float x, float y, float z, float yaw, float pitch, bool spectator, uint32_t ack,
-                           const std::vector<BlockEditNet>& edits) {
+void GameClient::sendInput(const PlayInputNet& in) {
     if (phase != Phase::Play) return;
-    conn.send((uint16_t)RoomMsg::PlayInput, encodePlayInput(x, y, z, yaw, pitch, spectator, ack, edits));
+    conn.send((uint16_t)RoomMsg::PlayInput, encodePlayInput(in));
     conn.pump();
 }
 
@@ -656,7 +655,7 @@ bool writeRoomHandoff(const std::string& utf8Path, const std::vector<RoomTeamNet
                       const std::vector<RoomPlayerNet>& players, std::string& err) {
     Buf b;
     b.u32(0x534C5652u); // 'RVLS' little-endian marker
-    b.u16(kRoomProto);
+    b.u32(kRoomProto);
     b.u16((uint16_t)teams.size());
     for (const RoomTeamNet& t : teams) {
         b.str(t.name);
@@ -690,9 +689,9 @@ bool readRoomHandoff(const std::string& utf8Path, std::vector<RoomTeamNet>& team
     const uint8_t* p = bytes.data();
     const uint8_t* end = p + bytes.size();
     uint32_t magic = 0;
-    uint16_t proto = 0;
+    uint32_t proto = 0;
     if (!Buf::u32(p, end, magic) || magic != 0x534C5652u) return false;
-    if (!Buf::u16(p, end, proto) || proto != kRoomProto) return false;
+    if (!Buf::u32(p, end, proto) || proto != kRoomProto) return false;
     uint16_t nt = 0;
     if (!Buf::u16(p, end, nt) || nt > 16) return false;
     teams.resize(nt);

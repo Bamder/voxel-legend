@@ -2,14 +2,18 @@
 #include <cstdint>
 
 namespace cfg {
-    // World
-    constexpr int CHUNK_X = 16;
-    constexpr int CHUNK_Z = 16;
-    constexpr int CHUNK_H = 128;
-    constexpr int CHUNK_VOLUME = CHUNK_X * CHUNK_H * CHUNK_Z;
+    // One chunk is 32×16×32 (x, y, z). The world is still 128 blocks tall,
+    // so a column is 8 chunks stacked. LOAD_RADIUS is in chunks: 3×32 matches
+    // the old 6×16 horizontal reach.
+    constexpr int CHUNK_X = 32;
+    constexpr int CHUNK_Y = 16;
+    constexpr int CHUNK_Z = 32;
+    constexpr int WORLD_H = 128;
+    constexpr int CHUNK_LAYERS = WORLD_H / CHUNK_Y;
+    constexpr int CHUNK_VOLUME = CHUNK_X * CHUNK_Y * CHUNK_Z;
 
     constexpr int SEA_LEVEL = 36;
-    constexpr int LOAD_RADIUS = 6;        // chunk columns around player to keep loaded
+    constexpr int LOAD_RADIUS = 3;        // horizontal chunks around the player
     constexpr int UNLOAD_RADIUS = LOAD_RADIUS + 2;
 
     // Block scale: edge length of one voxel in world units. Half-size blocks give

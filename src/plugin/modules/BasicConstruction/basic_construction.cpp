@@ -98,7 +98,7 @@ struct GrassTuftStrategy : BlockStrategy {
         if (y > 0 && ch.get(lx, y - 1, lz) == GRASS_TUFT) return true;
         float u0, v0, u1, v1;
         tex::tileUV(TEX_GRASS_TUFT, u0, v0, u1, v1);
-        bool twoHigh = (y + 1 < cfg::CHUNK_H && ch.get(lx, y + 1, lz) == GRASS_TUFT);
+        bool twoHigh = (y + 1 < cfg::CHUNK_Y && ch.get(lx, y + 1, lz) == GRASS_TUFT);
         // Two-cell tufts must reach 75% into the second cell (world height 1.75).
         float unitMax = mat::g_grassTuft.rand.get("tall_base", 0.375f)
                       + mat::g_grassTuft.rand.get("tall_range", 0.375f);

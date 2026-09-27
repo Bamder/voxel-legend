@@ -5,6 +5,7 @@
 #include "world/data_pack.hpp"
 #include "world/saves.hpp"
 #include "world/player.hpp"
+#include "world/animation.hpp"
 #include "world/player_model.hpp"
 #include "world/hold_bind.hpp"
 #include "world/vitals.hpp"
@@ -493,11 +494,25 @@ static int inventoryAdd(ItemSlot* inv, uint8_t block, int count) {
 static bool g_roomRecord = false;
 static bool g_roomApplyNet = false;
 static std::vector<BlockEditNet> g_roomEdits;
+static std::vector<PlayInputNet::BarkEdit> g_roomBark;
+static bool g_treeResync = false;
 
 static void noteRoomEdit(int x, int y, int z, uint8_t b) {
     if (!g_roomRecord || g_roomApplyNet) return;
     if (g_roomEdits.size() >= 256) g_roomEdits.erase(g_roomEdits.begin());
     g_roomEdits.push_back(BlockEditNet{ x, y, z, b });
+}
+
+static void noteRoomBark(int x, int y, int z, int face, bool place) {
+    if (!g_roomRecord || g_roomApplyNet || face < 0 || face > 5) return;
+    if (g_roomBark.size() >= 64) g_roomBark.erase(g_roomBark.begin());
+    PlayInputNet::BarkEdit e;
+    e.x = x;
+    e.y = y;
+    e.z = z;
+    e.face = (uint8_t)face;
+    e.place = place;
+    g_roomBark.push_back(e);
 }
 
 static Vec3 cellCenter(int x, int y, int z) {
@@ -543,7 +558,7 @@ static void finishMinedBlock(World& world, uint8_t held, int physHit, const IVec
     uint8_t b = world.getBlock(hit.x, hit.y, hit.z);
     if (b == AIR || !plugin::blockStrategy(b)->canBreak(b)) return;
     int extraGrass = 0;
-    if (b == GRASS_TUFT && hit.y + 1 < cfg::CHUNK_H
+    if (b == GRASS_TUFT && hit.y + 1 < cfg::WORLD_H
         && world.getBlock(hit.x, hit.y + 1, hit.z) == GRASS_TUFT)
         extraGrass = 1;
     bool harvest = loot::isHarvestBreak(b, held);
@@ -693,7 +708,7 @@ static int runSelfTest(uint32_t seed, int iterations) {
             }
             // Placement test: find an air cell above the surface and fill it.
             int py = h + 2;
-            if (py < cfg::CHUNK_H - 1 && world.getBlock((int)px, py, (int)pz) == AIR) {
+            if (py < cfg::WORLD_H - 1 && world.getBlock((int)px, py, (int)pz) == AIR) {
                 world.setBlock((int)px, py, (int)pz, STONE, true);
                 placed++;
             }
@@ -728,12 +743,16 @@ static int runSelfTest(uint32_t seed, int iterations) {
 // the bare pit persists across a save/load round-trip.
 // ---------------------------------------------------------------------------
 static int sodStageOf(const World& w, int x, int y, int z, int face) {
-    int cx = floorDiv(x, cfg::CHUNK_X), cz = floorDiv(z, cfg::CHUNK_Z);
-    auto it = w.chunks().find(chunkKey(cx, cz));
+    int cx = floorDiv(x, cfg::CHUNK_X);
+    int cy = floorDiv(y, cfg::CHUNK_Y);
+    int cz = floorDiv(z, cfg::CHUNK_Z);
+    auto it = w.chunks().find(chunkKey(cx, cy, cz));
     if (it == w.chunks().end()) return -1;
-    int lx = x - cx * cfg::CHUNK_X, lz = z - cz * cfg::CHUNK_Z;
+    int lx = x - cx * cfg::CHUNK_X;
+    int ly = y - cy * cfg::CHUNK_Y;
+    int lz = z - cz * cfg::CHUNK_Z;
     for (const auto& sf : it->second.sodFaces) {
-        if ((int)sf.x == lx && (int)sf.y == y && (int)sf.z == lz && (int)sf.face == face)
+        if ((int)sf.x == lx && (int)sf.y == ly && (int)sf.z == lz && (int)sf.face == face)
             return (int)sf.stage;
     }
     return -1; // absent (removed or never grown)
@@ -741,13 +760,14 @@ static int sodStageOf(const World& w, int x, int y, int z, int face) {
 
 static bool findTopSodDirt(const World& w, int& ox, int& oy, int& oz) {
     for (const auto& [key, ch] : w.chunks()) {
-        int cx = chunkCX(key), cz = chunkCZ(key);
+        int cx = chunkCX(key), cy = chunkCY(key), cz = chunkCZ(key);
         for (const auto& sf : ch.sodFaces) {
             if (sf.face != 0 || ch.get(sf.x, sf.y, sf.z) != DIRT) continue;
             int wx = cx * cfg::CHUNK_X + sf.x;
+            int wy = cy * cfg::CHUNK_Y + sf.y;
             int wz = cz * cfg::CHUNK_Z + sf.z;
-            if (w.getBlock(wx, sf.y + 1, wz) != AIR) continue;
-            ox = wx; oy = sf.y; oz = wz;
+            if (w.getBlock(wx, wy + 1, wz) != AIR) continue;
+            ox = wx; oy = wy; oz = wz;
             return true;
         }
     }
@@ -813,8 +833,8 @@ static int runWitherTest(uint32_t seed) {
     if (world.getBlock(sx, sy, sz) != AIR) { ok = false; printf("[dig] surface block was not removed\n"); }
     {
         // The affected chunk's mesh must be rebuilt synchronously (no ghost block).
-        int dcx = floorDiv(sx, cfg::CHUNK_X), dcz = floorDiv(sz, cfg::CHUNK_Z);
-        auto dit = world.chunks().find(chunkKey(dcx, dcz));
+        int dcx = floorDiv(sx, cfg::CHUNK_X), dcy = floorDiv(sy, cfg::CHUNK_Y), dcz = floorDiv(sz, cfg::CHUNK_Z);
+        auto dit = world.chunks().find(chunkKey(dcx, dcy, dcz));
         if (dit != world.chunks().end() && dit->second.dirty) {
             ok = false;
             printf("[dig] chunk still dirty after setBlock (mesh not rebuilt synchronously)\n");
@@ -862,40 +882,42 @@ static int runWitherTest(uint32_t seed) {
         bool foundCliff = false, cliffMissing = false;
         int ccx = 0, ccy = 0, ccz = 0;
         for (const auto& [key, ch] : w3.chunks()) {
-            int cx = chunkCX(key), cz = chunkCZ(key);
-            for (int y = 1; y < cfg::CHUNK_H - 1; y++) {
+            int cx = chunkCX(key), cy = chunkCY(key), cz = chunkCZ(key);
+            for (int y = 0; y < cfg::CHUNK_Y; y++) {
+                int wy = cy * cfg::CHUNK_Y + y;
+                if (wy <= 0 || wy >= cfg::WORLD_H - 1) continue;
                 for (int z = 0; z < cfg::CHUNK_Z; z++) {
                     for (int x = 0; x < cfg::CHUNK_X; x++) {
                         if (ch.get(x, y, z) != DIRT) continue;
-                        int above = ch.get(x, y + 1, z);
+                        int above = (y + 1 < cfg::CHUNK_Y) ? ch.get(x, y + 1, z) : w3.getBlock(cx * cfg::CHUNK_X + x, wy + 1, cz * cfg::CHUNK_Z + z);
                         bool surface = !isOpaque((uint8_t)above);
                         int wx = cx * cfg::CHUNK_X + x;
                         int wz = cz * cfg::CHUNK_Z + z;
-                        bool s2 = (w3.getBlock(wx + 1, y, wz) == AIR);
-                        bool s3 = (w3.getBlock(wx - 1, y, wz) == AIR);
-                        bool s4 = (w3.getBlock(wx, y, wz + 1) == AIR);
-                        bool s5 = (w3.getBlock(wx, y, wz - 1) == AIR);
+                        bool s2 = (w3.getBlock(wx + 1, wy, wz) == AIR);
+                        bool s3 = (w3.getBlock(wx - 1, wy, wz) == AIR);
+                        bool s4 = (w3.getBlock(wx, wy, wz + 1) == AIR);
+                        bool s5 = (w3.getBlock(wx, wy, wz - 1) == AIR);
                         if (!(s2 || s3 || s4 || s5)) continue;
                         if (!surface) {
-                            if (!foundDeep) { foundDeep = true; ddx = wx; ddy = y; ddz = wz; }
+                            if (!foundDeep) { foundDeep = true; ddx = wx; ddy = wy; ddz = wz; }
                             for (const auto& sf : ch.sodFaces) {
                                 if ((int)sf.x == x && (int)sf.y == y && (int)sf.z == z) { deepSod = true; break; }
                             }
                         } else {
-                            if (!foundCliff) { foundCliff = true; ccx = wx; ccy = y; ccz = wz; }
+                            if (!foundCliff) { foundCliff = true; ccx = wx; ccy = wy; ccz = wz; }
                             int need[4] = { 2, 3, 4, 5 };
                             int sdx[4] = { 1, -1, 0, 0 };
                             int sdz[4] = { 0, 0, 1, -1 };
                             for (int k = 0; k < 4; k++) {
                                 int nxw = wx + sdx[k], nzw = wz + sdz[k];
                                 int ncx = floorDiv(nxw, cfg::CHUNK_X), ncz = floorDiv(nzw, cfg::CHUNK_Z);
-                                if (w3.chunks().find(chunkKey(ncx, ncz)) == w3.chunks().end()) continue; // deferred
-                                if (w3.getBlock(nxw, y, nzw) != AIR) continue; // covered
+                                if (w3.chunks().find(chunkKey(ncx, cy, ncz)) == w3.chunks().end()) continue; // deferred
+                                if (w3.getBlock(nxw, wy, nzw) != AIR) continue; // covered
                                 bool has = false;
                                 for (const auto& sf : ch.sodFaces) {
                                     if ((int)sf.x == x && (int)sf.y == y && (int)sf.z == z && (int)sf.face == need[k]) { has = true; break; }
                                 }
-                                if (!has && !cliffMissing) { cliffMissing = true; ccx = wx; ccy = y; ccz = wz; }
+                                if (!has && !cliffMissing) { cliffMissing = true; ccx = wx; ccy = wy; ccz = wz; }
                             }
                         }
                     }
@@ -1039,6 +1061,61 @@ static int runWaterTest(uint32_t seed) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+struct NetSample {
+    uint32_t tick = 0;
+    Vec3 pos{};
+    float yaw = 0, pitch = 0, bodyYaw = 0;
+    float frame = 0, strikeFrame = 0;
+    uint8_t clip = 1, strike = 0;
+    uint8_t heldL = 0, heldR = 0, carried = 0;
+    uint8_t wearU = 0, wearL = 0, wearS = 0;
+    bool spectator = false;
+    std::string name;
+};
+
+static void pushNetSample(std::vector<NetSample>& h, const NetSample& s) {
+    if (!h.empty() && h.back().tick == s.tick) {
+        h.back() = s;
+        return;
+    }
+    h.push_back(s);
+    if (h.size() > 8) h.erase(h.begin());
+}
+
+static const NetSample* sampleAt(const std::vector<NetSample>& h, uint32_t tick, const NetSample** next) {
+    const NetSample* at = nullptr;
+    const NetSample* nxt = nullptr;
+    for (const NetSample& s : h) {
+        if (s.tick <= tick) at = &s;
+        else if (!nxt) nxt = &s;
+    }
+    if (next) *next = nxt;
+    if (at) return at;
+    return h.empty() ? nullptr : &h.front();
+}
+
+static NetSample sampleFromPose(const PlayerPoseNet& pose, uint32_t tick) {
+    NetSample s;
+    s.tick = tick;
+    s.pos = { pose.x, pose.y, pose.z };
+    s.yaw = pose.yaw;
+    s.pitch = pose.pitch;
+    s.bodyYaw = pose.bodyYaw;
+    s.frame = anim::dequantFrame(pose.frameQ);
+    s.strikeFrame = anim::dequantFrame(pose.strikeQ);
+    s.clip = pose.clip;
+    s.strike = pose.strike;
+    s.heldL = pose.heldL;
+    s.heldR = pose.heldR;
+    s.carried = pose.carried;
+    s.wearU = pose.wearU;
+    s.wearL = pose.wearL;
+    s.wearS = pose.wearS;
+    s.spectator = pose.spectator;
+    s.name = pose.name;
+    return s;
+}
+
 int main(int argc, char** argv) {
     plugin::init();
     data::init();
@@ -1194,10 +1271,21 @@ int main(int argc, char** argv) {
     float lobbyBroadcastAccum = 0.0f;
     bool lobbyDirty = false;
     float roomNetAccum = 0.0f;
-    uint32_t worldAck = 0;
-    std::unordered_map<uint32_t, RemoteAvatar> remoteMap;
-    std::unordered_map<uint32_t, Vec3> remotePrev;
+    struct ChunkNetState {
+        uint32_t rev = 0;
+        bool ready = false;
+        bool hold = false;
+    };
+    std::unordered_map<int64_t, ChunkNetState> chunkNet;
+    std::vector<PlayInputNet::ChunkAsk> resyncAsk;
+    std::unordered_map<uint32_t, std::vector<NetSample>> remoteHist;
+    std::vector<NetSample> selfHist;
     std::vector<RemoteAvatar> remotes;
+    uint32_t roomTick = 0;
+    bool roomTickInit = false;
+    std::chrono::steady_clock::time_point roomTickAt{};
+    NetSample selfShown{};
+    bool selfShownOk = false;
     bool spectating = false;
     constexpr int kRoomMinPlayers = 1;
     float tickSpeed = 1.0f;
@@ -1231,7 +1319,7 @@ int main(int argc, char** argv) {
             return false;
         };
         float sy = player.pos.y;
-        float maxY = (float)(cfg::CHUNK_H - 4) * cfg::BLOCK_SCALE;
+        float maxY = (float)(cfg::WORLD_H - 4) * cfg::BLOCK_SCALE;
         while (sy < maxY && collides(player.pos.x, sy, player.pos.z)) sy += cfg::BLOCK_SCALE;
         player.pos.y = sy;
     };
@@ -1258,10 +1346,17 @@ int main(int argc, char** argv) {
         roomHost = false;
         g_roomRecord = false;
         g_roomEdits.clear();
-        remoteMap.clear();
-        remotePrev.clear();
+        g_roomBark.clear();
+        g_treeResync = false;
+        world.setLocalTrees(true);
+        remoteHist.clear();
+        selfHist.clear();
         remotes.clear();
-        worldAck = 0;
+        roomTick = 0;
+        roomTickInit = false;
+        selfShownOk = false;
+        chunkNet.clear();
+        resyncAsk.clear();
         loadSeedApplied = false;
         loadFailed = false;
         g_textDigits = false;
@@ -1311,7 +1406,7 @@ int main(int argc, char** argv) {
                 return false;
             };
             float sy = player.pos.y;
-            float maxY = (float)(cfg::CHUNK_H - 4) * cfg::BLOCK_SCALE;
+            float maxY = (float)(cfg::WORLD_H - 4) * cfg::BLOCK_SCALE;
             while (sy < maxY && collides(player.pos.x, sy, player.pos.z)) sy += cfg::BLOCK_SCALE;
             player.pos.y = sy;
         }
@@ -1530,7 +1625,7 @@ int main(int argc, char** argv) {
             return false;
         };
         float sy = player.pos.y;
-        float maxY = (float)(cfg::CHUNK_H - 4) * cfg::BLOCK_SCALE;
+        float maxY = (float)(cfg::WORLD_H - 4) * cfg::BLOCK_SCALE;
         while (sy < maxY && collides(player.pos.x, sy, player.pos.z)) sy += cfg::BLOCK_SCALE;
         player.pos.y = sy;
     };
@@ -1541,6 +1636,8 @@ int main(int argc, char** argv) {
         loadShown = 0.0f;
         g_roomRecord = false;
         g_roomEdits.clear();
+        g_roomBark.clear();
+        g_treeResync = false;
         appScreen = AppScreen::RoomLoading;
         ui.appScreen = AppScreen::RoomLoading;
         ui.loadStatus = "正在连接服务器";
@@ -1562,10 +1659,18 @@ int main(int argc, char** argv) {
         roomSession = true;
         g_roomRecord = true;
         g_roomEdits.clear();
-        worldAck = 0;
-        remoteMap.clear();
-        remotePrev.clear();
+        g_roomBark.clear();
+        g_treeResync = false;
+        world.setLocalTrees(false);
+        world.clearFallingTrees();
+        chunkNet.clear();
+        resyncAsk.clear();
+        remoteHist.clear();
+        selfHist.clear();
         remotes.clear();
+        roomTick = 0;
+        roomTickInit = false;
+        selfShownOk = false;
         player.privilegeMode = false;
         player.flying = spectating;
         player.noclip = spectating;
@@ -1592,19 +1697,6 @@ int main(int argc, char** argv) {
         gameTickAccum = 0.0f;
         gameTick = 0;
         roomNetAccum = 0.0f;
-    };
-    auto tryApplyNetEdit = [&](const BlockEditNet& e) -> bool {
-        if (e.y < 0 || e.y >= cfg::CHUNK_H) return true;
-        const float S = cfg::BLOCK_SCALE;
-        world.update(Vec3{ (e.x + 0.5f) * S, (e.y + 0.5f) * S, (e.z + 0.5f) * S }, 2);
-        int cx = floorDiv(e.x, cfg::CHUNK_X);
-        int cz = floorDiv(e.z, cfg::CHUNK_Z);
-        if (!world.chunkExists(cx, cz)) return false;
-        if (world.getBlock(e.x, e.y, e.z) == e.block) return true;
-        g_roomApplyNet = true;
-        world.setBlock(e.x, e.y, e.z, e.block, true);
-        g_roomApplyNet = false;
-        return true;
     };
     auto startRoom = [&]() {
         if (!roomHost) return;
@@ -1719,7 +1811,7 @@ int main(int argc, char** argv) {
             int cx = floorDiv((int)std::floor(player.pos.x / S), cfg::CHUNK_X);
             int cz = floorDiv((int)std::floor(player.pos.z / S), cfg::CHUNK_Z);
             ui.loadStatus = "正在生成世界 " + std::to_string(world.loadedChunks());
-            if (loadShown >= 0.4f && world.chunkExists(cx, cz) && world.loadedChunks() >= 48)
+            if (loadShown >= 0.4f && world.columnLoaded(cx, cz) && world.loadedChunks() >= 48)
                 enterRoomPlay();
         } else if (roomSession && appScreen == AppScreen::Playing) {
             gameClient.poll();
@@ -1729,50 +1821,244 @@ int main(int argc, char** argv) {
                 return;
             }
             for (PlayDeltaNet& d : gameClient.takeDeltas()) {
-                for (uint32_t id : d.removed) {
-                    remoteMap.erase(id);
-                    remotePrev.erase(id);
+                if (!roomTickInit || d.serverTick > roomTick) {
+                    roomTick = d.serverTick;
+                    roomTickAt = std::chrono::steady_clock::now();
+                    roomTickInit = true;
                 }
+                for (uint32_t id : d.removed) remoteHist.erase(id);
                 for (const PlayerPoseNet& pose : d.players) {
-                    if (pose.id == gameClient.selfId()) continue;
-                    RemoteAvatar& av = remoteMap[pose.id];
-                    bool first = (av.id == 0);
-                    av.id = pose.id;
-                    av.name = pose.name;
-                    av.pos = { pose.x, pose.y, pose.z };
-                    av.yaw = pose.yaw;
-                    av.pitch = pose.pitch;
-                    av.spectator = pose.spectator;
-                    if (first) remotePrev[pose.id] = av.pos;
+                    NetSample s = sampleFromPose(pose, d.serverTick);
+                    if (pose.id == gameClient.selfId()) pushNetSample(selfHist, s);
+                    else pushNetSample(remoteHist[pose.id], s);
                 }
-                if (!d.edits.empty() && d.baseRev > 0) {
-                    uint32_t rev = d.baseRev;
-                    for (const BlockEditNet& e : d.edits) {
-                        if (rev > worldAck) {
-                            if (!tryApplyNetEdit(e)) break;
-                            worldAck = rev;
-                        }
-                        ++rev;
+                auto dropAsk = [&](int cx, int cy, int cz) {
+                    resyncAsk.erase(std::remove_if(resyncAsk.begin(), resyncAsk.end(), [&](const PlayInputNet::ChunkAsk& a) {
+                        return a.cx == cx && a.cy == cy && a.cz == cz;
+                    }), resyncAsk.end());
+                };
+                auto askResync = [&](int cx, int cy, int cz) {
+                    int64_t key = chunkKey(cx, cy, cz);
+                    ChunkNetState& st = chunkNet[key];
+                    st.ready = false;
+                    st.hold = true;
+                    for (const PlayInputNet::ChunkAsk& a : resyncAsk)
+                        if (a.cx == cx && a.cy == cy && a.cz == cz) return;
+                    if (resyncAsk.size() < 32)
+                        resyncAsk.push_back(PlayInputNet::ChunkAsk{ cx, cy, cz });
+                };
+                for (const ChunkBaseNet& base : d.bases) {
+                    if (base.pristine) {
+                        world.acceptSeedChunk(base.cx, base.cy, base.cz);
+                    } else if (base.blocks.size() == (size_t)cfg::CHUNK_VOLUME &&
+                               base.water.size() == (size_t)cfg::CHUNK_VOLUME &&
+                               base.flags.size() == (size_t)cfg::CHUNK_VOLUME) {
+                        std::vector<World::AuthSod> sod;
+                        sod.reserve(base.sod.size());
+                        for (const AuthSodNet& s : base.sod)
+                            sod.push_back(World::AuthSod{ s.x, s.z, s.y, s.face, s.stage });
+                        std::vector<World::AuthBark> bark;
+                        bark.reserve(base.bark.size());
+                        for (const AuthBarkNet& bk : base.bark)
+                            bark.push_back(World::AuthBark{ bk.x, bk.z, bk.y, bk.face });
+                        g_roomApplyNet = true;
+                        world.writeAuthChunk(base.cx, base.cy, base.cz, base.blocks.data(),
+                                             base.water.data(), base.flags.data(), sod, bark);
+                        g_roomApplyNet = false;
                     }
+                    ChunkNetState& st = chunkNet[chunkKey(base.cx, base.cy, base.cz)];
+                    st.rev = base.rev;
+                    st.ready = true;
+                    st.hold = false;
+                    dropAsk(base.cx, base.cy, base.cz);
                 }
+                for (const ChunkDeltaNet& delta : d.deltas) {
+                    int64_t key = chunkKey(delta.cx, delta.cy, delta.cz);
+                    ChunkNetState& st = chunkNet[key];
+                    if (!st.ready || st.hold) {
+                        askResync(delta.cx, delta.cy, delta.cz);
+                        continue;
+                    }
+                    if (delta.rev <= st.rev) continue;
+                    if (delta.rev != st.rev + 1) {
+                        askResync(delta.cx, delta.cy, delta.cz);
+                        continue;
+                    }
+                    std::vector<World::AuthCell> cells;
+                    cells.reserve(delta.cells.size());
+                    for (const AuthCellNet& c : delta.cells)
+                        cells.push_back(World::AuthCell{ c.x, c.y, c.z, c.block, c.water, c.flags });
+                    std::vector<World::AuthSod> sod;
+                    if (delta.sod) {
+                        sod.reserve(delta.sods.size());
+                        for (const AuthSodNet& s : delta.sods)
+                            sod.push_back(World::AuthSod{ s.x, s.z, s.y, s.face, s.stage });
+                    }
+                    std::vector<World::AuthBark> bark;
+                    if (delta.bark) {
+                        bark.reserve(delta.barks.size());
+                        for (const AuthBarkNet& bk : delta.barks)
+                            bark.push_back(World::AuthBark{ bk.x, bk.z, bk.y, bk.face });
+                    }
+                    g_roomApplyNet = true;
+                    bool ok = world.writeAuthDelta(delta.cx, delta.cy, delta.cz, cells, delta.sod, sod,
+                                                   delta.bark, bark);
+                    g_roomApplyNet = false;
+                    if (!ok) {
+                        askResync(delta.cx, delta.cy, delta.cz);
+                        continue;
+                    }
+                    st.rev = delta.rev;
+                }
+                for (const ChunkHashNet& chk : d.checks) {
+                    int64_t key = chunkKey(chk.cx, chk.cy, chk.cz);
+                    auto it = chunkNet.find(key);
+                    if (it == chunkNet.end() || !it->second.ready || it->second.hold) continue;
+                    if (it->second.rev != chk.rev) {
+                        askResync(chk.cx, chk.cy, chk.cz);
+                        continue;
+                    }
+                    World::Chunk* ch = world.getChunk(chk.cx, chk.cy, chk.cz);
+                    if (!ch || world.chunkAuthHash(*ch) != chk.hash)
+                        askResync(chk.cx, chk.cy, chk.cz);
+                }
+                std::vector<World::NetTree> trees;
+                trees.reserve(d.trees.size());
+                for (const TreeNet& t : d.trees) {
+                    World::NetTree n;
+                    n.id = t.id;
+                    n.rev = t.rev;
+                    n.cells = t.cells;
+                    n.ox = t.ox;
+                    n.oy = t.oy;
+                    n.oz = t.oz;
+                    n.com = { t.cx, t.cy, t.cz };
+                    n.vel = { t.vx, t.vy, t.vz };
+                    n.omega = { t.wx, t.wy, t.wz };
+                    n.ax = { t.ax, t.ay, t.az };
+                    n.ay = { t.bx, t.by, t.bz };
+                    n.az = { t.dx, t.dy, t.dz };
+                    n.pivot = { t.px, t.py, t.pz };
+                    n.hold = t.hold;
+                    n.still = t.still;
+                    n.body.reserve(t.body.size());
+                    for (const TreeCellNet& c : t.body)
+                        n.body.push_back(World::NetTreeCell{ c.x, c.y, c.z, c.block, c.flags });
+                    trees.push_back(std::move(n));
+                }
+                if (!world.applyNetTrees(trees, d.treesGone)) g_treeResync = true;
+                if (d.treeCheck && world.treeAuthHash() != d.treeHash) g_treeResync = true;
             }
+            float renderAt = 0.0f;
+            if (roomTickInit) {
+                float since = std::chrono::duration<float>(std::chrono::steady_clock::now() - roomTickAt).count();
+                if (since < 0.0f) since = 0.0f;
+                if (since > 0.25f) since = 0.25f;
+                float serverNow = (float)roomTick + since * (float)cfg::TICKS_PER_SECOND;
+                renderAt = serverNow - 2.0f;
+                if (renderAt < 0.0f) renderAt = 0.0f;
+                float cap = roomTick > 0 ? (float)(roomTick - 1) : 0.0f;
+                if (renderAt > cap) renderAt = cap;
+            }
+            uint32_t display = (uint32_t)renderAt;
+            float frac = renderAt - (float)display;
+            auto poseAt = [&](const std::vector<NetSample>& hist, RemoteAvatar& av) {
+                const NetSample* next = nullptr;
+                const NetSample* at = sampleAt(hist, display, &next);
+                if (!at) return;
+                av.name = at->name;
+                av.spectator = at->spectator;
+                av.clip = at->clip;
+                av.frame = at->frame;
+                av.strike = at->strike;
+                av.strikeFrame = at->strikeFrame;
+                av.heldL = at->heldL;
+                av.heldR = at->heldR;
+                av.carried = at->carried;
+                av.wearU = at->wearU;
+                av.wearL = at->wearL;
+                av.wearS = at->wearS;
+                av.yaw = at->yaw;
+                av.pitch = at->pitch;
+                av.bodyYaw = at->bodyYaw;
+                av.pos = at->pos;
+                if (next && next->tick > at->tick) {
+                    float span = (float)(next->tick - at->tick);
+                    float along = ((float)display + frac - (float)at->tick) / span;
+                    float u = clampf(along, 0.0f, 1.0f);
+                    av.pos = at->pos + (next->pos - at->pos) * u;
+                }
+            };
             remotes.clear();
-            for (auto& entry : remoteMap) {
-                RemoteAvatar& av = entry.second;
-                Vec3 prev = remotePrev.count(entry.first) ? remotePrev[entry.first] : av.pos;
-                float dx = av.pos.x - prev.x, dy = av.pos.y - prev.y, dz = av.pos.z - prev.z;
-                av.moving = (dx * dx + dy * dy + dz * dz) > 0.0004f;
-                remotePrev[entry.first] = av.pos;
+            for (auto& entry : remoteHist) {
+                RemoteAvatar av;
+                av.id = entry.first;
+                poseAt(entry.second, av);
                 remotes.push_back(av);
+            }
+            selfShownOk = false;
+            if (!selfHist.empty()) {
+                RemoteAvatar selfAv;
+                poseAt(selfHist, selfAv);
+                selfShown.clip = selfAv.clip;
+                selfShown.frame = selfAv.frame;
+                selfShown.strike = selfAv.strike;
+                selfShown.strikeFrame = selfAv.strikeFrame;
+                selfShown.yaw = selfAv.yaw;
+                selfShown.pitch = selfAv.pitch;
+                selfShown.bodyYaw = selfAv.bodyYaw;
+                selfShownOk = true;
             }
             roomNetAccum += frameDt;
             if (roomNetAccum >= 0.05f) {
                 roomNetAccum = 0.0f;
                 size_t n = g_roomEdits.size() < 32 ? g_roomEdits.size() : 32;
-                std::vector<BlockEditNet> batch(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
-                gameClient.sendInput(player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch,
-                                     spectating, worldAck, batch);
+                PlayInputNet netIn;
+                netIn.x = player.pos.x;
+                netIn.y = player.pos.y;
+                netIn.z = player.pos.z;
+                netIn.yaw = player.yaw;
+                netIn.pitch = player.pitch;
+                netIn.bodyYaw = player.bodyYaw;
+                netIn.vx = player.vel.x;
+                netIn.vz = player.vel.z;
+                netIn.spectator = spectating;
+                netIn.ack = 0;
+                {
+                    size_t nask = resyncAsk.size() < 8 ? resyncAsk.size() : 8;
+                    netIn.resync.assign(resyncAsk.begin(), resyncAsk.begin() + (std::ptrdiff_t)nask);
+                }
+                if (player.sprinting) netIn.flags = (uint8_t)(netIn.flags | kPfSprint);
+                if (player.flying) netIn.flags = (uint8_t)(netIn.flags | kPfFly);
+                if (player.onGround) netIn.flags = (uint8_t)(netIn.flags | kPfGround);
+                auto itemOf = [](const ItemSlot& s) -> uint8_t {
+                    return s.empty() ? (uint8_t)AIR : s.block;
+                };
+                if (ui.selectedLeft >= 0 && ui.selectedLeft < cfg::HAND_SLOTS)
+                    netIn.heldL = itemOf(inv[ui.selectedLeft]);
+                int right = cfg::HAND_SLOTS + ui.selectedRight;
+                if (right >= cfg::HAND_SLOTS && right < cfg::HOTBAR_SLOTS)
+                    netIn.heldR = itemOf(inv[right]);
+                netIn.carried = itemOf(carry);
+                netIn.wearU = itemOf(worn[wear::Upper]);
+                netIn.wearL = itemOf(worn[wear::Lower]);
+                netIn.wearS = itemOf(worn[wear::Shoes]);
+                if (player.strikeName == "punch") netIn.strikeKind = kStrikePunch;
+                else if (player.strikeName == "axe_chop") netIn.strikeKind = kStrikeAxe;
+                else if (player.strikeName == "pick_mine") netIn.strikeKind = kStrikePick;
+                netIn.strikeCharge = player.strikeCharge;
+                netIn.strikeCool = player.strikeCool;
+                netIn.mineCharge = player.mineCharge;
+                netIn.mineCooldown = player.mineCooldown;
+                netIn.pickRaised = player.pickRaised;
+                netIn.edits.assign(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
+                size_t nb = g_roomBark.size() < 8 ? g_roomBark.size() : 8;
+                netIn.bark.assign(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
+                netIn.treeResync = g_treeResync;
+                g_treeResync = false;
+                gameClient.sendInput(netIn);
                 g_roomEdits.erase(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
+                g_roomBark.erase(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
             }
         }
     };
@@ -2707,8 +2993,10 @@ int main(int argc, char** argv) {
                         int face = world.faceFromHitNormal(nrm);
                         bool barkTool = hasItemTags(held, TAG_AXE | TAG_WOODWORKING | TAG_ONE_HAND);
                         if (barkTool && world.hasBarkFace(hit.x, hit.y, hit.z, face)) {
-                            if (world.takeBarkFace(hit.x, hit.y, hit.z, face))
+                            if (world.takeBarkFace(hit.x, hit.y, hit.z, face)) {
+                                noteRoomBark(hit.x, hit.y, hit.z, face, false);
                                 world.spawnDrop(cellCenter(hit.x, hit.y, hit.z), BARK, 1, true);
+                            }
                         }
                     }
                 }
@@ -2800,6 +3088,7 @@ int main(int argc, char** argv) {
                             IVec3 host = hit;
                             if (isLiquid(world.getBlock(hit.x, hit.y, hit.z))) host = prev;
                             if (world.addBarkFace(host.x, host.y, host.z, face)) {
+                                noteRoomBark(host.x, host.y, host.z, face, true);
                                 if (--sel.count == 0) sel.clear();
                             }
                         } else {
@@ -2847,7 +3136,7 @@ int main(int argc, char** argv) {
             int sub = 0;
             while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS) {
                 player.update(world, in, cfg::FIXED_DT);
-                world.treeFallPhysics(cfg::FIXED_DT);
+                if (!roomSession) world.treeFallPhysics(cfg::FIXED_DT);
                 world.updateDrops(cfg::FIXED_DT);
                 if (const plugin::EntityModule* em = plugin::findEntity("player")) {
                     plugin::EntityEvent ev{ &world, &player, cfg::FIXED_DT };
@@ -2891,9 +3180,11 @@ int main(int argc, char** argv) {
                 if (ticks > 100) { ticks = 100; gameTickAccum = 0.0f; }
                 else gameTickAccum -= (float)ticks;
                 for (int i = 0; i < ticks; i++) {
-                    world.sodTick(1024, gameTick);
-                    world.waterTick(gameTick);
-                    world.treeFallGameTick();
+                    if (!roomSession) {
+                        world.sodTick(1024, gameTick);
+                        world.waterTick(gameTick);
+                        world.treeFallGameTick();
+                    }
                     gameTick++;
                 }
             }
@@ -2960,6 +3251,17 @@ int main(int argc, char** argv) {
         ui.roomPort = roomPort;
         if (!ui.portFieldActive) ui.roomPortText = std::to_string(roomPort);
         ui.remotes = roomSession ? remotes : std::vector<RemoteAvatar>{};
+        ui.netAnim = false;
+        if (roomSession && ui.camMode != 0 && selfShownOk) {
+            ui.netAnim = true;
+            ui.netClip = selfShown.clip;
+            ui.netStrike = selfShown.strike;
+            ui.netFrame = selfShown.frame;
+            ui.netStrikeFrame = selfShown.strikeFrame;
+            ui.netYaw = selfShown.yaw;
+            ui.netPitch = selfShown.pitch;
+            ui.netBodyYaw = selfShown.bodyYaw;
+        }
         ui.spectating = spectating && playing;
         ui.menuWorld = exploreScreen();
         ui.menuEye = menuEye;

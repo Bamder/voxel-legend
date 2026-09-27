@@ -29,8 +29,14 @@ struct RemoteAvatar {
     Vec3 pos{ 0, 0, 0 };
     float yaw = 0.0f;
     float pitch = 0.0f;
+    float bodyYaw = 0.0f;
+    float frame = 0.0f;
+    float strikeFrame = 0.0f;
+    uint8_t clip = 1;
+    uint8_t strike = 0;
+    uint8_t heldL = 0, heldR = 0, carried = 0;
+    uint8_t wearU = 0, wearL = 0, wearS = 0;
     bool spectator = false;
-    bool moving = false;
 };
 
 struct RoomTeamView {
@@ -115,6 +121,12 @@ struct UIState {
     // Material editor (texture painter).
     bool matEditorOpen = false;
     int camMode = 0;                  // 0 first-person, 1 third-person (over-shoulder), 2 second-person (front)
+    bool netAnim = false;             // third person uses the server tick's frame id
+    uint8_t netClip = 1;
+    uint8_t netStrike = 0;
+    float netFrame = 0.0f;
+    float netStrikeFrame = 0.0f;
+    float netYaw = 0.0f, netPitch = 0.0f, netBodyYaw = 0.0f;
     bool dummyActive = false;         // spawn an observation dummy player
     Vec3 dummyPos{ 0, 0, 0 };         // dummy's fixed position (set when spawned)
     bool dummyPlaced = false;

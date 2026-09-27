@@ -759,26 +759,30 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             if (!ui.wear[wear::Lower].empty()) wearLower = ui.wear[wear::Lower].block;
             if (!ui.wear[wear::Shoes].empty()) wearShoes = ui.wear[wear::Shoes].block;
         }
-        if (!ui.spectating) {
-            drawPlayerModel(player.pos, player.bodyYaw, player.yaw, player.pitch, eye, vp, firstPerson,
-                            &playerClip, player.animClock, heldR, heldL, carried,
-                            nullptr, strike, strikeAt, &sky, wearUpper, wearLower, wearShoes);
+        const bool netBody = ui.netAnim && !firstPerson;
+        const anim::Clip& shownClip = netBody ? anim::clipFromNet(ui.netClip) : playerClip;
+        float shownFrame = netBody ? ui.netFrame : player.animClock;
+        float shownBody = netBody ? ui.netBodyYaw : player.bodyYaw;
+        float shownYaw = netBody ? ui.netYaw : player.yaw;
+        float shownPitch = netBody ? ui.netPitch : player.pitch;
+        const anim::Clip* shownStrike = strike;
+        float shownStrikeAt = strikeAt;
+        if (netBody) {
+            shownStrike = anim::strikeFromNet(ui.netStrike);
+            shownStrikeAt = ui.netStrikeFrame;
         }
-        if (!ui.remotes.empty()) {
-            static float remoteClock = 0.0f;
-            float rdt = (ui.fps > 1.0f) ? (1.0f / ui.fps) : (1.0f / 60.0f);
-            const anim::Clip& walk = anim::playerClips().walk;
-            const anim::Clip& idle = anim::playerClips().idle;
-            remoteClock += rdt * ((walk.fps > 0.1f) ? walk.fps : 16.0f);
-            float L = (walk.length > 0) ? (float)walk.length : 20.0f;
-            while (remoteClock >= L) remoteClock -= L;
-            for (const RemoteAvatar& rp : ui.remotes) {
-                if (rp.spectator) continue;
-                const anim::Clip& clip = rp.moving ? walk : idle;
-                float frame = rp.moving ? remoteClock : 0.0f;
-                drawPlayerModel(rp.pos, rp.yaw, rp.yaw, rp.pitch, eye, vp, false, &clip, frame,
-                                AIR, AIR, AIR, nullptr, nullptr, 0.0f, &sky);
-            }
+        if (!ui.spectating) {
+            drawPlayerModel(player.pos, shownBody, shownYaw, shownPitch, eye, vp, firstPerson,
+                            &shownClip, shownFrame, heldR, heldL, carried,
+                            nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes);
+        }
+        for (const RemoteAvatar& rp : ui.remotes) {
+            if (rp.spectator) continue;
+            const anim::Clip& clip = anim::clipFromNet(rp.clip);
+            const anim::Clip* overlay = anim::strikeFromNet(rp.strike);
+            drawPlayerModel(rp.pos, rp.bodyYaw, rp.yaw, rp.pitch, eye, vp, false, &clip, rp.frame,
+                            rp.heldR, rp.heldL, rp.carried, nullptr, overlay, rp.strikeFrame, &sky,
+                            rp.wearU, rp.wearL, rp.wearS);
         }
 
         // Observation dummy: loops walk in place. Head/body yaw stay a runtime overlay.
@@ -893,7 +897,7 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
             const ChunkGL& cg = it->second;
             if ((transparent ? cg.transparentCount : cg.opaqueCount) == 0) continue;
             double ox = (double)(chunkCX(key) * cfg::CHUNK_X) * cfg::BLOCK_SCALE - (double)eye.x;
-            double oy = 0.0 - (double)eye.y;
+            double oy = (double)(chunkCY(key) * cfg::CHUNK_Y) * cfg::BLOCK_SCALE - (double)eye.y;
             double oz = (double)(chunkCZ(key) * cfg::CHUNK_Z) * cfg::BLOCK_SCALE - (double)eye.z;
             Vec3 off{ (float)ox, (float)oy, (float)oz };
             Mat4 model = Mat4::translate(off) * Mat4::scale({ cfg::BLOCK_SCALE, cfg::BLOCK_SCALE, cfg::BLOCK_SCALE });
