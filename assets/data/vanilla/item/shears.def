@@ -9,4 +9,5 @@ efficiency 2
 charge_sec 1
 cooldown_sec 1
 weight 0.8
+friction 0.35
 tags one_hand,shears

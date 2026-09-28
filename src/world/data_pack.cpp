@@ -107,6 +107,13 @@ void applyKey(ObjectDef& o, const std::string& key, const std::string& val) {
     else if (key == "charge_sec") o.chargeSec = (float)std::atof(val.c_str());
     else if (key == "cooldown_sec") o.cooldownSec = (float)std::atof(val.c_str());
     else if (key == "weight") o.weight = (float)std::atof(val.c_str());
+    else if (key == "friction") o.friction = (float)std::atof(val.c_str());
+    else if (key == "passable") {
+        std::string v = lower(val);
+        if (v == "1" || v == "true" || v == "yes" || v == "on") o.passable = 1;
+        else if (v == "0" || v == "false" || v == "no" || v == "off") o.passable = 0;
+    } else if (key == "drag_h" || key == "dragh") o.dragH = (float)std::atof(val.c_str());
+    else if (key == "drag_v" || key == "dragv") o.dragV = (float)std::atof(val.c_str());
     else if (key == "wrong_tool_resist") o.wrongResist = (float)std::atof(val.c_str());
     else if (key == "tags") o.tags = parseTags(val);
     else if (key == "wear") o.wear = wear::fromId(lower(val));
@@ -218,6 +225,14 @@ std::string objectFileText(const ObjectDef& o) {
         ss << "cooldown_sec " << o.cooldownSec << "\n";
     }
     ss << "weight " << o.weight << "\n";
+    if (o.friction >= 0.0f)
+        ss << "friction " << o.friction << "\n";
+    if (o.passable >= 0)
+        ss << "passable " << (o.passable ? "yes" : "no") << "\n";
+    if (o.dragH >= 0.0f)
+        ss << "drag_h " << o.dragH << "\n";
+    if (o.dragV >= 0.0f)
+        ss << "drag_v " << o.dragV << "\n";
     if (o.kind != loot::Kind::Tool)
         ss << "wrong_tool_resist " << o.wrongResist << "\n";
     ss << "tags " << formatTags(o.tags) << "\n";
@@ -302,6 +317,10 @@ ObjectDef snapshotObject(uint8_t id) {
         o.efficiency = 0.0f;
     }
     o.weight = blockOf(id).weight;
+    o.friction = blockOf(id).friction;
+    o.passable = blockOf(id).passable ? 1 : 0;
+    o.dragH = blockOf(id).dragH;
+    o.dragV = blockOf(id).dragV;
     o.tags = itemTags(id);
     o.wear = loot::itemWear(id);
     loot::HarvestRule hr = loot::harvestRule(id);
@@ -522,8 +541,23 @@ void applyOne(const ObjectDef& o) {
         ck.b = o.crackB;
         loot::setBlockCrack(b, ck);
     }
-    if (b < (uint8_t)liveBlockCount())
+    if (b < (uint8_t)liveBlockCount()) {
         g_blockInfo[b].weight = o.weight;
+        if (o.friction >= 0.0f) {
+            float f = o.friction;
+            if (f > 2.0f) f = 2.0f;
+            g_blockInfo[b].friction = f;
+        }
+        if (o.passable >= 0)
+            g_blockInfo[b].passable = o.passable != 0;
+        auto clampDrag = [](float d) {
+            if (d < 0.0f) return 0.0f;
+            if (d > 40.0f) return 40.0f;
+            return d;
+        };
+        if (o.dragH >= 0.0f) g_blockInfo[b].dragH = clampDrag(o.dragH);
+        if (o.dragV >= 0.0f) g_blockInfo[b].dragV = clampDrag(o.dragV);
+    }
     if (o.harvest) {
         loot::HarvestRule hr;
         hr.used = true;

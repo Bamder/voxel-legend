@@ -26,7 +26,21 @@ void Player::update(const World& world, const InputState& in, float dt) {
     int headY = (int)std::floor((pos.y + cfg::EYE_HEIGHT) / S);
     int feetY = (int)std::floor((pos.y + 0.25f * S) / S);
     inWater = isLiquid(world.getBlock(ex, headY, ez)) || isLiquid(world.getBlock(ex, feetY, ez));
-    bool inLeaves = (isFoliage(world.getBlock(ex, headY, ez)) || isFoliage(world.getBlock(ex, feetY, ez)));
+    float dragH = 0.0f, dragV = 0.0f;
+    {
+        const float HW = cfg::PLAYER_HALF_WIDTH;
+        const float HGT = cfg::PLAYER_HEIGHT;
+        int x0 = (int)std::floor((pos.x - HW) / S);
+        int x1 = (int)std::floor((pos.x + HW - 1e-6f) / S);
+        int y0 = (int)std::floor(pos.y / S);
+        int y1 = (int)std::floor((pos.y + HGT - 1e-6f) / S);
+        int z0 = (int)std::floor((pos.z - HW) / S);
+        int z1 = (int)std::floor((pos.z + HW - 1e-6f) / S);
+        for (int bx = x0; bx <= x1; bx++)
+            for (int by = y0; by <= y1; by++)
+                for (int bz = z0; bz <= z1; bz++)
+                    accumPassableDrag(world.getBlock(bx, by, bz), dragH, dragV);
+    }
 
     Vec3 wish{ 0, 0, 0 };
     if (in.forward) wish += forward();
@@ -46,7 +60,10 @@ void Player::update(const World& world, const InputState& in, float dt) {
     }
     sprinting = in.sprint && !flying && !inWater
         && (privilegeMode || vitals::canSprint(vitals));
-    if (inLeaves) speed *= 0.3f; // passable foliage strongly slows horizontal movement
+    // Ground acceleration would otherwise erase viscous drag, so the wish speed
+    // itself yields. Water keeps its swim speed; drag still bleeds extra velocity.
+    if (!flying && !inWater && dragH > 0.0f)
+        speed /= (1.0f + dragH * 0.25f);
     float accel = flying ? 60.0f : (onGround ? 80.0f : 18.0f);
     if (inWater) accel = 20.0f;
 
@@ -65,14 +82,23 @@ void Player::update(const World& world, const InputState& in, float dt) {
         if (in.jump) vel.y = cfg::SWIM_SPEED * 1.7f;
         vel.y = clampf(vel.y, -8.0f, 8.0f);
     } else {
-        float g = cfg::GRAVITY * (inLeaves ? 0.6f : 1.0f); // slower fall through foliage
-        vel.y -= g * dt;
+        vel.y -= cfg::GRAVITY * dt;
         if (in.jump && onGround && (privilegeMode || vitals::canJump(vitals))) {
             float jh = privilegeMode ? 1.0f : vitals::jumpHeightMul(vitals, fatigue);
             vel.y = cfg::JUMP_SPEED * jh;
             jumpedThisUpdate = true;
         }
         vel.y = clampf(vel.y, -70.0f, 70.0f);
+    }
+
+    if (!flying) {
+        if (dragH > 0.0f) {
+            float k = std::exp(-dragH * dt);
+            vel.x *= k;
+            vel.z *= k;
+        }
+        if (dragV > 0.0f)
+            vel.y *= std::exp(-dragV * dt);
     }
 
     onGround = false;
@@ -113,7 +139,7 @@ void Player::moveAxis(const World& world, int axis, float delta) {
     for (int bx = x0; bx <= x1 && !hit; bx++)
         for (int by = y0; by <= y1 && !hit; by++)
             for (int bz = z0; bz <= z1 && !hit; bz++)
-                if (isSolid(world.getBlock(bx, by, bz))) { hitX = bx; hitY = by; hitZ = bz; hit = true; }
+                if (blocksMotion(world.getBlock(bx, by, bz))) { hitX = bx; hitY = by; hitZ = bz; hit = true; }
 
     if (!hit) {
         world.resolvePhysPlayer(pos, vel, axis, delta, HW, HGT, onGround);
@@ -134,7 +160,7 @@ void Player::moveAxis(const World& world, int axis, float delta) {
             for (int bx = x0; bx <= x1 && clear; bx++)
                 for (int by = ny0; by <= ny1 && clear; by++)
                     for (int bz = z0; bz <= z1 && clear; bz++)
-                        if (isSolid(world.getBlock(bx, by, bz))) clear = false;
+                        if (blocksMotion(world.getBlock(bx, by, bz))) clear = false;
             if (clear) {
                 onGround = true;
                 vel.y = 0.0f;

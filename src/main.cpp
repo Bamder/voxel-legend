@@ -1454,7 +1454,7 @@ int main(int argc, char** argv) {
             for (int bx = x0; bx <= x1; bx++)
                 for (int by = y0; by <= y1; by++)
                     for (int bz = z0; bz <= z1; bz++)
-                        if (isSolid(world.getBlock(bx, by, bz))) return true;
+                        if (blocksMotion(world.getBlock(bx, by, bz))) return true;
             return false;
         };
         float sy = player.pos.y;
@@ -1542,7 +1542,7 @@ int main(int argc, char** argv) {
                 for (int bx = x0; bx <= x1; bx++)
                     for (int by = y0; by <= y1; by++)
                         for (int bz = z0; bz <= z1; bz++)
-                            if (isSolid(world.getBlock(bx, by, bz))) return true;
+                            if (blocksMotion(world.getBlock(bx, by, bz))) return true;
                 return false;
             };
             float sy = player.pos.y;
@@ -1769,7 +1769,7 @@ int main(int argc, char** argv) {
             for (int bx = x0; bx <= x1; bx++)
                 for (int by = y0; by <= y1; by++)
                     for (int bz = z0; bz <= z1; bz++)
-                        if (isSolid(world.getBlock(bx, by, bz))) return true;
+                        if (blocksMotion(world.getBlock(bx, by, bz))) return true;
             return false;
         };
         float sy = player.pos.y;
@@ -2315,7 +2315,7 @@ int main(int argc, char** argv) {
             outH = world.surfaceHeight(x, z);
             if (outH <= cfg::SEA_LEVEL + 1) return false;
             for (int dy = 1; dy <= 4; dy++)
-                if (isSolid(world.getBlock(x, outH + dy, z))) return false;
+                if (blocksMotion(world.getBlock(x, outH + dy, z))) return false;
             return true;
         };
         const float S = cfg::BLOCK_SCALE;

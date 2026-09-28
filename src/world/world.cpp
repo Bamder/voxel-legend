@@ -2361,21 +2361,6 @@ void World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Ve
         d.ay = { 0, 1, 0 };
         d.az = { 0, 0, 1 };
         d.angVel = { 0, 0, 0 };
-        if (!inPlace) {
-            const dropgeom::Shape& sh = dropgeom::cached(item);
-            float radius = std::max(sh.half.y, 0.06f);
-            Vec3 horiz{ vel.x, 0.0f, vel.z };
-            float sp = std::sqrt(horiz.lengthSq());
-            if (sp > 0.15f) {
-                Vec3 axis = horiz.cross(Vec3{ 0, 1, 0 });
-                float al = std::sqrt(axis.lengthSq());
-                if (al > 1e-6f) d.angVel = axis * (sp / (al * radius));
-            }
-            float side = (m_drops.size() & 1) ? 1.0f : -1.0f;
-            d.angVel.x += 1.4f * side;
-            d.angVel.y += 0.7f * side;
-            d.angVel.z += 1.0f;
-        }
         d.age = 0.0f;
         m_drops.push_back(d);
     }
@@ -2578,18 +2563,50 @@ void World::updateDrops(float dt) {
         const dropgeom::Shape& sh = dropgeom::cached(d.item);
         float ex = 0.0f, ey = 0.0f, ez = 0.0f;
         dropgeom::worldHalf(sh, d.ax, d.ay, d.az, ex, ey, ez);
-        Vec3 horiz{ d.vel.x, 0.0f, d.vel.z };
-        float hspeed = std::sqrt(horiz.lengthSq());
-        if (d.grounded && hspeed > 0.12f) {
-            Vec3 axis = horiz.cross(Vec3{ 0, 1, 0 });
-            float al = std::sqrt(axis.lengthSq());
-            if (al > 1e-6f) {
-                float radius = std::max(ey, 0.05f);
-                d.angVel = axis * (hspeed / (al * radius));
+        {
+            float dragH = 0.0f, dragV = 0.0f;
+            const float pad = 1e-3f;
+            Vec3 mn{ d.pos.x - ex + pad, d.pos.y - ey + pad, d.pos.z - ez + pad };
+            Vec3 mx{ d.pos.x + ex - pad, d.pos.y + ey - pad, d.pos.z + ez - pad };
+            int x0 = (int)std::floor(mn.x / S), x1 = (int)std::floor(mx.x / S);
+            int y0 = (int)std::floor(mn.y / S), y1 = (int)std::floor(mx.y / S);
+            int z0 = (int)std::floor(mn.z / S), z1 = (int)std::floor(mx.z / S);
+            if (x1 < x0) x1 = x0;
+            if (y1 < y0) y1 = y0;
+            if (z1 < z0) z1 = z0;
+            for (int bx = x0; bx <= x1; bx++)
+                for (int by = y0; by <= y1; by++)
+                    for (int bz = z0; bz <= z1; bz++)
+                        accumPassableDrag(getBlock(bx, by, bz), dragH, dragV);
+            if (dragH > 0.0f) {
+                float k = std::exp(-dragH * dt);
+                d.vel.x *= k;
+                d.vel.z *= k;
             }
-        } else if (d.grounded) {
-            d.angVel = d.angVel * std::pow(0.04f, dt);
-            if (d.angVel.lengthSq() < 0.04f) d.angVel = { 0, 0, 0 };
+            if (dragV > 0.0f)
+                d.vel.y *= std::exp(-dragV * dt);
+        }
+        if (d.grounded) {
+            int gy = (int)std::floor((d.pos.y - ey - 1e-3f) / S);
+            auto solidAt = [&](int x, int y, int z) -> uint8_t {
+                uint8_t b = getBlock(x, y, z);
+                return blocksMotion(b) ? b : (uint8_t)AIR;
+            };
+            int gx = (int)std::floor(d.pos.x / S);
+            int gz = (int)std::floor(d.pos.z / S);
+            uint8_t support = solidAt(gx, gy, gz);
+            if (support == AIR) {
+                int x0 = (int)std::floor((d.pos.x - ex) / S);
+                int x1 = (int)std::floor((d.pos.x + ex) / S);
+                int z0 = (int)std::floor((d.pos.z - ez) / S);
+                int z1 = (int)std::floor((d.pos.z + ez) / S);
+                support = solidAt(x0, gy, z0);
+                if (support == AIR) support = solidAt(x1, gy, z0);
+                if (support == AIR) support = solidAt(x0, gy, z1);
+                if (support == AIR) support = solidAt(x1, gy, z1);
+            }
+            dropgeom::applyGroundContact(d.vel, d.angVel, sh, d.ax, d.ay, d.az,
+                                         blockFriction(support), dt);
         }
         float bottom = d.pos.y - ey;
         dropgeom::spinBasis(d.ax, d.ay, d.az, d.angVel, dt);
@@ -2616,7 +2633,7 @@ void World::updateDrops(float dt) {
             for (int bx = x0; bx <= x1 && !hit; bx++)
                 for (int by = y0; by <= y1 && !hit; by++)
                     for (int bz = z0; bz <= z1 && !hit; bz++)
-                        if (isSolid(getBlock(bx, by, bz))) { hx = bx; hy = by; hz = bz; hit = true; }
+                        if (blocksMotion(getBlock(bx, by, bz))) { hx = bx; hy = by; hz = bz; hit = true; }
             if (!hit) {
                 if (axis == 1 && delta < 0.0f) d.grounded = false;
                 return;
@@ -2631,13 +2648,9 @@ void World::updateDrops(float dt) {
                 float blockMid = (hy + 0.5f) * S;
                 if (prev >= blockMid) {
                     d.pos.y = hy * S + S + he + 1e-4f;
-                    if (d.vel.y < -2.4f) {
+                    if (d.vel.y < -2.4f)
                         d.vel.y *= -0.28f;
-                        Vec3 slide{ d.vel.x, 0.0f, d.vel.z };
-                        Vec3 kick = slide.cross(Vec3{ 0, 1, 0 });
-                        float kl = std::sqrt(kick.lengthSq());
-                        if (kl > 1e-4f) d.angVel = d.angVel + kick * (2.2f / kl);
-                    } else {
+                    else {
                         d.vel.y = 0.0f;
                         d.grounded = true;
                     }
@@ -2653,12 +2666,6 @@ void World::updateDrops(float dt) {
         moveAxis(0, d.vel.x * dt);
         moveAxis(1, d.vel.y * dt);
         moveAxis(2, d.vel.z * dt);
-        if (d.grounded) {
-            d.vel.x *= std::pow(0.08f, dt);
-            d.vel.z *= std::pow(0.08f, dt);
-            if (std::fabs(d.vel.x) < 0.03f) d.vel.x = 0.0f;
-            if (std::fabs(d.vel.z) < 0.03f) d.vel.z = 0.0f;
-        }
         i++;
     }
 }

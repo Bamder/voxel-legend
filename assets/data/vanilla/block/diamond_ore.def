@@ -7,6 +7,7 @@ hardness 6
 durability 45
 efficiency 0
 weight 20
+friction 0.73
 tags 
 harvest_need pick
 harvest_drop diamond_ore 1

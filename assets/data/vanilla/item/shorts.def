@@ -7,5 +7,6 @@ hardness 0.4
 durability 1
 efficiency 0
 weight 0.35
+friction 0.50
 tags 
 wear lower

@@ -7,6 +7,7 @@ hardness 4
 durability 36
 efficiency 0
 weight 18
+friction 0.75
 tags 
 harvest_need pick
 harvest_drop cobble 1

@@ -28,6 +28,10 @@ enum : int {
     IDC_CHARGE,
     IDC_COOLDOWN,
     IDC_WEIGHT,
+    IDC_FRICTION,
+    IDC_PASSABLE,
+    IDC_DRAG_H,
+    IDC_DRAG_V,
     IDC_RESIST,
     IDC_HARVEST,
     IDC_TAG0 = 120,
@@ -301,7 +305,8 @@ void setCheck(int id, bool on) {
 
 void showObj(bool on) {
     const int ids[] = {
-        IDC_KIND, IDC_STACK, IDC_HARD, IDC_DUR, IDC_EFF, IDC_CHARGE, IDC_COOLDOWN, IDC_WEIGHT, IDC_WEAR, IDC_RESIST,
+        IDC_KIND, IDC_STACK, IDC_HARD, IDC_DUR, IDC_EFF, IDC_CHARGE, IDC_COOLDOWN, IDC_WEIGHT, IDC_FRICTION,
+        IDC_PASSABLE, IDC_DRAG_H, IDC_DRAG_V, IDC_WEAR, IDC_RESIST,
         IDC_CRACK_FOLDS, IDC_CRACK_R, IDC_CRACK_G, IDC_CRACK_B,
         IDC_HARVEST, IDC_DROP1_ITEM, IDC_DROP1_COUNT, IDC_DROP2_ITEM, IDC_DROP2_COUNT, IDC_PREVIEW
     };
@@ -473,6 +478,34 @@ void loadObject(data::ObjectDef& o) {
     setFloat(IDC_CHARGE, o.chargeSec);
     setFloat(IDC_COOLDOWN, o.cooldownSec);
     setFloat(IDC_WEIGHT, o.weight);
+    {
+        float fr = o.friction;
+        if (fr < 0.0f) {
+            int id = data::resolveId(o.id);
+            fr = (id >= 0) ? blockOf((uint8_t)id).friction : 0.0f;
+        }
+        setFloat(IDC_FRICTION, fr);
+    }
+    {
+        int pass = o.passable;
+        float dh = o.dragH, dv = o.dragV;
+        if (pass < 0 || dh < 0.0f || dv < 0.0f) {
+            int id = data::resolveId(o.id);
+            if (id >= 0) {
+                const BlockInfo& info = blockOf((uint8_t)id);
+                if (pass < 0) pass = info.passable ? 1 : 0;
+                if (dh < 0.0f) dh = info.dragH;
+                if (dv < 0.0f) dv = info.dragV;
+            } else {
+                if (pass < 0) pass = 0;
+                if (dh < 0.0f) dh = 0.0f;
+                if (dv < 0.0f) dv = 0.0f;
+            }
+        }
+        setCheck(IDC_PASSABLE, pass != 0);
+        setFloat(IDC_DRAG_H, dh);
+        setFloat(IDC_DRAG_V, dv);
+    }
     if (HWND wear = GetDlgItem(g_wnd, IDC_WEAR)) {
         int sel = 0;
         if (o.wear >= 0 && o.wear < wear::Count) sel = o.wear + 1;
@@ -524,6 +557,16 @@ void flushObject(data::ObjectDef& o) {
     o.chargeSec = getFloat(IDC_CHARGE);
     o.cooldownSec = getFloat(IDC_COOLDOWN);
     o.weight = getFloat(IDC_WEIGHT);
+    o.friction = getFloat(IDC_FRICTION);
+    if (o.friction < 0.0f) o.friction = 0.0f;
+    if (o.friction > 2.0f) o.friction = 2.0f;
+    o.passable = checked(IDC_PASSABLE) ? 1 : 0;
+    o.dragH = getFloat(IDC_DRAG_H);
+    o.dragV = getFloat(IDC_DRAG_V);
+    if (o.dragH < 0.0f) o.dragH = 0.0f;
+    if (o.dragH > 40.0f) o.dragH = 40.0f;
+    if (o.dragV < 0.0f) o.dragV = 0.0f;
+    if (o.dragV > 40.0f) o.dragV = 40.0f;
     o.wear = -1;
     if (HWND wear = GetDlgItem(g_wnd, IDC_WEAR)) {
         int sel = (int)SendMessageW(wear, CB_GETCURSEL, 0, 0);
@@ -676,6 +719,10 @@ void layoutControls() {
     lab(L"Windup (sec)", 315); mk(L"EDIT", L"", ES_AUTOHSCROLL, ex, y, ew, 24, IDC_CHARGE); y += row;
     lab(L"Recovery (sec)", 316); mk(L"EDIT", L"", ES_AUTOHSCROLL, ex, y, ew, 24, IDC_COOLDOWN); y += row;
     lab(L"Weight", 310); mk(L"EDIT", L"", ES_AUTOHSCROLL, ex, y, ew, 24, IDC_WEIGHT); y += row;
+    lab(L"Friction", 321); mk(L"EDIT", L"", ES_AUTOHSCROLL, ex, y, ew, 24, IDC_FRICTION); y += row;
+    lab(L"Passable", 322); mk(L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, ex, y, 24, 22, IDC_PASSABLE); y += row;
+    lab(L"Drag horizontal", 323); mk(L"EDIT", L"", ES_AUTOHSCROLL, ex, y, ew, 24, IDC_DRAG_H); y += row;
+    lab(L"Drag vertical", 324); mk(L"EDIT", L"", ES_AUTOHSCROLL, ex, y, ew, 24, IDC_DRAG_V); y += row;
     lab(L"Wear slot", 320);
     HWND wearBox = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ex, y, ew, 140, IDC_WEAR);
     SendMessageW(wearBox, CB_ADDSTRING, 0, (LPARAM)L"(none)");
@@ -843,7 +890,7 @@ void runModal(HWND owner) {
     g_wnd = CreateWindowExW(
         0, L"VLDataEditor", L"VOXEL LEGEND — Data Pack",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 800,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 960,
         owner, nullptr, inst, nullptr);
     if (!g_wnd) {
         if (g_font) { DeleteObject(g_font); g_font = nullptr; }
