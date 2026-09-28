@@ -14,10 +14,17 @@ $sources = @(
 Write-Output "Sources (tree_lab.exe):"
 $sources | ForEach-Object { Write-Output "  $_" }
 
+# Same runtime fold-in as the root build: no libgcc / libstdc++ / winpthread DLLs.
+$rt = @("-static-libgcc", "-static-libstdc++")
+$pthread = & g++ -print-file-name=libwinpthread.a
+if ($pthread -and (Test-Path -LiteralPath $pthread)) {
+    $rt += @("-Wl,-Bstatic,--whole-archive", "-lwinpthread", "-Wl,--no-whole-archive,-Bdynamic")
+}
+
 & g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type `
     -finput-charset=UTF-8 -fexec-charset=UTF-8 `
     -I"$root\src" `
-    @sources -o tree_lab.exe -lopengl32 -lgdi32 -luser32 -lgdiplus
+    @sources -o tree_lab.exe @rt -lopengl32 -lgdi32 -luser32 -lgdiplus
 if ($LASTEXITCODE -ne 0) {
     Write-Output "BUILD FAILED (tree_lab.exe)"
     exit $LASTEXITCODE

@@ -2,6 +2,7 @@
 #include "world/blocks.hpp"
 #include "world/world.hpp"
 #include "world/loot.hpp"
+#include "world/drop_geom.hpp"
 #include "world/data_pack.hpp"
 #include "world/saves.hpp"
 #include "world/player.hpp"
@@ -556,6 +557,18 @@ static void dropCarriedBlock(World& world, const Player& player, ItemSlot& carry
     const float toss = 2.0f;
     world.spawnDrop(pos, carry.block, 1, false, dir * toss);
     carry.clear();
+}
+
+static bool tossDrop(World& world, const Player& player, uint8_t item, int count) {
+    if (item == AIR || count <= 0 || !validBlock(item)) return false;
+    Vec3 dir = player.lookDir();
+    const dropgeom::Shape& sh = dropgeom::cached(item);
+    float forward = 0.55f + std::max(sh.half.x, sh.half.z);
+    Vec3 pos = player.eye() + dir * forward;
+    Vec3 vel = dir * 2.4f;
+    vel.y += 1.2f;
+    world.spawnDrop(pos, item, count, false, vel);
+    return true;
 }
 
 static void spawnHarvestDrops(World& world, const Vec3& pos, uint8_t block, uint8_t held, int extraGrass = 0) {
@@ -3249,7 +3262,11 @@ int main(int argc, char** argv) {
                     int dropWear = ui.hoveredWear;
                     if (moving && drop >= cfg::HOTBAR_SLOTS) drop = -1;
                     if (moving) dropWear = -1;
-                    endDrag(inv, worn, drop, dropWear, drag);
+                    if (drop < 0 && dropWear < 0 && !ui.pointerInInventory
+                        && tossDrop(world, player, drag.block, drag.count))
+                        clearDrag(drag);
+                    else
+                        endDrag(inv, worn, drop, dropWear, drag);
                 }
                 if (rmb && !prevRmb) {
                     if (drag.active) endDrag(inv, worn, -1, -1, drag);

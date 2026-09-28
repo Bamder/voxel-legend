@@ -96,6 +96,7 @@ struct UIState {
     int hoveredSlot = -1;   // inventory slot under the mouse (-1 = none)
     int hoveredWear = -1;   // open wear slot under the mouse (-1 = none)
     int hoveredBlock = -1;  // palette block under the mouse (-1 = none)
+    bool pointerInInventory = false; // mouse is over an inventory panel, not the dimmed world
 
     // Pause menu + settings.
     bool menuOpen = false;
@@ -316,12 +317,12 @@ private:
                    float rimHalf = 0.0f, float bminX = 0.0f, float bmaxX = 0.0f,
                    float bminZ = 0.0f, float bmaxZ = 0.0f);
     void drawFallingTrees(const World& w, const Vec3& eye, const Mat4& vp, const Vec3& sunDir);
-    void drawDrops(const World& w, const Vec3& eye, const Mat4& vp);
+    void drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const Sky& sky);
     void drawOutlineOriented(const Mat4& vp, const Vec3& eye, const PhysicsIsland& t,
                              int lx, int ly, int lz, float r, float g, float b, float a);
     void drawOutline(const Mat4& vp, const Vec3& eye, const IVec3& block,
                      float r, float g, float b, float a);
-    void drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, float size, float yaw,
+    void drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size, float yaw,
                        float r, float g, float b, float a);
     void drawBreakOverlay(const Mat4& vp, const Vec3& eye, const UIState& ui, const World& world);
     void drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,
@@ -369,6 +370,7 @@ private:
     void drawCrosshairPromptText(const std::vector<CrosshairPromptBox>& boxes);
     void drawBlockIcon(uint8_t block, float x, float y, float size);
     void drawModelItemIcon(uint8_t block, const mat::Model& model, float x, float y, float size);
+    void drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, const Sky* sun, float fogDensity);
     void buttonChrome(float x, float y, float w, float h, bool hovered,
                       float fr = 0.47f, float fg = 0.47f, float fb = 0.47f);
     void drawMenu(UIState& ui);

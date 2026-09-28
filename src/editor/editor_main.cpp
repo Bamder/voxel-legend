@@ -201,7 +201,7 @@ struct Editor {
     int gizmoHover = 0;              // 0 none; see gizmo ids in the model editor
     bool refTool = false;            // sticky; stays on when other tools are selected
     bool hairPaint = false;          // sticky voxel hair brush; LMB paint
-    int paintDiv = 0;                // paint cell: 0..3 = 1/2, 1/4, 1/8, 1/16 of kHairGrid
+    int paintDiv = 0;                // paint cell: 0..3 = 1, 1/2, 1/4, 1/16 of the grid
     bool hairErase = false;          // sticky voxel hair eraser; LMB carve
     bool hairSelect = false;         // sticky voxel/part hair select
     bool hairCard = false;           // sticky 1/4-voxel textured hair-card brush
@@ -232,6 +232,9 @@ struct Editor {
     int refLineHover = -1;           // hovered extension edge while picking (-1 none)
     int rotAxis = 1;                 // 0 X, 1 Y, 2 Z (for arrow-key rotate)
     int modelBlock = GRASS_TUFT;     // block whose .model file is being edited
+    int selSolid = -1;               // selected colored cuboid in the item model, or -1
+    int modelRightTab = 0;           // item editor right pane: 0 rand preview, 1 color paint
+    int itemPaintTool = 0;           // color tab: 0 pencil, 1 eraser, 2 fill, 3 picker
     int modelHover = -1;             // hovered block in the model selection panel (-1 = none)
     float rotY = 0.5f, rotX = 0.3f, zoom = 2.6f;
     float brotY = 0.0f, brotX = 1.1f, bzoom = 2.9f; // block-model camera (orbit, pitch ±almost-90°)
@@ -290,6 +293,24 @@ static Vec3 viewOfModel(const float p[3]) { return { p[0] - 0.5f, p[1], p[2] - 0
 
 static float& vecComp(Vec3& v, int a) { return a == 0 ? v.x : (a == 1 ? v.y : v.z); }
 static float vecCompC(const Vec3& v, int a) { return a == 0 ? v.x : (a == 1 ? v.y : v.z); }
+
+// Paint / part cell stops: full grid, half, quarter, sixteenth.
+static int paintDenom(int step) {
+    static const int d[4] = { 1, 2, 4, 16 };
+    if (step < 0) step = 0;
+    if (step > 3) step = 3;
+    return d[step];
+}
+
+// Texels covered by one paint cell on a face. worldLen is that edge in world units, pxLen is its texel span.
+static int paintCellPx(float worldLen, int pxLen, int step) {
+    float cell = 0.04f / (float)paintDenom(step);
+    if (!(worldLen > 1e-5f) || pxLen < 1) return 1;
+    int n = (int)std::lround(cell * (float)pxLen / worldLen);
+    if (n < 1) n = 1;
+    if (n > pxLen) n = pxLen;
+    return n;
+}
 
 static bool rayHitAABB(const Vec3& ro, const Vec3& rd, const Vec3& mn, const Vec3& mx, float& tHit) {
     float tmin = 0.001f, tmax = 1e9f;
@@ -985,6 +1006,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     mat::Model savedModel;      // last loaded/saved snapshot (Cancel)
     mat::RandParams savedRand;
     std::vector<uint8_t> selMark;
+    std::vector<uint8_t> solidMark;
     float fillBaseArea = 0.0f;
     ed.entityParts = pm::buildPlayerModel();          // entity (player) model parts
     std::vector<pm::Part> savedEntity = ed.entityParts;
@@ -1132,6 +1154,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     auto paintUndoEmpty = [&]() -> bool {
         auto* st = paintUndoOf(paintKind());
         return !st || st->empty();
+    };
+    auto undoEntityCmd = [&]() {
+        bool paintTool = ed.picker || (ed.tool >= 0 && ed.tool <= 8);
+        if ((paintTool || ed.entSkinView) && !paintUndoEmpty()) undoSkin();
+        else undoEnt();
     };
     auto migrateFaceOverlays = [&](std::vector<pm::Part>& parts) {
         for (pm::Part& p : parts) {
@@ -2632,24 +2659,197 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 editRand.f[kRandSliders[i].key] = kRandSliders[i].def;
         }
     };
+    mat::Image itemSheet, savedItemSheet;
+    unsigned itemSheetGL = 0;
+    bool itemSheetDirty = false;
+    std::vector<std::vector<uint8_t>> itemSheetUndo;
     auto snapshotSaved = [&]() {
         savedModel = editModel;
         savedRand = editRand;
+        savedItemSheet = itemSheet;
+    };
+    struct PaintSnap { std::string name; std::vector<uint8_t> rgba; };
+    std::vector<PaintSnap> itemPaintUndo;
+    bool paintDirty = false;
+    auto imageByName = [&](const std::string& name, unsigned& glTex) -> mat::Image* {
+        glTex = 0;
+        int ti = mat::tileIndex(name.c_str());
+        if (ti >= 0 && ti < TEX_COUNT) {
+            glTex = tileGL[ti];
+            return &mat::g_tileImages[ti];
+        }
+        for (ExtraMat& e : extraMats) if (e.name == name) { glTex = e.tex; return &e.img; }
+        return nullptr;
+    };
+    auto publishPaint = [&](const std::string& name, mat::Image* img, unsigned glTex) {
+        if (!img) return;
+        if (mat::tileIndex(name.c_str()) >= 0) syncTilesToGL();
+        else if (glTex) uploadImgPixels(glTex, *img);
+    };
+    auto revertPaint = [&]() {
+        std::vector<std::string> done;
+        for (const PaintSnap& s : itemPaintUndo) {
+            bool seen = false;
+            for (const std::string& d : done) if (d == s.name) { seen = true; break; }
+            if (seen) continue;
+            done.push_back(s.name);
+            unsigned glt = 0;
+            mat::Image* img = imageByName(s.name, glt);
+            if (img && img->rgba.size() == s.rgba.size()) img->rgba = s.rgba;
+            publishPaint(s.name, img, glt);
+        }
+        itemPaintUndo.clear();
+        paintDirty = false;
+    };
+    auto savePaintedImages = [&]() {
+        std::vector<std::string> done;
+        for (const PaintSnap& s : itemPaintUndo) {
+            bool seen = false;
+            for (const std::string& d : done) if (d == s.name) { seen = true; break; }
+            if (seen) continue;
+            done.push_back(s.name);
+            unsigned glt = 0;
+            mat::Image* img = imageByName(s.name, glt);
+            if (!img || !img->ok()) continue;
+            int ti = mat::tileIndex(s.name.c_str());
+            std::string path = (ti >= 0) ? pack::tilePng(s.name) : (kExtrasDir + "/" + s.name + ".png");
+            mat::savePNG(path.c_str(), img->w, img->h, img->rgba.data());
+            publishPaint(s.name, img, glt);
+        }
+        itemPaintUndo.clear();
+        paintDirty = false;
+    };
+    auto itemPaintPath = [&]() {
+        return kExtrasDir + "/" + mat::blockName(ed.modelBlock) + "_paint.png";
+    };
+    auto uploadItemSheet = [&]() {
+        if (!itemSheet.ok()) return;
+        if (!itemSheetGL) itemSheetGL = uploadImgTex(itemSheet);
+        else uploadImgPixels(itemSheetGL, itemSheet);
+        gl::BindTexture(GL_TEXTURE_2D, itemSheetGL);
+        gl::TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl::TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl::BindTexture(GL_TEXTURE_2D, 0);
+    };
+    auto sheetPow2 = [](int n) {
+        int p = 32;
+        while (p < n && p < 1024) p <<= 1;
+        return p < n ? n : p;
+    };
+    auto sheetTexelN = [](float full) {
+        int n = (int)std::lround(std::fabs(full) / (mat::kSolidGrid / 16.0f));
+        if (n < 1) n = 1;
+        if (n > 48) n = 48;
+        return n;
+    };
+    auto paintIsland = [&](const mat::Solid& s) {
+        if (!mat::solidHasBox(s) || !itemSheet.ok()) return;
+        uint8_t r = (uint8_t)std::lround(std::clamp(s.rgb[0], 0.0f, 1.0f) * 255.0f);
+        uint8_t g = (uint8_t)std::lround(std::clamp(s.rgb[1], 0.0f, 1.0f) * 255.0f);
+        uint8_t b = (uint8_t)std::lround(std::clamp(s.rgb[2], 0.0f, 1.0f) * 255.0f);
+        for (int f = 0; f < 6; f++) {
+            int x, y, fw, fh;
+            pm::boxFacePx(s.boxX, s.boxY, s.boxW, s.boxH, s.boxD, f, x, y, fw, fh);
+            for (int yy = y; yy < y + fh; yy++) for (int xx = x; xx < x + fw; xx++) {
+                if (xx < 0 || yy < 0 || xx >= itemSheet.w || yy >= itemSheet.h) continue;
+                size_t i = ((size_t)yy * (size_t)itemSheet.w + (size_t)xx) * 4;
+                itemSheet.rgba[i] = r; itemSheet.rgba[i + 1] = g;
+                itemSheet.rgba[i + 2] = b; itemSheet.rgba[i + 3] = 255;
+            }
+        }
+    };
+    auto growItemSheet = [&](int needW, int needH) {
+        int W = sheetPow2(std::max(needW, 1));
+        int H = sheetPow2(std::max(needH, 1));
+        if (itemSheet.ok() && itemSheet.w >= W && itemSheet.h >= H) return;
+        int nw = sheetPow2(std::max(W, itemSheet.ok() ? itemSheet.w : 0));
+        int nh = sheetPow2(std::max(H, itemSheet.ok() ? itemSheet.h : 0));
+        mat::Image n;
+        n.w = nw; n.h = nh;
+        n.rgba.assign((size_t)nw * (size_t)nh * 4, 255);
+        for (size_t i = 0; i + 3 < n.rgba.size(); i += 4) {
+            n.rgba[i] = 48; n.rgba[i + 1] = 48; n.rgba[i + 2] = 52;
+        }
+        if (itemSheet.ok()) {
+            for (int y = 0; y < itemSheet.h && y < nh; y++) {
+                const uint8_t* src = itemSheet.rgba.data() + (size_t)y * (size_t)itemSheet.w * 4;
+                uint8_t* dst = n.rgba.data() + (size_t)y * (size_t)nw * 4;
+                for (int x = 0; x < itemSheet.w * 4; x++) dst[x] = src[x];
+            }
+        }
+        itemSheet = std::move(n);
+    };
+    auto loadItemSheet = [&]() {
+        itemSheetUndo.clear();
+        itemSheetDirty = false;
+        itemSheet = mat::loadPNG(itemPaintPath().c_str());
+        int usedW = 1, usedH = 1;
+        bool any = false;
+        for (const mat::Solid& s : editModel.solids) {
+            if (!mat::solidHasBox(s)) continue;
+            any = true;
+            int r = s.boxX + 2 * s.boxD + 2 * s.boxW;
+            int b = s.boxY + s.boxD + s.boxH;
+            if (r > usedW) usedW = r;
+            if (b > usedH) usedH = b;
+        }
+        if (any) {
+            bool fresh = !itemSheet.ok();
+            growItemSheet(usedW, usedH);
+            if (fresh) for (const mat::Solid& s : editModel.solids) paintIsland(s);
+        }
+        uploadItemSheet();
+    };
+    auto claimSolidSheet = [&](mat::Solid& s) {
+        if (!s.tex.empty()) { s.tex.clear(); ed.dirty = true; }
+        if (mat::solidHasBox(s)) {
+            growItemSheet(s.boxX + 2 * s.boxD + 2 * s.boxW, s.boxY + s.boxD + s.boxH);
+            uploadItemSheet();
+            return;
+        }
+        int w = sheetTexelN(s.h[0] * 2.0f);
+        int h = sheetTexelN(s.h[1] * 2.0f);
+        int d = sheetTexelN(s.h[2] * 2.0f);
+        int usedH = 0;
+        for (const mat::Solid& o : editModel.solids) {
+            if (!mat::solidHasBox(o)) continue;
+            int b = o.boxY + o.boxD + o.boxH;
+            if (b > usedH) usedH = b;
+        }
+        s.boxX = 0;
+        s.boxY = usedH > 0 ? usedH + 1 : 0;
+        s.boxW = w; s.boxH = h; s.boxD = d;
+        growItemSheet(2 * d + 2 * w, s.boxY + d + h);
+        paintIsland(s);
+        uploadItemSheet();
+        ed.dirty = true;
     };
     auto saveRandFile = [&]() {
         mat::saveRand(randPathFor(ed.modelBlock).c_str(), editRand);
         std::string p = pack::blockModel(mat::blockName(ed.modelBlock));
         mat::saveModel(p.c_str(), editModel);
         mat::storeItemModel((uint8_t)ed.modelBlock, editModel);
+        if (paintDirty) savePaintedImages();
+        if (itemSheet.ok() && itemSheetDirty) {
+            mat::savePNG(itemPaintPath().c_str(), itemSheet.w, itemSheet.h, itemSheet.rgba.data());
+            itemSheetDirty = false;
+        }
         snapshotSaved();
         ed.dirty = false;
     };
     auto cancelChanges = [&]() {
+        if (paintDirty) revertPaint();
         editModel = savedModel;
         editRand = savedRand;
+        itemSheet = savedItemSheet;
+        itemSheetUndo.clear();
+        itemSheetDirty = false;
+        uploadItemSheet();
         if (ed.selQuad >= (int)editModel.quads.size()) ed.selQuad = (int)editModel.quads.size() - 1;
         if (ed.selQuad < 0) ed.selQuad = 0;
         selMark.clear();
+        solidMark.clear();
+        if (ed.selSolid >= (int)editModel.solids.size()) ed.selSolid = -1;
         ed.dirty = false;
     };
 
@@ -2665,7 +2865,23 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (ed.selQuad >= (int)editModel.quads.size()) ed.selQuad = (int)editModel.quads.size() - 1;
         if (ed.selQuad < 0) ed.selQuad = 0;
         selMark.clear();
+        solidMark.clear();
+        if (ed.selSolid >= (int)editModel.solids.size()) ed.selSolid = -1;
         ed.dirty = true;
+    };
+    auto undoModelOrPaint = [&]() {
+        if (ed.modelRightTab == 1 && !itemSheetUndo.empty()) {
+            if (itemSheet.ok() && itemSheetUndo.back().size() == itemSheet.rgba.size()) {
+                itemSheet.rgba = itemSheetUndo.back();
+                itemSheetUndo.pop_back();
+                uploadItemSheet();
+                ed.dirty = true;
+                if (itemSheetUndo.empty()) itemSheetDirty = false;
+                return;
+            }
+            itemSheetUndo.pop_back();
+        }
+        undoModel();
     };
     auto defaultTexFor = [&](int b) -> std::string {
         if (b == GRASS_TUFT) return "grass_tuft";
@@ -2730,6 +2946,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto markObject = [&](int qi, bool add) {
         ensureSelMark();
+        ed.selSolid = -1;
         if (qi < 0 || qi >= (int)editModel.quads.size()) return;
         long long id = objectId(qi);
         if (add && keyDown(VK_CONTROL) && !keyDown(VK_SHIFT)) {
@@ -2851,19 +3068,54 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (n.dot(a) < 0) a = a * -1.0f;
         return a;
     };
-    auto nextGroupId = [&]() {
-        int g = 0;
-        for (const mat::Quad& q : editModel.quads) if (q.group + 1 > g) g = q.group + 1;
-        return g;
-    };
     auto nextBindId = [&]() {
         int g = 0;
         for (const mat::Quad& q : editModel.quads) if (q.bind + 1 > g) g = q.bind + 1;
+        for (const mat::Solid& s : editModel.solids) if (s.bind + 1 > g) g = s.bind + 1;
         return g;
+    };
+    auto ensureSolidMark = [&]() {
+        if ((int)solidMark.size() != (int)editModel.solids.size())
+            solidMark.assign(editModel.solids.size(), 0);
+    };
+    auto solidIds = [&]() {
+        ensureSolidMark();
+        std::vector<int> out;
+        for (int i = 0; i < (int)solidMark.size(); i++) if (solidMark[i]) out.push_back(i);
+        if (out.empty() && ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size())
+            out.push_back(ed.selSolid);
+        return out;
+    };
+    auto selectOnlySolid = [&](int i) {
+        ensureSelMark();
+        ensureSolidMark();
+        std::fill(selMark.begin(), selMark.end(), 0);
+        std::fill(solidMark.begin(), solidMark.end(), 0);
+        if (i >= 0 && i < (int)editModel.solids.size()) {
+            int b = editModel.solids[i].bind;
+            solidMark[i] = 1;
+            ed.selSolid = i;
+            if (b >= 0) {
+                for (int j = 0; j < (int)editModel.solids.size(); j++)
+                    if (editModel.solids[j].bind == b) solidMark[j] = 1;
+            }
+        } else ed.selSolid = -1;
     };
     auto selCenter = [&](float& cx, float& cy, float& cz) {
         auto idx = selectedIndices();
         cx = 0; cy = 0; cz = 0;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            for (int i : ss) {
+                cx += editModel.solids[i].c[0];
+                cy += editModel.solids[i].c[1];
+                cz += editModel.solids[i].c[2];
+            }
+            float n = (float)ss.size();
+            cx /= n; cy /= n; cz /= n;
+            return;
+        }
         int n = 0;
         for (int i : idx) for (int c = 0; c < 4; c++) {
             cx += editModel.quads[i].p[c][0];
@@ -2897,13 +3149,29 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         rotateSelAxis(a, ang);
     };
     auto rotateSel = [&](int axis, float ang) {
-        if (selectedIndices().empty()) return;
+        if (!selectedIndices().empty()) {
+            pushModelUndo();
+            rotateSelBy(axis, ang);
+            return;
+        }
+        auto ss = solidIds();
+        if (ss.empty() || axis < 0 || axis > 2) return;
         pushModelUndo();
-        rotateSelBy(axis, ang);
+        for (int i : ss) editModel.solids[i].rot[axis] += ang;
+        ed.dirty = true;
     };
     auto translateSel = [&](float dx, float dy, float dz) {
         auto idx = selectedIndices();
-        if (idx.empty()) return;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            for (int i : ss) {
+                mat::Solid& s = editModel.solids[i];
+                s.c[0] += dx; s.c[1] += dy; s.c[2] += dz;
+            }
+            ed.dirty = true;
+            return;
+        }
         for (int i : idx) {
             mat::Quad& q = editModel.quads[i];
             for (int c = 0; c < 4; c++) {
@@ -2915,7 +3183,21 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto snapSel = [&]() {
         auto idx = selectedIndices();
-        if (idx.empty()) return;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            pushModelUndo();
+            const float grid = 0.25f;
+            float mn[3] = { 1e9f, 1e9f, 1e9f };
+            for (int i : ss) for (int k = 0; k < 3; k++) {
+                float v = editModel.solids[i].c[k] - editModel.solids[i].h[k];
+                if (v < mn[k]) mn[k] = v;
+            }
+            float d[3];
+            for (int k = 0; k < 3; k++) d[k] = std::round(mn[k] / grid) * grid - mn[k];
+            translateSel(d[0], d[1], d[2]);
+            return;
+        }
         pushModelUndo();
         const float grid = 0.25f;
         float mn[3] = { 1e9f, 1e9f, 1e9f };
@@ -2926,6 +3208,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         translateSel(d[0], d[1], d[2]);
     };
     auto alignSel = [&]() {
+        if (selectedIndices().empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            pushModelUndo();
+            for (int i : ss) editModel.solids[i].rot[0] = editModel.solids[i].rot[1] = editModel.solids[i].rot[2] = 0.0f;
+            ed.dirty = true;
+            return;
+        }
         if (editModel.quads.empty() || ed.selQuad < 0 || ed.selQuad >= (int)editModel.quads.size()) return;
         const mat::Quad& q0 = editModel.quads[ed.selQuad];
         Vec3 n = faceNormalOf(q0);
@@ -2970,7 +3260,18 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto mirrorSel = [&](int axis) {
         auto idx = selectedIndices();
-        if (idx.empty() || axis < 0 || axis > 2) return;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty() || axis < 0 || axis > 2) return;
+            pushModelUndo();
+            float cx, cy, cz;
+            selCenter(cx, cy, cz);
+            float c[3] = { cx, cy, cz };
+            for (int i : ss) editModel.solids[i].c[axis] = 2.0f * c[axis] - editModel.solids[i].c[axis];
+            ed.dirty = true;
+            return;
+        }
+        if (axis < 0 || axis > 2) return;
         pushModelUndo();
         float cx, cy, cz;
         selCenter(cx, cy, cz);
@@ -2986,7 +3287,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto flipSelUV = [&](int uvAxis) {
         auto idx = selectedIndices();
-        if (idx.empty()) return;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            pushModelUndo();
+            int bit = (uvAxis == 1) ? 2 : 1;
+            for (int i : ss) editModel.solids[i].uvFlip ^= bit;
+            ed.dirty = true;
+            return;
+        }
         pushModelUndo();
         for (int i : idx) {
             mat::Quad& q = editModel.quads[i];
@@ -3005,7 +3314,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (s < 0.03125f) s = 0.03125f;
         if (s > 2.0f) s = 2.0f;
         auto idx = selectedIndices();
-        if (idx.empty()) return;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            for (int i : ss) editModel.solids[i].texScale = s;
+            ed.dirty = true;
+            return;
+        }
         for (int i : idx) {
             mat::Quad& q = editModel.quads[i];
             q.texScale = s;
@@ -3017,8 +3332,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto stepTexScaleSel = [&](int dir) {
         auto idx = selectedIndices();
-        if (idx.empty()) return;
-        float cur = mat::quadTexScale(editModel.quads[idx[0]]);
+        float cur = 1.0f;
+        if (!idx.empty()) cur = mat::quadTexScale(editModel.quads[idx[0]]);
+        else {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            cur = editModel.solids[ss[0]].texScale;
+            if (cur < 1e-4f) cur = 1.0f;
+        }
         const float steps[] = { 0.03125f, 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f, 2.0f };
         const int n = 7;
         int best = 0;
@@ -3040,7 +3361,16 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto bindSel = [&]() {
         auto idx = selectedIndices();
-        if (idx.size() < 2) return;
+        if (idx.size() < 2) {
+            auto ss = solidIds();
+            if (ss.size() < 2) return;
+            pushModelUndo();
+            int b = nextBindId();
+            for (int i : ss) editModel.solids[i].bind = b;
+            ed.dirty = true;
+            selectOnlySolid(ss[0]);
+            return;
+        }
         pushModelUndo();
         int b = nextBindId();
         for (int i : idx) editModel.quads[i].bind = b;
@@ -3049,7 +3379,24 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto unbindSel = [&]() {
         auto idx = selectedIndices();
-        if (idx.empty()) return;
+        if (idx.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            std::vector<int> binds;
+            for (int i : ss) {
+                int b = editModel.solids[i].bind;
+                if (b < 0) continue;
+                bool have = false;
+                for (int x : binds) if (x == b) have = true;
+                if (!have) binds.push_back(b);
+            }
+            if (binds.empty()) return;
+            pushModelUndo();
+            for (mat::Solid& s : editModel.solids)
+                for (int b : binds) if (s.bind == b) s.bind = -1;
+            ed.dirty = true;
+            return;
+        }
         bool anyBind = false;
         for (int i : idx) if (editModel.quads[i].bind >= 0) { anyBind = true; break; }
         pushModelUndo();
@@ -3093,6 +3440,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         ed.hairSelDrag = false;
         ed.partCut = false;
         ed.partAdd = false;
+        ed.partAddVis = false;
+        ed.partAnchor = false;
         ed.partMeasure = false;
         ed.partPlane = false;
     };
@@ -3213,81 +3562,37 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             snapshotFillBase();
         }
     };
-    auto fillCubeFace = [&](mat::Quad& q, int f, float ox, float oy, float oz, float s, bool crop, const std::string& tex, int group) {
-        const geo::FaceDef& F = geo::kFaces[f];
-        q = {};
-        q.face = f; q.crop = crop; q.tex = tex; q.group = group; q.doubleSided = false;
-        q.solid = crop;
-        q.uvMode = 1;
-        q.texScale = s;
-        for (int c = 0; c < 4; c++) {
-            q.p[c][0] = ox + F.p[c][0] * s;
-            q.p[c][1] = oy + F.p[c][1] * s;
-            q.p[c][2] = oz + F.p[c][2] * s;
-        }
-        if (crop) applyCropUV(q);
-        else applyFillUV(q);
+    auto pushTexSolid = [&](float cx, float cy, float cz, float hx, float hy, float hz, int kind, int face, bool crop, float texS) {
+        pushModelUndo();
+        mat::Solid s;
+        s.c[0] = cx; s.c[1] = cy; s.c[2] = cz;
+        s.h[0] = hx; s.h[1] = hy; s.h[2] = hz;
+        s.rgb[0] = ed.r; s.rgb[1] = ed.g; s.rgb[2] = ed.b;
+        s.kind = kind;
+        s.face = face;
+        s.crop = crop;
+        s.texScale = texS;
+        s.tex = ed.selMat;
+        editModel.solids.push_back(s);
+        selectOnlySolid((int)editModel.solids.size() - 1);
+        ed.dirty = true;
     };
     auto addFace = [&]() {
-        pushModelUndo();
-        mat::Quad q = {};
-        q.p[0][0] = 0; q.p[0][1] = 0; q.p[0][2] = 0;
-        q.p[1][0] = 1; q.p[1][1] = 0; q.p[1][2] = 0;
-        q.p[2][0] = 1; q.p[2][1] = 1; q.p[2][2] = 0;
-        q.p[3][0] = 0; q.p[3][1] = 1; q.p[3][2] = 0;
-        q.uv[0][0] = 0; q.uv[0][1] = 1; q.uv[1][0] = 1; q.uv[1][1] = 1;
-        q.uv[2][0] = 1; q.uv[2][1] = 0; q.uv[3][0] = 0; q.uv[3][1] = 0;
-        q.doubleSided = true;
-        q.tex = ed.selMat;
-        q.face = 5;
-        q.uvMode = 1;
-        q.texScale = 1.0f;
-        applyFillUV(q);
-        editModel.quads.push_back(q);
-        markObject((int)editModel.quads.size() - 1, false);
-        ed.selCorner = 0;
-        ed.dirty = true;
+        pushTexSolid(0.5f, 0.5f, 0.02f, 0.5f, 0.5f, 0.02f, 1, 5, false, 1.0f);
     };
     auto addBlock = [&]() {
-        pushModelUndo();
-        int g = nextGroupId();
-        for (int f = 0; f < 6; f++) {
-            mat::Quad q;
-            fillCubeFace(q, f, 0, 0, 0, 1.0f, false, ed.selMat, g);
-            editModel.quads.push_back(q);
-        }
-        markObject((int)editModel.quads.size() - 6, false);
-        ed.selCorner = 0;
-        ed.dirty = true;
+        pushTexSolid(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, false, 1.0f);
     };
     const float kSmallS = 0.25f;
     const float kTinyS = 0.125f;
     auto addSmall = [&]() {
-        pushModelUndo();
-        int g = nextGroupId();
-        for (int f = 0; f < 6; f++) {
-            mat::Quad q;
-            fillCubeFace(q, f, 0, 0, 0, kSmallS, true, ed.selMat, g);
-            editModel.quads.push_back(q);
-        }
-        markObject((int)editModel.quads.size() - 6, false);
-        ed.selCorner = 0;
-        ed.dirty = true;
+        pushTexSolid(kSmallS * 0.5f, kSmallS * 0.5f, kSmallS * 0.5f,
+                     kSmallS * 0.5f, kSmallS * 0.5f, kSmallS * 0.5f, 0, 0, true, kSmallS);
     };
     auto addTinyAt = [&](float ox, float oy, float oz, float texS) {
-        pushModelUndo();
-        int g = nextGroupId();
         if (texS < 1e-4f) texS = kTinyS;
-        for (int f = 0; f < 6; f++) {
-            mat::Quad q;
-            fillCubeFace(q, f, ox, oy, oz, kTinyS, true, ed.selMat, g);
-            q.texScale = texS;
-            applyCropUV(q);
-            editModel.quads.push_back(q);
-        }
-        markObject((int)editModel.quads.size() - 6, false);
-        ed.selCorner = 0;
-        ed.dirty = true;
+        float h = kTinyS * 0.5f;
+        pushTexSolid(ox + h, oy + h, oz + h, h, h, h, 0, 0, true, texS);
     };
     auto cubeGroupBounds = [&](int qi, float mn[3], float mx[3]) -> bool {
         if (qi < 0 || qi >= (int)editModel.quads.size()) return false;
@@ -3339,6 +3644,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (std::fabs(mn[0] - ox) < eps && std::fabs(mn[1] - oy) < eps && std::fabs(mn[2] - oz) < eps)
                 return true;
         }
+        for (const mat::Solid& s : editModel.solids) {
+            if (!s.crop) continue;
+            float mn[3] = { s.c[0] - s.h[0], s.c[1] - s.h[1], s.c[2] - s.h[2] };
+            bool tiny = true;
+            for (int k = 0; k < 3; k++) if (std::fabs(s.h[k] * 2.0f - kTinyS) > 0.02f) tiny = false;
+            if (!tiny) continue;
+            if (std::fabs(mn[0] - ox) < eps && std::fabs(mn[1] - oy) < eps && std::fabs(mn[2] - oz) < eps)
+                return true;
+        }
         return false;
     };
     auto snapTiny = [&](float v) {
@@ -3354,6 +3668,41 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             float t;
             if (rayHitTri(ro, rd, p[0], p[1], p[2], t) && t < best) { best = t; hit = i; }
             if (rayHitTri(ro, rd, p[0], p[2], p[3], t) && t < best) { best = t; hit = i; }
+        }
+        float solidT = 1e9f;
+        int solidHit = -1;
+        Vec3 solidN{};
+        for (int i = 0; i < (int)editModel.solids.size(); i++) {
+            const mat::Solid& s = editModel.solids[i];
+            if (!s.crop) continue;
+            bool tiny = true;
+            for (int k = 0; k < 3; k++) if (std::fabs(s.h[k] * 2.0f - kTinyS) > 0.02f) tiny = false;
+            if (!tiny) continue;
+            Vec3 c{ s.c[0] - 0.5f, s.c[1], s.c[2] - 0.5f };
+            Vec3 h{ s.h[0], s.h[1], s.h[2] };
+            float t;
+            if (!rayHitAABB(ro, rd, c - h, c + h, t) || t >= solidT) continue;
+            solidT = t;
+            solidHit = i;
+            Vec3 hp = ro + rd * t;
+            float d[6] = {
+                std::fabs(hp.y - (c.y + h.y)), std::fabs(hp.y - (c.y - h.y)),
+                std::fabs(hp.x - (c.x + h.x)), std::fabs(hp.x - (c.x - h.x)),
+                std::fabs(hp.z - (c.z + h.z)), std::fabs(hp.z - (c.z - h.z))
+            };
+            int fi = 0;
+            for (int k = 1; k < 6; k++) if (d[k] < d[fi]) fi = k;
+            solidN = { (float)geo::kFaces[fi].n[0], (float)geo::kFaces[fi].n[1], (float)geo::kFaces[fi].n[2] };
+        }
+        if (solidHit >= 0 && (hit < 0 || solidT <= best)) {
+            const mat::Solid& s = editModel.solids[solidHit];
+            texS = s.texScale > 1e-4f ? s.texScale : kTinyS;
+            float mn[3] = { s.c[0] - s.h[0], s.c[1] - s.h[1], s.c[2] - s.h[2] };
+            ox = mn[0] + solidN.x * kTinyS;
+            oy = mn[1] + solidN.y * kTinyS;
+            oz = mn[2] + solidN.z * kTinyS;
+            if (tinyOccupied(ox, oy, oz)) return false;
+            return true;
         }
         if (hit >= 0 && isTinyCubeQi(hit)) {
             float mn[3], mx[3];
@@ -3400,6 +3749,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto assignSelTex = [&](const std::string& name) {
         ed.selMat = name;
+        auto idx0 = selectedIndices();
+        if (idx0.empty()) {
+            auto ss = solidIds();
+            if (ss.empty()) return;
+            pushModelUndo();
+            for (int i : ss) editModel.solids[i].tex = name;
+            ed.dirty = true;
+            return;
+        }
         if (editModel.quads.empty()) return;
         pushModelUndo();
         auto idx = selectedIndices();
@@ -3465,17 +3823,25 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
 
     // Load a block's .model file into the editor (called on selection + startup).
     auto loadBlockModel = [&](int b) {
+        if (paintDirty) revertPaint();
         if (b < 1 || b >= liveBlockCount()) b = GRASS_TUFT;
         ed.modelBlock = b;
         std::string p = pack::blockModel(mat::blockName(b));
         editModel = mat::loadModel(p.c_str());
         editRand = mat::loadRand(randPathFor(b).c_str());
+        loadItemSheet();
         if (b == GRASS_TUFT) ensureRandDefaults();
         std::string def = defaultTexFor(b);
         for (mat::Quad& q : editModel.quads) if (q.tex.empty()) q.tex = def;
         ed.selMat = (!editModel.quads.empty() && !editModel.quads[0].tex.empty()) ? editModel.quads[0].tex : def;
         snapshotSaved();
         ed.selQuad = 0; ed.selCorner = 0;
+        ed.selSolid = -1;
+        solidMark.clear();
+        ed.partAnchor = false;
+        ed.partAddVis = false;
+        ed.measureOn = false;
+        ed.planeOn = false;
         markObject(0, false);
         ed.dirty = false;
         modelUndo.clear();
@@ -3608,11 +3974,18 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (entSlideH < 40.0f) entSlideH = 40.0f;
             entViewRW = entSlideX - paneRX - 8.0f;
             if (entViewRW < 40.0f) entViewRW = 40.0f;
-            if (ed.hairPaint) {
-                paintSlideW = 168.0f;
-                paintSlideH = 36.0f;
-                paintSlideX = paneRX + 12.0f;
-                paintSlideY = paneRY + paneRH - 12.0f - paintSlideH;
+            bool entScale = ed.hairPaint || ed.entSkinView || ed.picker || (ed.tool >= 0 && ed.tool <= 8);
+            if (entScale) {
+                paintSlideH = 16.0f;
+                bool onLeft = !ed.hairPaint;
+                float avail = onLeft ? paneLW : entViewRW;
+                float originX = onLeft ? paneLX : paneRX;
+                float bottom = onLeft ? (paneLY + paneLH) : (paneRY + paneRH);
+                paintSlideW = avail - 24.0f;
+                if (paintSlideW > 168.0f) paintSlideW = 168.0f;
+                if (paintSlideW < 48.0f) paintSlideW = 48.0f;
+                paintSlideX = originX + 12.0f;
+                paintSlideY = bottom - 12.0f - paintSlideH;
             }
             if (entIsCloth) togW = 108.0f;
             togX = paneLX + paneLW - 12.0f - togW;
@@ -3621,6 +3994,73 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             cBody[3] = 26.0f;
             cBody[0] = paneRX + paneRW - 10.0f - cBody[2];
             cBody[1] = kTopH + 7.0f;
+        }
+        float viewLW = paneLW;
+        float partColX = 0.0f, partColW = 0.0f;
+        float partToolRect[13][4] = {};
+        float partChipRect[8][4] = {};
+        int partToolHover = -1;
+        float rightTab[2][4] = {};
+        int rightTabHover = -1;
+        float colorViewW = paneRW;
+        float colorSlideX = 0, colorSlideY = 0, colorSlideW = 0, colorSlideH = 0;
+        bool colorFaceVis = false;
+        Vec3 colorFaceQ[4] = {};
+        float colorSv[4] = {};
+        float colorHueCX = 0, colorHueCY = 0, colorHueRI = 0, colorHueRO = 0;
+        float colorAlpha[4] = {};
+        float colorTool[9][4] = {};
+        float colorRecent[8][4] = {};
+        float colorCur[4] = {};
+        int colorToolHover = -1;
+        int colorRecentHover = -1;
+        int colorHx = -1, colorHy = -1;
+        std::string itemPaintName;
+        const char* partLab[13] = {
+            "Part", "Select", "Paint", "Card", "Erase", "Merge", "Split",
+            "Tex", "Dup", "Del", "Cut", "Measure", "Plane"
+        };
+        const char* colorLab[9] = {
+            "Pen", "Brush", "Fill", "Pick", "Erase", "RFill", "Rect", "Line", "Circ"
+        };
+        if (ed.modelMode && paneLW > 160.0f && paneLH > 80.0f) {
+            partColW = 78.0f;
+            if (paneLW < partColW + 160.0f) partColW = paneLW - 160.0f;
+            if (partColW < 64.0f) partColW = 64.0f;
+            viewLW = paneLW - partColW;
+            partColX = paneLX + viewLW;
+            const float pad = 4.0f, gap = 3.0f;
+            const float chipH = 18.0f, chipGap = 3.0f;
+            const float chipBlock = chipH * 4.0f + chipGap * 3.0f;
+            float avail = paneLH - pad * 2.0f - chipBlock - 8.0f;
+            float bh = (avail - gap * 12.0f) / 13.0f;
+            if (bh > 28.0f) bh = 28.0f;
+            if (bh < 15.0f) bh = 15.0f;
+            float bw = partColW - pad * 2.0f;
+            float y = paneLY + pad;
+            for (int i = 0; i < 13; i++) {
+                partToolRect[i][0] = partColX + pad;
+                partToolRect[i][1] = y;
+                partToolRect[i][2] = bw;
+                partToolRect[i][3] = bh;
+                y += bh + gap;
+            }
+            if (ed.hairPaint && viewLW > 80.0f) {
+                paintSlideW = viewLW - 24.0f;
+                if (paintSlideW > 180.0f) paintSlideW = 180.0f;
+                paintSlideH = 16.0f;
+                paintSlideX = paneLX + 12.0f;
+                paintSlideY = paneLY + paneLH - 8.0f - paintSlideH;
+            }
+            float cw = (bw - chipGap) * 0.5f;
+            float cy = paneLY + paneLH - pad - chipBlock;
+            for (int i = 0; i < 8; i++) {
+                int col = i % 2, row = i / 2;
+                partChipRect[i][0] = partColX + pad + col * (cw + chipGap);
+                partChipRect[i][1] = cy + row * (chipH + chipGap);
+                partChipRect[i][2] = cw;
+                partChipRect[i][3] = chipH;
+            }
         }
         float animVX = 0, animVY = 0, animVW = 0, animVH = 0;
         float animLeftW = 206.0f, animRightW = 280.0f;
@@ -3901,6 +4341,18 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
         }
         ed.modelToolHover = -1;
+        if (ed.modelMode) {
+            for (int i = 0; i < 13; i++) {
+                if (mx >= partToolRect[i][0] && mx < partToolRect[i][0] + partToolRect[i][2] &&
+                    my >= partToolRect[i][1] && my < partToolRect[i][1] + partToolRect[i][3])
+                    partToolHover = i;
+            }
+            for (int i = 0; i < 8; i++) {
+                if (mx >= partChipRect[i][0] && mx < partChipRect[i][0] + partChipRect[i][2] &&
+                    my >= partChipRect[i][1] && my < partChipRect[i][1] + partChipRect[i][3])
+                    partToolHover = 20 + i;
+            }
+        }
         float etoolRect[11][4] = {};
         const int kEActs = 13;
         float eactRect[13][4] = {};
@@ -3956,7 +4408,21 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         float saveY = kTopH + (kHdrH - kSaveS) * 0.5f;
         float cancelX = saveX - 8.0f - kCancelW;
         float cancelY = kTopH + (kHdrH - kCancelH) * 0.5f;
-        bool showSliders = ed.modelMode && ed.modelBlock == GRASS_TUFT;
+        if (ed.modelMode) {
+            float tabH = kHdrH - 4.0f;
+            float tabW = 72.0f;
+            float room = cancelX - 12.0f - (paneRX + 8.0f);
+            if (room < tabW * 2.0f + 4.0f) tabW = std::max(46.0f, (room - 4.0f) * 0.5f);
+            float tabY = kTopH + 4.0f;
+            rightTab[0][0] = paneRX + 8.0f; rightTab[0][1] = tabY; rightTab[0][2] = tabW; rightTab[0][3] = tabH;
+            rightTab[1][0] = paneRX + 8.0f + tabW + 4.0f; rightTab[1][1] = tabY; rightTab[1][2] = tabW; rightTab[1][3] = tabH;
+            for (int i = 0; i < 2; i++) {
+                if (mx >= rightTab[i][0] && mx < rightTab[i][0] + rightTab[i][2] &&
+                    my >= rightTab[i][1] && my < rightTab[i][1] + rightTab[i][3])
+                    rightTabHover = i;
+            }
+        }
+        bool showSliders = ed.modelMode && ed.modelRightTab == 0 && ed.modelBlock == GRASS_TUFT;
         const float slPad = 12.0f, slRowH = 30.0f, slColGap = 16.0f;
         const float slLabelW = 132.0f, slValueW = 66.0f;
         const int slCols = 2, slRows = (kNRandSliders + slCols - 1) / slCols;
@@ -3967,6 +4433,73 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             paneRY = kTopH + kHdrH;
             paneRH = (showSliders ? sliderTop : (exY - 8.0f)) - paneRY;
             if (paneRH < 40.0f) paneRH = 40.0f;
+        }
+        if (ed.modelMode && ed.modelRightTab == 1 && paneRW > 80.0f && paneRH > 80.0f) {
+            float colW = 168.0f;
+            if (paneRW < 460.0f) colW = 148.0f;
+            if (colW > paneRW - 80.0f) colW = paneRW - 80.0f;
+            float colX = paneRX + paneRW - colW - 8.0f;
+            colorViewW = colX - paneRX;
+            if (colorViewW < 40.0f) colorViewW = 40.0f;
+            if (colorViewW > 80.0f) {
+                colorSlideW = colorViewW - 24.0f;
+                if (colorSlideW > 180.0f) colorSlideW = 180.0f;
+                colorSlideH = 16.0f;
+                colorSlideX = paneRX + 12.0f;
+                colorSlideY = paneRY + paneRH - 8.0f - colorSlideH;
+            }
+            float inner = colW - 16.0f;
+            float gap = 6.0f;
+            float toolsH = 22.0f, swH = 16.0f, alphaH = 12.0f, recH = 16.0f;
+            float y = paneRY + 8.0f;
+            float tw = (inner - gap * 2.0f) / 3.0f;
+            for (int i = 0; i < 9; i++) {
+                int col = i % 3, row = i / 3;
+                colorTool[i][0] = colX + col * (tw + gap);
+                colorTool[i][1] = y + row * (toolsH + gap);
+                colorTool[i][2] = tw;
+                colorTool[i][3] = toolsH;
+            }
+            y += 3.0f * (toolsH + gap);
+            colorCur[0] = colX; colorCur[1] = y; colorCur[2] = inner; colorCur[3] = swH;
+            y += swH + gap;
+            float fixedBelow = gap + alphaH + gap + recH + 8.0f;
+            float rest = paneRY + paneRH - 8.0f - y - fixedBelow;
+            float sv = inner;
+            float hueD = inner * 0.92f;
+            if (sv + gap + hueD > rest) {
+                float s = rest - gap;
+                if (s < 64.0f) s = 64.0f;
+                sv = s / 1.92f;
+                hueD = sv * 0.92f;
+            }
+            colorSv[0] = colX; colorSv[1] = y; colorSv[2] = sv; colorSv[3] = sv;
+            y += sv + gap;
+            colorHueCX = colX + inner * 0.5f;
+            colorHueCY = y + hueD * 0.5f;
+            colorHueRO = hueD * 0.5f;
+            colorHueRI = colorHueRO * 0.72f;
+            y += hueD + gap;
+            colorAlpha[0] = colX; colorAlpha[1] = y; colorAlpha[2] = inner; colorAlpha[3] = alphaH;
+            y += alphaH + gap;
+            float recS = recH;
+            if (recS * 8.0f + 4.0f * 7.0f > inner) recS = (inner - 4.0f * 7.0f) / 8.0f;
+            for (int i = 0; i < 8; i++) {
+                colorRecent[i][0] = colX + i * (recS + 4.0f);
+                colorRecent[i][1] = y;
+                colorRecent[i][2] = recS;
+                colorRecent[i][3] = recS;
+            }
+            for (int i = 0; i < 9; i++) {
+                if (mx >= colorTool[i][0] && mx < colorTool[i][0] + colorTool[i][2] &&
+                    my >= colorTool[i][1] && my < colorTool[i][1] + colorTool[i][3])
+                    colorToolHover = i;
+            }
+            for (int i = 0; i < (int)ed.recent.size() && i < 8; i++) {
+                if (mx >= colorRecent[i][0] && mx < colorRecent[i][0] + colorRecent[i][2] &&
+                    my >= colorRecent[i][1] && my < colorRecent[i][1] + colorRecent[i][3])
+                    colorRecentHover = i;
+            }
         }
         auto sliderTrack = [&](int i, float& lx, float& ly, float& tx, float& ty, float& tw, float& th, float& vx) {
             int col = i % slCols, row = i / slCols;
@@ -4287,19 +4820,25 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         bool overEntPanel = ed.entityMode && mx < leftBarW;
         bool overHairBar = ed.entityMode && hairToolsOn && mx >= paneLX && mx < paneLX + paneLW &&
             my >= entMatY && my < paneLY + paneLH;
-        bool inLeft3d = (ed.modelMode || ed.entityMode) && mx >= paneLX && mx < paneLX + paneLW && my >= paneLY && my < paneLY + paneLH;
+        float leftHitW = ed.modelMode ? viewLW : paneLW;
+        bool inLeft3d = (ed.modelMode || ed.entityMode) && mx >= paneLX && mx < paneLX + leftHitW && my >= paneLY && my < paneLY + paneLH;
+        float rightHitW = ed.entityMode ? entViewRW : ((ed.modelRightTab == 1 && colorViewW > 1.0f) ? colorViewW : paneRW);
         bool inRight3d = (ed.modelMode || ed.entityMode) && mx >= paneRX &&
-            mx < paneRX + (ed.entityMode ? entViewRW : paneRW) &&
+            mx < paneRX + rightHitW &&
             my >= paneRY && my < paneRY + paneRH;
         bool togHov = ed.entityMode && mx >= togX && mx < togX + togW && my >= togY && my < togY + togH;
         bool slideHov = ed.entityMode && mx >= entSlideX - 4.0f && mx < entSlideX + kEntSlideW + 4.0f &&
             my >= entSlideY && my < entSlideY + entSlideH;
-        bool paintSlideHov = ed.hairPaint && paintSlideW > 1.0f &&
+        bool paintSlideHov = paintSlideW > 1.0f &&
             mx >= paintSlideX && mx < paintSlideX + paintSlideW &&
             my >= paintSlideY && my < paintSlideY + paintSlideH;
+        bool colorSlideHov = ed.modelMode && ed.modelRightTab == 1 && colorSlideW > 1.0f &&
+            mx >= colorSlideX && mx < colorSlideX + colorSlideW &&
+            my >= colorSlideY && my < colorSlideY + colorSlideH;
 
         float leftPivX = 0.0f, leftPivY = 0.5f, leftPivZ = 0.0f;
         Mat4 leftMvp;
+        Mat4 colorMvp;
         Mat4 animMvp;
         {
             Mat4 o;
@@ -4307,7 +4846,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             o.m[12] = -1.0f; o.m[13] = 1.0f; o.m[15] = 1.0f;
             leftMvp = o;
         }
-        if (ed.modelMode && paneLW > 1.0f && paneLH > 1.0f) {
+        if (ed.modelMode && viewLW > 1.0f && paneLH > 1.0f) {
             bool any = false;
             float mn[3] = {}, mxv[3] = {};
             auto acc = [&](float x, float y, float z) {
@@ -4332,8 +4871,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 leftPivY = 0.5f * (mn[1] + mxv[1]);
                 leftPivZ = 0.5f * (mn[2] + mxv[2]);
             }
-            float aspectL = paneLW / paneLH;
+            float aspectL = viewLW / paneLH;
             leftMvp = orbitMvp(aspectL, ed.brotY, ed.brotX, ed.bzoom, leftPivX, leftPivY, leftPivZ);
+            colorMvp = leftMvp;
+            if (ed.modelRightTab == 1 && colorViewW > 1.0f && paneRH > 1.0f)
+                colorMvp = orbitMvp(colorViewW / paneRH, ed.rrotY, ed.rrotX, ed.rzoom, leftPivX, leftPivY, leftPivZ);
         } else if (ed.entityMode && paneLW > 1.0f && paneLH > 1.0f) {
             ensureEntMark();
             bool any = false;
@@ -4416,7 +4958,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             return true;
         };
         auto projectView = [&](float x, float y, float z, float& sx, float& sy) -> bool {
-            return projectOnto(leftMvp, paneLX, paneLY, paneLW, paneLH, x, y, z, sx, sy);
+            float ow = ed.modelMode ? viewLW : paneLW;
+            return projectOnto(leftMvp, paneLX, paneLY, ow, paneLH, x, y, z, sx, sy);
         };
         auto projectRight = [&](float x, float y, float z, float& sx, float& sy) -> bool {
             return projectOnto(rightEntMvp, paneRX, paneRY, entViewRW, paneRH, x, y, z, sx, sy);
@@ -4426,10 +4969,26 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             return projectView(x, y, z, sx, sy);
         };
         auto leftRay = [&](float px, float py, Vec3& ro, Vec3& rd) {
-            float u = (paneLW > 1.0f) ? (px - paneLX) / paneLW : 0.5f;
+            float ow = ed.modelMode ? viewLW : paneLW;
+            float u = (ow > 1.0f) ? (px - paneLX) / ow : 0.5f;
             float v = (paneLH > 1.0f) ? 1.0f - (py - paneLY) / paneLH : 0.5f;
             float ndcX = u * 2.0f - 1.0f, ndcY = v * 2.0f - 1.0f;
             Mat4 inv = inverse(leftMvp);
+            auto unp = [&](float z) {
+                Vec4 p = inv * Vec4(ndcX, ndcY, z, 1);
+                float w = (std::fabs(p.w) < 1e-8f) ? 1.0f : p.w;
+                return Vec3{ p.x / w, p.y / w, p.z / w };
+            };
+            Vec3 n = unp(-1.0f), f = unp(1.0f);
+            ro = n;
+            rd = (f - n).normalized();
+        };
+        auto colorRay = [&](float px, float py, Vec3& ro, Vec3& rd) {
+            float ow = colorViewW > 1.0f ? colorViewW : paneRW;
+            float u = (ow > 1.0f) ? (px - paneRX) / ow : 0.5f;
+            float v = (paneRH > 1.0f) ? 1.0f - (py - paneRY) / paneRH : 0.5f;
+            float ndcX = u * 2.0f - 1.0f, ndcY = v * 2.0f - 1.0f;
+            Mat4 inv = inverse(colorMvp);
             auto unp = [&](float z) {
                 Vec4 p = inv * Vec4(ndcX, ndcY, z, 1);
                 float w = (std::fabs(p.w) < 1e-8f) ? 1.0f : p.w;
@@ -4480,7 +5039,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         auto hitGizmo = [&](bool wantTrans, bool wantRot) -> int {
             if (ed.entityMode) {
                 if (ed.entityParts.empty()) return 0;
-            } else if (!ed.modelMode || editModel.quads.empty()) return 0;
+            } else if (!ed.modelMode) return 0;
+            else if (editModel.quads.empty() &&
+                     (ed.selSolid < 0 || ed.selSolid >= (int)editModel.solids.size())) return 0;
             Vec3 g; gizmoCenterView(g);
             float L = gizmoSize();
             float R = L * 0.72f;
@@ -5947,10 +6508,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (lmb && !prevLmb && entMeasureHov) setPartMeasure();
             if (lmb && !prevLmb && entPlaneHov) setPartPlane();
             if (lmb && !prevLmb && midSaveHov) saveEntity();
-            if (lmb && !prevLmb && midUndoHov) {
-                if (!hairToolsOn && ed.entSkinView && !paintUndoEmpty()) undoSkin();
-                else undoEnt();
-            }
+            if (lmb && !prevLmb && midUndoHov) undoEntityCmd();
             if (lmb && !prevLmb && entCancelHov) cancelEntity();
             if (lmb && !prevLmb && ed.modelToolHover >= 0) {
                 int i = ed.modelToolHover;
@@ -6026,9 +6584,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 !entTexHov && !entDupHov && !entDelHov && !entCutHov &&
                 ed.modelToolHover < 0) {
                 int i = ed.toolHover;
-                if (ed.entityMode && !selEyeKind && !selMouthKind && !ed.entSkinView && (i == 0 || i == 4))
-                    setHairBrush(i == 4);
-                else if (i == 0) { ed.tool = (ed.tool == 0) ? -1 : 0; ed.picker = false; ed.brushMod = false; clearHairBrush(); }
+                if (i == 0) { ed.tool = (ed.tool == 0) ? -1 : 0; ed.picker = false; ed.brushMod = false; clearHairBrush(); }
                 else if (i == 1) {
                     if (ed.tool == 2) { ed.brushMod = !ed.brushMod; if (ed.brushMod) ed.picker = false; }
                     else { ed.tool = (ed.tool == 1) ? -1 : 1; ed.picker = false; ed.brushMod = false; }
@@ -6041,10 +6597,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 else if (i == 6) { ed.tool = (ed.tool == 6) ? -1 : 6; ed.picker = false; ed.brushMod = false; clearHairBrush(); }
                 else if (i == 7) { ed.tool = (ed.tool == 7) ? -1 : 7; ed.picker = false; ed.brushMod = false; clearHairBrush(); }
                 else if (i == 8) { ed.tool = (ed.tool == 8) ? -1 : 8; ed.picker = false; ed.brushMod = false; clearHairBrush(); }
-                else if (i == 9) {
-                    if (!hairToolsOn && ed.entSkinView && !paintUndoEmpty()) undoSkin();
-                    else undoEnt();
-                } else if (i == 10) { if (ed.brushSize > 1) ed.brushSize--; }
+                else if (i == 9) undoEntityCmd();
+                else if (i == 10) { if (ed.brushSize > 1) ed.brushSize--; }
                 else if (i == 11) { if (ed.brushSize < 4) ed.brushSize++; }
                 else if (i == 12) saveEntity();
             }
@@ -6176,10 +6730,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
 
             static bool prevCtrlZ = false;
             bool ctrlZ = keyDown(VK_CONTROL) && keyDown('Z');
-            if (ctrlZ && !prevCtrlZ) {
-                if (!hairToolsOn && ed.entSkinView && !paintUndoEmpty()) undoSkin();
-                else undoEnt();
-            }
+            if (ctrlZ && !prevCtrlZ) undoEntityCmd();
             prevCtrlZ = ctrlZ;
 
             static int gzDrag = 0;
@@ -6334,7 +6885,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
             auto applyHairBrush = [&](bool erase) -> bool {
                 if (!inRight3d || overEntUi) return false;
-                const float paintCell = pm::kHairGrid / (float)(2 << ed.paintDiv);
+                const float paintCell = pm::kHairGrid / (float)paintDenom(ed.paintDiv);
                 if (lastHairMx > -1e8f) {
                     float pdx = mx - lastHairMx, pdy = my - lastHairMy;
                     if (pdx * pdx + pdy * pdy < 3.0f * 3.0f) return false;
@@ -7216,7 +7767,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             ed.hoverX = -1; ed.hoverY = -1;
             gPxClip.on = false;
             bool paintView = !hairToolsOn && (paintKind() >= 0 || ed.entSkinView);
-            bool clothPaint3d = entIsCloth && !hairToolsOn && inLeft3d && !overEntUi && skinImg.ok()
+            bool clothPaint3d = !hairToolsOn && !ed.entSkinView && paintKind() < 0 && (inLeft3d || inRight3d) && !overEntUi && skinImg.ok()
                 && (ed.picker || (ed.tool >= 0 && ed.tool <= 8));
             bool paintOn = (paintView || clothPaint3d) && (ed.picker || (ed.tool >= 0 && ed.tool <= 8));
             if (paintView && paintDispW > 1.0f && paintImg && paintImg->ok()) {
@@ -7362,7 +7913,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 }
             }
             static PxClip clothClip;
-            if (clothPaint3d && skinImg.ok() && entSheetW > 0) {
+            int faceStampW = 1, faceStampH = 1;
+            if (clothPaint3d) {
                 static int lockPart = -1, lockFace = -1;
                 auto aabbToFace = [](int fi) {
                     const int map[6] = { 1, 0, 3, 2, 5, 4 };
@@ -7382,12 +7934,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     return aabbToFace(fi);
                 };
                 Vec3 ro, rd;
-                leftRay(mx, my, ro, rd);
+                if (inRight3d && !inLeft3d) rightRay(mx, my, ro, rd);
+                else leftRay(mx, my, ro, rd);
                 float best = 1e9f;
                 int hit = -1;
                 for (int i = 0; i < (int)ed.entityParts.size(); i++) {
                     const pm::Part& p = ed.entityParts[i];
-                    if (!pm::partHasBox(p)) continue;
+                    if (pm::isHairPart(p) || pm::isHairCardPart(p) || pm::isDecalPart(p)) continue;
+                    if (entIsCloth && !pm::partHasBox(p)) continue;
                     if (ed.clothLocal) {
                         bool anySel = false;
                         for (int j = 0; j < (int)ed.entityParts.size(); j++)
@@ -7440,11 +7994,74 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     ed.hoverY = (int)std::floor(v * (float)entSheetH);
                     gPxClip = { true, fx, fy, fx + fw, fy + fh };
                     clothClip = gPxClip;
+                    faceStampW = paintCellPx(std::sqrt(a), fw, ed.paintDiv);
+                    faceStampH = paintCellPx(std::sqrt(b), fh, ed.paintDiv);
+                } else if (hit >= 0 && face >= 0 && paintImg && paintImg->ok()) {
+                    const pm::Part& p = ed.entityParts[hit];
+                    Vec3 q[4];
+                    pm::cuboidFaceCorners(p, face, q);
+                    Vec3 e1 = q[1] - q[0], e2 = q[3] - q[0];
+                    Vec3 n = { e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x };
+                    float denom = n.x * rd.x + n.y * rd.y + n.z * rd.z;
+                    Vec3 on = hitW;
+                    if (std::fabs(denom) > 1e-8f) {
+                        float t = (n.x * (q[0].x - ro.x) + n.y * (q[0].y - ro.y) + n.z * (q[0].z - ro.z)) / denom;
+                        on = ro + rd * t;
+                    }
+                    Vec3 dlt = on - q[0];
+                    float a = e1.x * e1.x + e1.y * e1.y + e1.z * e1.z;
+                    float b = e2.x * e2.x + e2.y * e2.y + e2.z * e2.z;
+                    float su = (a > 1e-12f) ? (e1.x * dlt.x + e1.y * dlt.y + e1.z * dlt.z) / a : 0.5f;
+                    float sv = (b > 1e-12f) ? (e2.x * dlt.x + e2.y * dlt.y + e2.z * dlt.z) / b : 0.5f;
+                    if (su < 0) su = 0;
+                    if (su > 1) su = 1;
+                    if (sv < 0) sv = 0;
+                    if (sv > 1) sv = 1;
+                    float u0, v0, u1, v1;
+                    pm::skinFaceUV(p, face, u0, v0, u1, v1);
+                    float u = u0 + su * (u1 - u0);
+                    float v = v1 + sv * (v0 - v1);
+                    int sw = paintImg->w, sh = paintImg->h;
+                    ed.hoverX = (int)std::floor(u * (float)sw);
+                    ed.hoverY = (int)std::floor(v * (float)sh);
+                    int x0 = (int)std::floor(std::min(u0, u1) * (float)sw);
+                    int y0 = (int)std::floor(std::min(v0, v1) * (float)sh);
+                    int x1 = (int)std::ceil(std::max(u0, u1) * (float)sw);
+                    int y1 = (int)std::ceil(std::max(v0, v1) * (float)sh);
+                    if (x1 <= x0) x1 = x0 + 1;
+                    if (y1 <= y0) y1 = y0 + 1;
+                    gPxClip = { true, x0, y0, x1, y1 };
+                    clothClip = gPxClip;
+                    faceStampW = paintCellPx(std::sqrt(a), x1 - x0, ed.paintDiv);
+                    faceStampH = paintCellPx(std::sqrt(b), y1 - y0, ed.paintDiv);
                 }
                 if (!lmb && !ed.dragging) { lockPart = -1; lockFace = -1; }
             } else if (ed.dragging && clothClip.on) {
                 gPxClip = clothClip;
             }
+            int stampW = ed.brushSize, stampH = ed.brushSize;
+            if (clothPaint3d && gPxClip.on) {
+                stampW = faceStampW;
+                stampH = faceStampH;
+            } else if ((ed.entSkinView) && paintKind() < 0) {
+                int cell = (int)std::lround(1.0f / (float)paintDenom(ed.paintDiv));
+                if (cell < 1) cell = 1;
+                stampW = stampH = cell;
+            }
+            auto forStamp = [&](auto&& fn) {
+                if (gPxClip.on) {
+                    int ox = gPxClip.x0 + ((ed.hoverX - gPxClip.x0) / stampW) * stampW;
+                    int oy = gPxClip.y0 + ((ed.hoverY - gPxClip.y0) / stampH) * stampH;
+                    for (int dy = 0; dy < stampH; ++dy)
+                        for (int dx = 0; dx < stampW; ++dx)
+                            fn(ox + dx, oy + dy);
+                } else {
+                    int hx0 = ed.hoverX - stampW / 2, hy0 = ed.hoverY - stampH / 2;
+                    for (int dy = 0; dy < stampH; ++dy)
+                        for (int dx = 0; dx < stampW; ++dx)
+                            fn(hx0 + dx, hy0 + dy);
+                }
+            };
             if (paintOn && (inLeft3d || clothPaint3d) && !overEntUi && paintImg && paintImg->ok() && ed.hoverX >= 0) {
                 const int TW = paintTw, TH = paintTh;
                 mat::Image& img = *paintImg;
@@ -7462,25 +8079,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         ed.r = center.r / 255.0f; ed.g = center.g / 255.0f;
                         ed.b = center.b / 255.0f; ed.a = center.a / 255.0f;
                         if (ed.tool == 1) {
-                            int half = ed.brushSize / 2;
-                            for (int dy = 0; dy < ed.brushSize; dy++) {
-                                for (int dx = 0; dx < ed.brushSize; dx++) {
-                                    Color4 c;
-                                    if (!samplePx(ed.hoverX + dx - half, ed.hoverY + dy - half, c)) continue;
-                                    addBrushColor(c);
-                                }
-                            }
-                        } else if (ed.brushSize > 1) {
+                            forStamp([&](int px, int py) {
+                                Color4 c;
+                                if (!samplePx(px, py, c)) return;
+                                addBrushColor(c);
+                            });
+                        } else if (stampW > 1 || stampH > 1) {
                             long sr = 0, sg = 0, sb = 0, sa = 0; int cnt = 0;
-                            int half = ed.brushSize / 2;
-                            for (int dy = 0; dy < ed.brushSize; dy++) {
-                                for (int dx = 0; dx < ed.brushSize; dx++) {
-                                    Color4 c;
-                                    if (!samplePx(ed.hoverX + dx - half, ed.hoverY + dy - half, c)) continue;
-                                    if (!ed.pickAlpha0 && c.a == 0) continue;
-                                    sr += c.r; sg += c.g; sb += c.b; sa += c.a; cnt++;
-                                }
-                            }
+                            forStamp([&](int px, int py) {
+                                Color4 c;
+                                if (!samplePx(px, py, c)) return;
+                                if (!ed.pickAlpha0 && c.a == 0) return;
+                                sr += c.r; sg += c.g; sb += c.b; sa += c.a; cnt++;
+                            });
                             if (cnt > 0) {
                                 ed.r = (float)(sr / cnt) / 255.0f; ed.g = (float)(sg / cnt) / 255.0f;
                                 ed.b = (float)(sb / cnt) / 255.0f; ed.a = (float)(sa / cnt) / 255.0f;
@@ -7516,28 +8127,24 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     if (ed.dragging) { ed.dragX1 = ed.hoverX; ed.dragY1 = ed.hoverY; }
                 } else if (!ed.justPicked && (eff == 0 || eff == 1 || eff == 4) && lmb) {
                     if (lmb && !prevLmb) pushSkinUndo();
-                    int half = ed.brushSize / 2;
-                    for (int dy = 0; dy < ed.brushSize; dy++) {
-                        for (int dx = 0; dx < ed.brushSize; dx++) {
-                            int pxx = ed.hoverX + dx - half, pyy = ed.hoverY + dy - half;
-                            if (pxx < 0 || pxx >= TW || pyy < 0 || pyy >= TH || !pxInClip(pxx, pyy)) continue;
-                            size_t i = ((size_t)pyy * TW + pxx) * 4;
-                            if (eff == 4) {
-                                img.rgba[i + 0] = 0; img.rgba[i + 1] = 0; img.rgba[i + 2] = 0; img.rgba[i + 3] = 0;
-                            } else if (eff == 1) {
-                                std::vector<int> valid;
-                                for (size_t k = 0; k < ed.brushColors.size(); k++)
-                                    if (k < ed.brushSet.size() && ed.brushSet[k]) valid.push_back((int)k);
-                                Color4 c;
-                                if (valid.empty()) c = { (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255) };
-                                else c = ed.brushColors[valid[rand() % valid.size()]];
-                                img.rgba[i + 0] = c.r; img.rgba[i + 1] = c.g; img.rgba[i + 2] = c.b; img.rgba[i + 3] = c.a;
-                            } else {
-                                img.rgba[i + 0] = (uint8_t)(ed.r * 255); img.rgba[i + 1] = (uint8_t)(ed.g * 255);
-                                img.rgba[i + 2] = (uint8_t)(ed.b * 255); img.rgba[i + 3] = (uint8_t)(ed.a * 255);
-                            }
+                    forStamp([&](int pxx, int pyy) {
+                        if (pxx < 0 || pxx >= TW || pyy < 0 || pyy >= TH || !pxInClip(pxx, pyy)) return;
+                        size_t i = ((size_t)pyy * TW + pxx) * 4;
+                        if (eff == 4) {
+                            img.rgba[i + 0] = 0; img.rgba[i + 1] = 0; img.rgba[i + 2] = 0; img.rgba[i + 3] = 0;
+                        } else if (eff == 1) {
+                            std::vector<int> valid;
+                            for (size_t k = 0; k < ed.brushColors.size(); k++)
+                                if (k < ed.brushSet.size() && ed.brushSet[k]) valid.push_back((int)k);
+                            Color4 c;
+                            if (valid.empty()) c = { (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255) };
+                            else c = ed.brushColors[valid[rand() % valid.size()]];
+                            img.rgba[i + 0] = c.r; img.rgba[i + 1] = c.g; img.rgba[i + 2] = c.b; img.rgba[i + 3] = c.a;
+                        } else {
+                            img.rgba[i + 0] = (uint8_t)(ed.r * 255); img.rgba[i + 1] = (uint8_t)(ed.g * 255);
+                            img.rgba[i + 2] = (uint8_t)(ed.b * 255); img.rgba[i + 3] = (uint8_t)(ed.a * 255);
                         }
-                    }
+                    });
                     if (eff == 0) pushRecent((uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255));
                     syncSkinGL();
                     ed.dirty = true;
@@ -7555,7 +8162,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         drawLineImg(*paintImg, x1, y1, x0, y1, c, 1);
                         drawLineImg(*paintImg, x0, y1, x0, y0, c, 1);
                         break;
-                    case 7: drawLineImg(*paintImg, x0, y0, x1, y1, c, ed.brushSize); break;
+                    case 7: drawLineImg(*paintImg, x0, y0, x1, y1, c, std::max(stampW, stampH)); break;
                     case 8: {
                         int r = (int)std::sqrt((float)((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
                         drawCircleImg(*paintImg, x0, y0, r, c);
@@ -7677,7 +8284,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if ((rmb && !prevRmb) || (mmb && !prevMmb)) {
                 lastMx = mx; lastMy = my;
             }
-            bool blockOrbit = overEntUi || ed.gizmoHover != 0 || gzDrag != 0 || slideDrag || ed.hairSelDrag;
+            bool blockOrbit = overEntUi || ed.gizmoHover != 0 || gzDrag != 0 || slideDrag || paintSlideDrag || ed.hairSelDrag;
             bool altOrbit = keyDown(VK_MENU);
             bool doOrbit = mmb || (rmb && !(ed.hairSelect && inRight3d && !altOrbit));
             if (doOrbit && !blockOrbit) {
@@ -7701,6 +8308,280 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
         } else if (ed.modelMode) {
             // ---- block model editing ----
+            const float partG = mat::kSolidGrid;
+            int paintStep = ed.paintDiv;
+            if (paintStep < 0) paintStep = 0;
+            if (paintStep > 3) paintStep = 3;
+            const float paintCell = mat::kSolidGrid / (float)paintDenom(paintStep);
+            auto partDom = [](const Vec3& n) {
+                int ax = 0;
+                if (std::fabs(n.y) > std::fabs(n.x) && std::fabs(n.y) > std::fabs(n.z)) ax = 1;
+                else if (std::fabs(n.z) > std::fabs(n.x) && std::fabs(n.z) > std::fabs(n.y)) ax = 2;
+                return ax;
+            };
+            auto partNormAt = [](int fi) {
+                Vec3 n{};
+                if (fi == 0) n = { -1, 0, 0 };
+                else if (fi == 1) n = { 1, 0, 0 };
+                else if (fi == 2) n = { 0, -1, 0 };
+                else if (fi == 3) n = { 0, 1, 0 };
+                else if (fi == 4) n = { 0, 0, -1 };
+                else n = { 0, 0, 1 };
+                return n;
+            };
+            auto pickItemSolid = [&](const Vec3& ro, const Vec3& rd, float& tHit, Vec3& nrm) -> int {
+                tHit = 1e9f;
+                int si = -1;
+                nrm = { 0, 1, 0 };
+                for (int i = 0; i < (int)editModel.solids.size(); i++) {
+                    const mat::Solid& s = editModel.solids[i];
+                    Vec3 c = viewOfModel(s.c);
+                    Vec3 h{ s.h[0], s.h[1], s.h[2] };
+                    Vec3 roL = mat::solidUnEuler(ro - c, s.rot);
+                    Vec3 rdL = mat::solidUnEuler(rd, s.rot);
+                    float t;
+                    if (!rayHitAABB(roL, rdL, h * -1.0f, h, t) || t >= tHit) continue;
+                    tHit = t;
+                    si = i;
+                    Vec3 hp = roL + rdL * t;
+                    float d[6] = {
+                        std::fabs(hp.x + h.x), std::fabs(hp.x - h.x),
+                        std::fabs(hp.y + h.y), std::fabs(hp.y - h.y),
+                        std::fabs(hp.z + h.z), std::fabs(hp.z - h.z)
+                    };
+                    int fi = 0;
+                    for (int k = 1; k < 6; k++) if (d[k] < d[fi]) fi = k;
+                    nrm = mat::solidEuler(partNormAt(fi), s.rot);
+                }
+                return si;
+            };
+            auto pickItemSurface = [&](const Vec3& ro, const Vec3& rd, Vec3& model, Vec3& nrm, int& solid) -> bool {
+                float best = 1e9f;
+                bool hit = false;
+                solid = -1;
+                nrm = { 0, 1, 0 };
+                float tS;
+                Vec3 nS;
+                int si = pickItemSolid(ro, rd, tS, nS);
+                if (si >= 0) { best = tS; hit = true; nrm = nS; solid = si; }
+                for (int i = 0; i < (int)editModel.quads.size(); i++) {
+                    Vec3 p[4];
+                    for (int c = 0; c < 4; c++) p[c] = viewOfModel(editModel.quads[i].p[c]);
+                    float t;
+                    auto take = [&](const Vec3& a, const Vec3& b, const Vec3& c) {
+                        if (!rayHitTri(ro, rd, a, b, c, t) || t >= best) return;
+                        best = t;
+                        hit = true;
+                        solid = -1;
+                        Vec3 n = (b - a).cross(c - a);
+                        if (n.lengthSq() > 1e-12f) nrm = n.normalized();
+                    };
+                    take(p[0], p[1], p[2]);
+                    take(p[0], p[2], p[3]);
+                }
+                if (!hit && editModel.quads.empty()) {
+                    float t;
+                    Vec3 b0{ -0.5f, 0.0f, -0.5f }, b1{ 0.5f, 1.0f, 0.5f };
+                    if (rayHitAABB(ro, rd, b0, b1, t)) {
+                        best = t;
+                        hit = true;
+                        Vec3 hp = ro + rd * t;
+                        float d[6] = {
+                            std::fabs(hp.x - b0.x), std::fabs(hp.x - b1.x),
+                            std::fabs(hp.y - b0.y), std::fabs(hp.y - b1.y),
+                            std::fabs(hp.z - b0.z), std::fabs(hp.z - b1.z)
+                        };
+                        int fi = 0;
+                        for (int k = 1; k < 6; k++) if (d[k] < d[fi]) fi = k;
+                        nrm = partNormAt(fi);
+                    }
+                }
+                if (!hit && std::fabs(rd.y) > 1e-6f) {
+                    float t = (0.0f - ro.y) / rd.y;
+                    if (t > 0.001f) {
+                        Vec3 hp = ro + rd * t;
+                        if (hp.x >= -1.5f && hp.x <= 1.5f && hp.z >= -1.5f && hp.z <= 1.5f) {
+                            best = t;
+                            hit = true;
+                            nrm = { 0, 1, 0 };
+                            solid = -1;
+                        }
+                    }
+                }
+                if (!hit) return false;
+                Vec3 hv = ro + rd * best;
+                model = { hv.x + 0.5f, hv.y, hv.z + 0.5f };
+                return true;
+            };
+            auto cellOnFace = [&](const Vec3& model, const Vec3& nrm, bool outward, float cell, float mn[3], float mx[3]) {
+                int ax = partDom(nrm);
+                float sign = (ax == 0 ? nrm.x : ax == 1 ? nrm.y : nrm.z);
+                if (sign == 0.0f) sign = 1.0f;
+                float dir = sign >= 0.0f ? 1.0f : -1.0f;
+                if (!outward) dir = -dir;
+                float p[3] = { model.x, model.y, model.z };
+                float plane = p[ax];
+                for (int k = 0; k < 3; k++) {
+                    if (k == ax) {
+                        float lift = 0.0015f;
+                        if (dir > 0.0f) { mn[k] = plane + lift; mx[k] = plane + lift + cell; }
+                        else { mx[k] = plane - lift; mn[k] = plane - lift - cell; }
+                    } else {
+                        float s = std::floor(p[k] / cell + 1e-4f) * cell;
+                        mn[k] = s;
+                        mx[k] = s + cell;
+                    }
+                }
+            };
+            auto solidHolds = [&](float x, float y, float z) {
+                const float e = 1e-3f;
+                for (const mat::Solid& s : editModel.solids) {
+                    if (x < s.c[0] - s.h[0] - e || x > s.c[0] + s.h[0] + e) continue;
+                    if (y < s.c[1] - s.h[1] - e || y > s.c[1] + s.h[1] + e) continue;
+                    if (z < s.c[2] - s.h[2] - e || z > s.c[2] + s.h[2] + e) continue;
+                    return true;
+                }
+                return false;
+            };
+            auto addSolidBox = [&](const float mn[3], const float mx[3], bool undo, int kind, int face) {
+                float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+                if (dx < 1e-4f || dy < 1e-4f || dz < 1e-4f) return;
+                float cx = (mn[0] + mx[0]) * 0.5f, cy = (mn[1] + mx[1]) * 0.5f, cz = (mn[2] + mx[2]) * 0.5f;
+                if (solidHolds(cx, cy, cz)) return;
+                if (undo) pushModelUndo();
+                mat::Solid s;
+                s.c[0] = cx; s.c[1] = cy; s.c[2] = cz;
+                s.h[0] = dx * 0.5f; s.h[1] = dy * 0.5f; s.h[2] = dz * 0.5f;
+                s.rgb[0] = ed.r; s.rgb[1] = ed.g; s.rgb[2] = ed.b;
+                s.kind = kind;
+                s.face = face;
+                editModel.solids.push_back(s);
+                selectOnlySolid((int)editModel.solids.size() - 1);
+                ed.dirty = true;
+            };
+            auto eraseSolids = [&](const std::vector<int>& ids) {
+                if (ids.empty()) return;
+                pushModelUndo();
+                std::vector<uint8_t> kill(editModel.solids.size(), 0);
+                for (int i : ids) if (i >= 0 && i < (int)kill.size()) kill[i] = 1;
+                std::vector<mat::Solid> kept;
+                for (int i = 0; i < (int)editModel.solids.size(); i++)
+                    if (!kill[i]) kept.push_back(editModel.solids[i]);
+                editModel.solids.swap(kept);
+                solidMark.clear();
+                ed.selSolid = -1;
+                if (ed.planePart >= (int)editModel.solids.size()) { ed.planeOn = false; ed.planePart = -1; }
+                ed.dirty = true;
+            };
+            auto mergeItemSolids = [&]() {
+                auto ids = solidIds();
+                if (ids.size() < 2) return;
+                pushModelUndo();
+                float mn[3] = { 1e9f, 1e9f, 1e9f }, mx[3] = { -1e9f, -1e9f, -1e9f };
+                mat::Solid keep = editModel.solids[ids[0]];
+                for (int i : ids) {
+                    const mat::Solid& s = editModel.solids[i];
+                    for (int k = 0; k < 3; k++) {
+                        if (s.c[k] - s.h[k] < mn[k]) mn[k] = s.c[k] - s.h[k];
+                        if (s.c[k] + s.h[k] > mx[k]) mx[k] = s.c[k] + s.h[k];
+                    }
+                }
+                std::vector<uint8_t> kill(editModel.solids.size(), 0);
+                for (int i : ids) kill[i] = 1;
+                std::vector<mat::Solid> kept;
+                for (int i = 0; i < (int)editModel.solids.size(); i++)
+                    if (!kill[i]) kept.push_back(editModel.solids[i]);
+                mat::Solid m = keep;
+                m.kind = 0;
+                m.rot[0] = m.rot[1] = m.rot[2] = 0.0f;
+                for (int k = 0; k < 3; k++) {
+                    m.c[k] = 0.5f * (mn[k] + mx[k]);
+                    m.h[k] = 0.5f * (mx[k] - mn[k]);
+                    if (m.h[k] < 1e-4f) m.h[k] = 1e-4f;
+                }
+                kept.push_back(m);
+                editModel.solids.swap(kept);
+                selectOnlySolid((int)editModel.solids.size() - 1);
+                ed.dirty = true;
+            };
+            auto splitItemSolids = [&]() {
+                auto ids = solidIds();
+                if (ids.empty()) return;
+                pushModelUndo();
+                std::vector<mat::Solid> next;
+                std::vector<uint8_t> kill(editModel.solids.size(), 0);
+                for (int i : ids) if (i >= 0 && i < (int)kill.size()) kill[i] = 1;
+                bool any = false;
+                for (int i = 0; i < (int)editModel.solids.size(); i++) {
+                    if (!kill[i]) { next.push_back(editModel.solids[i]); continue; }
+                    const mat::Solid src = editModel.solids[i];
+                    if (mat::solidRotated(src)) { next.push_back(src); continue; }
+                    int nx = std::max(1, (int)std::lround((src.h[0] * 2.0f) / partG));
+                    int ny = std::max(1, (int)std::lround((src.h[1] * 2.0f) / partG));
+                    int nz = std::max(1, (int)std::lround((src.h[2] * 2.0f) / partG));
+                    if (nx * ny * nz <= 1) { next.push_back(src); continue; }
+                    any = true;
+                    if (nx * ny * nz > 64) {
+                        int ax = 0;
+                        if (src.h[1] > src.h[ax]) ax = 1;
+                        if (src.h[2] > src.h[ax]) ax = 2;
+                        mat::Solid a = src, b = src;
+                        a.h[ax] *= 0.5f; b.h[ax] *= 0.5f;
+                        a.c[ax] -= a.h[ax]; b.c[ax] += b.h[ax];
+                        next.push_back(a); next.push_back(b);
+                    } else {
+                        float x0 = src.c[0] - src.h[0], y0 = src.c[1] - src.h[1], z0 = src.c[2] - src.h[2];
+                        for (int iz = 0; iz < nz; iz++)
+                            for (int iy = 0; iy < ny; iy++)
+                                for (int ix = 0; ix < nx; ix++) {
+                                    mat::Solid c = src;
+                                    c.h[0] = partG * 0.5f; c.h[1] = partG * 0.5f; c.h[2] = partG * 0.5f;
+                                    c.c[0] = x0 + (ix + 0.5f) * partG;
+                                    c.c[1] = y0 + (iy + 0.5f) * partG;
+                                    c.c[2] = z0 + (iz + 0.5f) * partG;
+                                    next.push_back(c);
+                                }
+                    }
+                }
+                if (!any) { modelUndo.pop_back(); return; }
+                int firstNew = 0;
+                for (int i = 0; i < (int)editModel.solids.size(); i++) {
+                    if (kill[i]) break;
+                    firstNew++;
+                }
+                editModel.solids.swap(next);
+                solidMark.assign(editModel.solids.size(), 0);
+                ed.selSolid = firstNew;
+                if (ed.selSolid >= 0 && ed.selSolid < (int)solidMark.size()) solidMark[ed.selSolid] = 1;
+                ed.dirty = true;
+            };
+            auto dupItemSolids = [&]() {
+                auto ids = solidIds();
+                if (ids.empty()) return;
+                pushModelUndo();
+                int first = (int)editModel.solids.size();
+                for (int i : ids) {
+                    mat::Solid s = editModel.solids[i];
+                    s.bind = -1;
+                    s.c[0] += partG;
+                    editModel.solids.push_back(s);
+                }
+                solidMark.assign(editModel.solids.size(), 0);
+                for (int i = first; i < (int)editModel.solids.size(); i++) solidMark[i] = 1;
+                ed.selSolid = first;
+                ed.dirty = true;
+            };
+            auto texItemSolids = [&]() {
+                auto ids = solidIds();
+                if (ids.empty()) return;
+                pushModelUndo();
+                bool clear = keyDown(VK_SHIFT);
+                for (int i : ids) {
+                    if (clear) editModel.solids[i].tex.clear();
+                    else editModel.solids[i].tex = ed.selMat;
+                }
+                ed.dirty = true;
+            };
             // item selection list (left panel, 3D icon grid like the tile panel)
             ed.modelHover = -1;
             {
@@ -7718,6 +8599,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             static bool prevApplyR = false;
             bool applyKey = keyDown('R');
             if ((lmb && !prevLmb && applyRandHov) || (applyKey && !prevApplyR)) applyRand();
+            if (lmb && !prevLmb && rightTabHover >= 0) ed.modelRightTab = rightTabHover;
             prevApplyR = applyKey;
             if (lmb && !prevLmb && saveHov) saveRandFile();
             if (lmb && !prevLmb && cancelHov) cancelChanges();
@@ -7726,7 +8608,40 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (lmb && !prevLmb && smHov) addSmall();
             if (lmb && !prevLmb && tinyHov) setModelTool(6);
             if (lmb && !prevLmb && midSaveHov) saveRandFile();
-            if (lmb && !prevLmb && midUndoHov) undoModel();
+            if (lmb && !prevLmb && midUndoHov) undoModelOrPaint();
+            if (lmb && !prevLmb && partToolHover >= 0) {
+                if (partToolHover == 0) setPartAdd();
+                else if (partToolHover == 1) setHairSelect();
+                else if (partToolHover == 2) setHairBrush(false);
+                else if (partToolHover == 3) setHairCard();
+                else if (partToolHover == 4) setHairBrush(true);
+                else if (partToolHover == 5) mergeItemSolids();
+                else if (partToolHover == 6) splitItemSolids();
+                else if (partToolHover == 7) texItemSolids();
+                else if (partToolHover == 8) dupItemSolids();
+                else if (partToolHover == 9) eraseSolids(solidIds());
+                else if (partToolHover == 10) setPartCut();
+                else if (partToolHover == 11) setPartMeasure();
+                else if (partToolHover == 12) setPartPlane();
+                else if (partToolHover >= 20 && partToolHover < 28) {
+                    int ci = partToolHover - 20;
+                    ed.r = kPaintPal[ci][0];
+                    ed.g = kPaintPal[ci][1];
+                    ed.b = kPaintPal[ci][2];
+                    ed.a = 1.0f;
+                    auto ss = solidIds();
+                    if (!ss.empty()) {
+                        pushModelUndo();
+                        for (int i : ss) {
+                            editModel.solids[i].rgb[0] = ed.r;
+                            editModel.solids[i].rgb[1] = ed.g;
+                            editModel.solids[i].rgb[2] = ed.b;
+                            editModel.solids[i].tex.clear();
+                        }
+                        ed.dirty = true;
+                    }
+                }
+            }
             if (lmb && !prevLmb && ed.modelToolHover >= 0) {
                 int i = ed.modelToolHover;
                 if (i == 0) bindSel();
@@ -7743,8 +8658,283 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
             static bool prevCtrlZ = false;
             bool ctrlZ = keyDown(VK_CONTROL) && keyDown('Z');
-            if (ctrlZ && !prevCtrlZ) undoModel();
+            if (ctrlZ && !prevCtrlZ) undoModelOrPaint();
             prevCtrlZ = ctrlZ;
+            if (ed.modelRightTab == 1) {
+                auto overR = [&](const float* r) {
+                    return r[2] > 1.0f && mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
+                };
+                if (lmb && !prevLmb && colorToolHover >= 0) {
+                    int i = colorToolHover;
+                    if (i == 0) { ed.tool = (ed.tool == 0) ? -1 : 0; ed.picker = false; ed.brushMod = false; }
+                    else if (i == 1) {
+                        if (ed.tool == 2) { ed.brushMod = !ed.brushMod; if (ed.brushMod) ed.picker = false; }
+                        else { ed.tool = (ed.tool == 1) ? -1 : 1; ed.picker = false; ed.brushMod = false; }
+                    }
+                    else if (i == 2) { ed.tool = (ed.tool == 2) ? -1 : 2; ed.picker = false; ed.brushMod = false; }
+                    else if (i == 3) { ed.picker = !ed.picker; if (ed.picker) ed.brushMod = false; }
+                    else if (i == 4) { ed.tool = (ed.tool == 4) ? -1 : 4; ed.picker = false; ed.brushMod = false; }
+                    else if (i == 5) { ed.tool = (ed.tool == 5) ? -1 : 5; ed.picker = false; ed.brushMod = false; }
+                    else if (i == 6) { ed.tool = (ed.tool == 6) ? -1 : 6; ed.picker = false; ed.brushMod = false; }
+                    else if (i == 7) { ed.tool = (ed.tool == 7) ? -1 : 7; ed.picker = false; ed.brushMod = false; }
+                    else if (i == 8) { ed.tool = (ed.tool == 8) ? -1 : 8; ed.picker = false; ed.brushMod = false; }
+                }
+                if (lmb && !prevLmb && colorRecentHover >= 0 && colorRecentHover < (int)ed.recent.size()) {
+                    const Color4& c = ed.recent[colorRecentHover];
+                    ed.r = c.r / 255.0f; ed.g = c.g / 255.0f; ed.b = c.b / 255.0f; ed.a = c.a / 255.0f;
+                }
+                if (lmb && overR(colorSv)) {
+                    float s = (mx - colorSv[0]) / colorSv[2];
+                    float v = 1.0f - (my - colorSv[1]) / colorSv[3];
+                    if (s < 0) s = 0;
+                    if (s > 1) s = 1;
+                    if (v < 0) v = 0;
+                    if (v > 1) v = 1;
+                    float hh, ss, vv; rgbToHsv(ed.r, ed.g, ed.b, hh, ss, vv);
+                    hsvToRgb(hh, s, v, ed.r, ed.g, ed.b);
+                }
+                float hdx = mx - colorHueCX, hdy = my - colorHueCY;
+                float hdist = std::sqrt(hdx * hdx + hdy * hdy);
+                bool onHue = hdist >= colorHueRI - 6.0f && hdist <= colorHueRO + 6.0f;
+                if (lmb && onHue) {
+                    float h = std::atan2(hdy, hdx) / 6.2831853f;
+                    if (h < 0) h += 1.0f;
+                    float hh, ss, vv; rgbToHsv(ed.r, ed.g, ed.b, hh, ss, vv);
+                    hsvToRgb(h, ss, vv, ed.r, ed.g, ed.b);
+                }
+                if (lmb && overR(colorAlpha)) {
+                    float t = (mx - colorAlpha[0]) / colorAlpha[2];
+                    if (t < 0) t = 0;
+                    if (t > 1) t = 1;
+                    ed.a = t;
+                }
+                bool overWidgets = colorToolHover >= 0 || colorRecentHover >= 0 || colorSlideHov ||
+                    overR(colorSv) || overR(colorAlpha) || onHue;
+                colorFaceVis = false;
+                gPxClip.on = false;
+                static int colorStampW = 1, colorStampH = 1;
+                int hitSi = -1, hitFace = -1;
+                if (inRight3d && !overWidgets && rightTabHover < 0 && !editModel.solids.empty()) {
+                    const int kBoxFace[6] = { 1, 0, 3, 2, 5, 4 };
+                    Vec3 ro, rd;
+                    colorRay(mx, my, ro, rd);
+                    float best = 1e9f;
+                    for (int i = 0; i < (int)editModel.solids.size(); i++) {
+                        const mat::Solid& s = editModel.solids[i];
+                        Vec3 c = viewOfModel(s.c);
+                        Vec3 h{ s.h[0], s.h[1], s.h[2] };
+                        Vec3 roL = mat::solidUnEuler(ro - c, s.rot);
+                        Vec3 rdL = mat::solidUnEuler(rd, s.rot);
+                        float t;
+                        if (!rayHitAABB(roL, rdL, h * -1.0f, h, t) || t >= best) continue;
+                        best = t;
+                        hitSi = i;
+                        Vec3 hp = roL + rdL * t;
+                        float d[6] = {
+                            std::fabs(hp.x + h.x), std::fabs(hp.x - h.x),
+                            std::fabs(hp.y + h.y), std::fabs(hp.y - h.y),
+                            std::fabs(hp.z + h.z), std::fabs(hp.z - h.z)
+                        };
+                        int fi = 0;
+                        for (int k = 1; k < 6; k++) if (d[k] < d[fi]) fi = k;
+                        hitFace = kBoxFace[fi];
+                    }
+                    if (hitSi >= 0 && hitFace >= 0) {
+                        mat::Solid& s = editModel.solids[hitSi];
+                        if (lmb && !ed.picker) claimSolidSheet(s);
+                        auto faceLocal = [&](int face, Vec3 q[4]) {
+                                float x0 = -s.h[0], x1 = s.h[0], y0 = -s.h[1], y1 = s.h[1], z0 = -s.h[2], z1 = s.h[2];
+                                switch (face) {
+                                    case 0: q[0] = {x1,y0,z1}; q[1] = {x1,y0,z0}; q[2] = {x1,y1,z0}; q[3] = {x1,y1,z1}; break;
+                                    case 1: q[0] = {x0,y0,z0}; q[1] = {x0,y0,z1}; q[2] = {x0,y1,z1}; q[3] = {x0,y1,z0}; break;
+                                    case 2: q[0] = {x0,y1,z0}; q[1] = {x1,y1,z0}; q[2] = {x1,y1,z1}; q[3] = {x0,y1,z1}; break;
+                                    case 3: q[0] = {x0,y0,z1}; q[1] = {x1,y0,z1}; q[2] = {x1,y0,z0}; q[3] = {x0,y0,z0}; break;
+                                    case 4: q[0] = {x0,y0,z1}; q[1] = {x1,y0,z1}; q[2] = {x1,y1,z1}; q[3] = {x0,y1,z1}; break;
+                                    default:q[0] = {x1,y0,z0}; q[1] = {x0,y0,z0}; q[2] = {x0,y1,z0}; q[3] = {x1,y1,z0}; break;
+                                }
+                            };
+                            Vec3 ql[4];
+                            faceLocal(hitFace, ql);
+                            Vec3 q[4];
+                            for (int c = 0; c < 4; c++) {
+                                Vec3 w = mat::solidEuler(ql[c], s.rot);
+                                float mp[3] = { s.c[0] + w.x, s.c[1] + w.y, s.c[2] + w.z };
+                                q[c] = viewOfModel(mp);
+                            }
+                            for (int c = 0; c < 4; c++) colorFaceQ[c] = q[c];
+                            colorFaceVis = true;
+                            if (mat::solidHasBox(s) && itemSheet.ok()) {
+                            Vec3 e1 = q[1] - q[0], e2 = q[3] - q[0];
+                            Vec3 nrm = { e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x };
+                            float denom = nrm.x * rd.x + nrm.y * rd.y + nrm.z * rd.z;
+                            Vec3 on = ro + rd * best;
+                            if (std::fabs(denom) > 1e-8f) {
+                                float t = (nrm.x * (q[0].x - ro.x) + nrm.y * (q[0].y - ro.y) + nrm.z * (q[0].z - ro.z)) / denom;
+                                on = ro + rd * t;
+                            }
+                            Vec3 dlt = on - q[0];
+                            float a = e1.dot(e1), b = e2.dot(e2);
+                            float su = (a > 1e-12f) ? e1.dot(dlt) / a : 0.5f;
+                            float sv = (b > 1e-12f) ? e2.dot(dlt) / b : 0.5f;
+                            if (su < 0) su = 0;
+                            if (su > 1) su = 1;
+                            if (sv < 0) sv = 0;
+                            if (sv > 1) sv = 1;
+                            int fx, fy, fw, fh;
+                            pm::boxFacePx(s.boxX, s.boxY, s.boxW, s.boxH, s.boxD, hitFace, fx, fy, fw, fh);
+                            float u0 = (float)fx / (float)itemSheet.w;
+                            float v0 = (float)fy / (float)itemSheet.h;
+                            float u1 = (float)(fx + fw) / (float)itemSheet.w;
+                            float v1 = (float)(fy + fh) / (float)itemSheet.h;
+                            float u = u0 + su * (u1 - u0);
+                            float v = v1 + sv * (v0 - v1);
+                            colorHx = (int)std::floor(u * (float)itemSheet.w);
+                            colorHy = (int)std::floor(v * (float)itemSheet.h);
+                            gPxClip = { true, fx, fy, fx + fw, fy + fh };
+                            colorStampW = paintCellPx(std::sqrt(a), fw, ed.paintDiv);
+                            colorStampH = paintCellPx(std::sqrt(b), fh, ed.paintDiv);
+                            }
+                    }
+                }
+                static bool paintStroke = false;
+                static bool colorShape = false;
+                static PxClip colorClip;
+                if (!lmb) paintStroke = false;
+                if (lmb && colorHx >= 0 && hitSi >= 0 && itemSheet.ok() && rightTabHover < 0 && !overWidgets) {
+                    auto pushRecent = [&](uint8_t rr, uint8_t gg, uint8_t bb, uint8_t aa) {
+                        for (size_t k = 0; k < ed.recent.size(); k++) {
+                            if (ed.recent[k].r == rr && ed.recent[k].g == gg && ed.recent[k].b == bb && ed.recent[k].a == aa) {
+                                ed.recent.erase(ed.recent.begin() + (int)k);
+                                break;
+                            }
+                        }
+                        ed.recent.push_back({ rr, gg, bb, aa });
+                        if (ed.recent.size() > 8) ed.recent.erase(ed.recent.begin());
+                    };
+                    auto beginStroke = [&]() {
+                        if (paintStroke) return;
+                        itemSheetUndo.push_back(itemSheet.rgba);
+                        if (itemSheetUndo.size() > 32) itemSheetUndo.erase(itemSheetUndo.begin());
+                        itemSheetDirty = true;
+                        paintStroke = true;
+                    };
+                    int iw = itemSheet.w, ih = itemSheet.h;
+                    auto writePx = [&](int px, int py, uint8_t rr, uint8_t gg, uint8_t bb, uint8_t aa) {
+                        if (!pxInClip(px, py)) return;
+                        if (px < 0 || py < 0 || px >= iw || py >= ih) return;
+                        size_t i = ((size_t)py * iw + px) * 4;
+                        itemSheet.rgba[i + 0] = rr; itemSheet.rgba[i + 1] = gg;
+                        itemSheet.rgba[i + 2] = bb; itemSheet.rgba[i + 3] = aa;
+                    };
+                    int tool = ed.picker ? 3 : ed.tool;
+                    if (tool < 0 || tool > 8) tool = 0;
+                    int cellW = colorStampW < 1 ? 1 : colorStampW;
+                    int cellH = colorStampH < 1 ? 1 : colorStampH;
+                    auto forCell = [&](auto&& fn) {
+                        int ox = gPxClip.on ? gPxClip.x0 + ((colorHx - gPxClip.x0) / cellW) * cellW : colorHx;
+                        int oy = gPxClip.on ? gPxClip.y0 + ((colorHy - gPxClip.y0) / cellH) * cellH : colorHy;
+                        for (int dy = 0; dy < cellH; dy++)
+                            for (int dx = 0; dx < cellW; dx++)
+                                fn(ox + dx, oy + dy);
+                    };
+                    auto randColor = [&]() -> Color4 {
+                        std::vector<int> valid;
+                        for (size_t k = 0; k < ed.brushColors.size(); k++)
+                            if (k < ed.brushSet.size() && ed.brushSet[k]) valid.push_back((int)k);
+                        if (valid.empty())
+                            return { (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255) };
+                        return ed.brushColors[valid[rand() % (int)valid.size()]];
+                    };
+                    if (tool == 3) {
+                        if (!prevLmb && pxInClip(colorHx, colorHy)) {
+                            size_t i = ((size_t)colorHy * iw + colorHx) * 4;
+                            ed.r = itemSheet.rgba[i + 0] / 255.0f; ed.g = itemSheet.rgba[i + 1] / 255.0f;
+                            ed.b = itemSheet.rgba[i + 2] / 255.0f; ed.a = itemSheet.rgba[i + 3] / 255.0f;
+                            if (ed.tool == 1) {
+                                forCell([&](int px, int py) {
+                                    if (!pxInClip(px, py) || px < 0 || py < 0 || px >= iw || py >= ih) return;
+                                    size_t pi = ((size_t)py * iw + px) * 4;
+                                    addBrushColor({ itemSheet.rgba[pi], itemSheet.rgba[pi + 1], itemSheet.rgba[pi + 2], itemSheet.rgba[pi + 3] });
+                                });
+                            }
+                            ed.picker = false;
+                        }
+                    } else if (tool == 2) {
+                        if (!prevLmb) {
+                            beginStroke();
+                            if (ed.brushMod) {
+                                std::vector<Color4> valid;
+                                for (size_t k = 0; k < ed.brushColors.size(); k++)
+                                    if (k < ed.brushSet.size() && ed.brushSet[k]) valid.push_back(ed.brushColors[k]);
+                                if (valid.empty())
+                                    floodFill(itemSheet, colorHx, colorHy,
+                                              (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255),
+                                              (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255));
+                                else floodFillRandom(itemSheet, colorHx, colorHy, valid);
+                            } else {
+                                floodFill(itemSheet, colorHx, colorHy,
+                                          (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255),
+                                          (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255));
+                            }
+                            pushRecent((uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255));
+                            uploadItemSheet();
+                            ed.dirty = true;
+                        }
+                    } else if (tool >= 5 && tool <= 8) {
+                        if (!prevLmb) {
+                            beginStroke();
+                            colorShape = true;
+                            colorClip = gPxClip;
+                            ed.dragX0 = ed.dragX1 = colorHx;
+                            ed.dragY0 = ed.dragY1 = colorHy;
+                        } else if (colorShape) {
+                            ed.dragX1 = colorHx;
+                            ed.dragY1 = colorHy;
+                        }
+                    } else if (tool == 0 || tool == 1 || tool == 4) {
+                        if (!prevLmb || paintStroke) {
+                            beginStroke();
+                            forCell([&](int px, int py) {
+                                Color4 c = (tool == 4) ? Color4{ 0, 0, 0, 0 } : (tool == 1) ? randColor()
+                                    : Color4{ (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255) };
+                                writePx(px, py, c.r, c.g, c.b, c.a);
+                            });
+                            if (tool == 0) pushRecent((uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255));
+                            uploadItemSheet();
+                            ed.dirty = true;
+                        }
+                    }
+                }
+                if (colorShape && !lmb) {
+                    if ((ed.tool >= 5 && ed.tool <= 8) && itemSheet.ok()) {
+                        PxClip saved = gPxClip;
+                        gPxClip = colorClip;
+                        Color4 c = { (uint8_t)(ed.r * 255), (uint8_t)(ed.g * 255), (uint8_t)(ed.b * 255), (uint8_t)(ed.a * 255) };
+                        int x0 = ed.dragX0, y0 = ed.dragY0, x1 = ed.dragX1, y1 = ed.dragY1;
+                        int thick = std::max(colorStampW, colorStampH);
+                        if (thick < 1) thick = 1;
+                        switch (ed.tool) {
+                            case 5: fillRectImg(itemSheet, x0, y0, x1, y1, c); break;
+                            case 6:
+                                drawLineImg(itemSheet, x0, y0, x1, y0, c, 1);
+                                drawLineImg(itemSheet, x1, y0, x1, y1, c, 1);
+                                drawLineImg(itemSheet, x1, y1, x0, y1, c, 1);
+                                drawLineImg(itemSheet, x0, y1, x0, y0, c, 1);
+                                break;
+                            case 7: drawLineImg(itemSheet, x0, y0, x1, y1, c, thick); break;
+                            case 8: {
+                                int r = (int)std::sqrt((float)((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
+                                drawCircleImg(itemSheet, x0, y0, r, c);
+                                break;
+                            }
+                        }
+                        uploadItemSheet();
+                        ed.dirty = true;
+                        gPxClip = saved;
+                    }
+                    colorShape = false;
+                }
+            }
             if (lmb && !prevLmb && ed.matHover >= 0) {
                 if (ed.matHover == nMatItems - 1) addExtraMat();
                 else if (ed.matHover < TEX_COUNT) assignSelTex(mat::tileName(ed.matHover));
@@ -7770,6 +8960,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             auto gizmoIsDeform = [](int id) { return id >= 40 && id <= 53; };
             auto solidStretchOn = [&]() {
                 return ed.modelTool == 1 && isSolidGroup(ed.selQuad);
+            };
+            static std::vector<int> partGrabI;
+            static std::vector<float> partGrabH, partGrabC;
+            static float partGrabT0 = 0.0f;
+            auto partStretchOn = [&]() {
+                return ed.modelTool == 1 && selectedIndices().empty() && !solidIds().empty();
             };
             auto captureSolidGrab = [&]() {
                 ssIdx = selectedIndices();
@@ -7866,6 +9062,25 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                             bool oneSided = gizmoIsHead(gzDrag);
                             float sign = oneSided ? gizmoHeadSign(gzDrag) : 1.0f;
                             stretchSolidFromGrab(axis, dt, oneSided, sign);
+                        } else if (partStretchOn() && partGrabI.size() * 3 == partGrabH.size()) {
+                            float t = closestAxisT(gzGrabC, kAxis[axis], ro, rd);
+                            float dt = t - partGrabT0;
+                            bool oneSided = gizmoIsHead(gzDrag);
+                            float sign = oneSided ? gizmoHeadSign(gzDrag) : 1.0f;
+                            for (size_t n = 0; n < partGrabI.size(); n++) {
+                                int i = partGrabI[n];
+                                if (i < 0 || i >= (int)editModel.solids.size()) continue;
+                                mat::Solid& s = editModel.solids[i];
+                                for (int k = 0; k < 3; k++) {
+                                    s.h[k] = partGrabH[n * 3 + k];
+                                    s.c[k] = partGrabC[n * 3 + k];
+                                }
+                                float grow = oneSided ? sign * dt : dt;
+                                s.h[axis] = std::max(mat::kSolidGrid * 0.5f, partGrabH[n * 3 + axis] + grow * 0.5f);
+                                if (oneSided)
+                                    s.c[axis] = partGrabC[n * 3 + axis] + sign * (s.h[axis] - partGrabH[n * 3 + axis]);
+                            }
+                            ed.dirty = true;
                         } else {
                             float t = closestAxisT(gzGrabC, kAxis[axis], ro, rd);
                             float dt = t - gzAppliedT;
@@ -7876,7 +9091,187 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     }
                 }
             }
-            if (lmb && !prevLmb && inLeft3d && ed.modelToolHover < 0 && ed.matHover < 0 &&
+            bool partBrush = ed.partAdd || ed.hairPaint || ed.hairErase || ed.partCut || ed.hairCard || ed.partMeasure || ed.partPlane;
+            static bool partStroke = false;
+            static bool partCutAny = false;
+            static bool havePaintCell = false;
+            static int lastPaintCell[3] = {};
+            if (!lmb) { partStroke = false; partCutAny = false; havePaintCell = false; }
+            static bool itemPaintSlideDrag = false;
+            if (lmb && !prevLmb && paintSlideHov) itemPaintSlideDrag = true;
+            if (!lmb) itemPaintSlideDrag = false;
+            if (itemPaintSlideDrag && paintSlideW > 1.0f) {
+                float u = (mx - paintSlideX) / paintSlideW;
+                int step = (int)std::lround(u * 3.0f);
+                if (step < 0) step = 0;
+                if (step > 3) step = 3;
+                ed.paintDiv = step;
+            }
+            static bool colorSlideDrag = false;
+            if (lmb && !prevLmb && colorSlideHov) colorSlideDrag = true;
+            if (!lmb) colorSlideDrag = false;
+            if (colorSlideDrag && colorSlideW > 1.0f) {
+                float u = (mx - colorSlideX) / colorSlideW;
+                int step = (int)std::lround(u * 3.0f);
+                if (step < 0) step = 0;
+                if (step > 3) step = 3;
+                ed.paintDiv = step;
+            }
+            auto faceOfNorm = [&](const Vec3& n) {
+                int ax = partDom(n);
+                float sign = ax == 0 ? n.x : ax == 1 ? n.y : n.z;
+                return ax * 2 + (sign >= 0.0f ? 1 : 0);
+            };
+            if (!(partBrush && inLeft3d && partToolHover < 0)) ed.partAddVis = false;
+            if (partBrush && inLeft3d && partToolHover < 0 && ed.modelToolHover < 0 && ed.matHover < 0 &&
+                !paintSlideHov && !faceHov && !blkHov && !smHov && !tinyHov && !midSaveHov && !midUndoHov) {
+                Vec3 ro, rd, model, nrm;
+                leftRay(mx, my, ro, rd);
+                int solid = -1;
+                if (pickItemSurface(ro, rd, model, nrm, solid)) {
+                    bool planeHit = !ed.planeOn || ed.planePart < 0 || ed.partPlane ||
+                        (solid == ed.planePart && faceOfNorm(nrm) == ed.planeFace);
+                    if ((ed.partAdd || ed.partMeasure) && planeHit) {
+                        auto snap = [&](float v) { return std::round(v / partG) * partG; };
+                        float p[3] = { snap(model.x), snap(model.y), snap(model.z) };
+                        if (ed.planeOn && ed.planePart >= 0 && ed.planePart < (int)editModel.solids.size()) {
+                            const mat::Solid& ps = editModel.solids[ed.planePart];
+                            int ax = ed.planeFace / 2;
+                            float plane = (ed.planeFace % 2 == 0) ? (ps.c[ax] - ps.h[ax]) : (ps.c[ax] + ps.h[ax]);
+                            p[ax] = snap(plane);
+                        }
+                        ed.partAddVis = true;
+                        if (!ed.partAnchor) {
+                            for (int k = 0; k < 3; k++) { ed.partMn[k] = p[k]; ed.partMx[k] = p[k] + partG; }
+                        } else {
+                            for (int k = 0; k < 3; k++) {
+                                ed.partMn[k] = std::min(ed.partA[k], p[k]);
+                                ed.partMx[k] = std::max(ed.partA[k], p[k]);
+                                if (ed.partMx[k] - ed.partMn[k] < partG * 0.5f)
+                                    ed.partMx[k] = ed.partMn[k] + partG;
+                            }
+                        }
+                        if (lmb && !prevLmb) {
+                            if (!ed.partAnchor) {
+                                ed.partAnchor = true;
+                                ed.partA[0] = p[0]; ed.partA[1] = p[1]; ed.partA[2] = p[2];
+                            } else if (ed.partMeasure) {
+                                ed.measureOn = true;
+                                for (int k = 0; k < 3; k++) {
+                                    ed.measureA[k] = ed.partA[k];
+                                    ed.measureB[k] = p[k];
+                                }
+                                ed.partAnchor = false;
+                            } else {
+                                addSolidBox(ed.partMn, ed.partMx, true, 0, faceOfNorm(nrm));
+                                ed.partAnchor = false;
+                            }
+                        }
+                    } else if ((ed.hairPaint || ed.hairCard) && planeHit) {
+                        float mn[3], mx[3];
+                        cellOnFace(model, nrm, true, paintCell, mn, mx);
+                        for (int k = 0; k < 3; k++) { ed.partMn[k] = mn[k]; ed.partMx[k] = mx[k]; }
+                        ed.partAddVis = true;
+                        if (lmb) {
+                            int cell[3];
+                            for (int k = 0; k < 3; k++)
+                                cell[k] = (int)std::floor(((mn[k] + mx[k]) * 0.5f) / paintCell + 1e-4f);
+                            bool place = true;
+                            if (havePaintCell) {
+                                int d[3] = { cell[0] - lastPaintCell[0], cell[1] - lastPaintCell[1], cell[2] - lastPaintCell[2] };
+                                if (d[0] == 0 && d[1] == 0 && d[2] == 0) place = false;
+                                else {
+                                    int ax = partDom(nrm);
+                                    int along = d[ax];
+                                    float nv = ax == 0 ? nrm.x : ax == 1 ? nrm.y : nrm.z;
+                                    int sgn = nv >= 0.0f ? 1 : -1;
+                                    int t1 = d[(ax + 1) % 3], t2 = d[(ax + 2) % 3];
+                                    if (along * sgn > 0 && t1 == 0 && t2 == 0) place = false;
+                                }
+                            }
+                            if (place) {
+                                if (!partStroke) { pushModelUndo(); partStroke = true; }
+                                addSolidBox(mn, mx, false, ed.hairCard ? 1 : 0, faceOfNorm(nrm));
+                                lastPaintCell[0] = cell[0]; lastPaintCell[1] = cell[1]; lastPaintCell[2] = cell[2];
+                                havePaintCell = true;
+                            }
+                        }
+                    } else if (ed.partPlane && solid >= 0 && lmb && !prevLmb) {
+                        int face = faceOfNorm(nrm);
+                        if (ed.planeOn && ed.planePart == solid && ed.planeFace == face) ed.planeOn = false;
+                        else { ed.planeOn = true; ed.planePart = solid; ed.planeFace = face; }
+                    } else if ((ed.hairErase || ed.partCut) && solid >= 0 && !mat::solidRotated(editModel.solids[solid])) {
+                        const mat::Solid& s = editModel.solids[solid];
+                        int ax = partDom(nrm);
+                        float sign = ax == 0 ? nrm.x : ax == 1 ? nrm.y : nrm.z;
+                        float smin = s.c[ax] - s.h[ax], smax = s.c[ax] + s.h[ax];
+                        float q[3] = { model.x, model.y, model.z };
+                        float mn[3], mx[3];
+                        for (int k = 0; k < 3; k++) {
+                            if (k == ax) {
+                                if (sign >= 0.0f) { mx[k] = smax; mn[k] = std::max(smin, smax - partG); }
+                                else { mn[k] = smin; mx[k] = std::min(smax, smin + partG); }
+                            } else {
+                                float o = std::floor(q[k] / partG + 1e-4f) * partG;
+                                mn[k] = std::max(s.c[k] - s.h[k], o);
+                                mx[k] = std::min(s.c[k] + s.h[k], o + partG);
+                            }
+                        }
+                        for (int k = 0; k < 3; k++) { ed.partMn[k] = mn[k]; ed.partMx[k] = mx[k]; }
+                        ed.partAddVis = (mx[0] > mn[0] && mx[1] > mn[1] && mx[2] > mn[2]);
+                        bool click = ed.partCut ? (lmb && !prevLmb) : lmb;
+                        if (click && ed.partAddVis) {
+                            if (!partStroke) { pushModelUndo(); partStroke = true; partCutAny = false; }
+                            if (!mat::subtractSolid(editModel.solids, solid, mn, mx)) {
+                                if (!partCutAny && !modelUndo.empty()) { modelUndo.pop_back(); partStroke = false; }
+                            } else {
+                                partCutAny = true;
+                                solidMark.clear();
+                                ed.selSolid = editModel.solids.empty() ? -1 : (int)editModel.solids.size() - 1;
+                                ed.dirty = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (ed.hairSelect && inLeft3d && partToolHover < 0 && !faceHov && !blkHov && !smHov && !tinyHov) {
+                if (lmb && !prevLmb) {
+                    ed.hairSelDrag = true;
+                    ed.hairSelX0 = ed.hairSelX1 = mx;
+                    ed.hairSelY0 = ed.hairSelY1 = my;
+                }
+            }
+            if (ed.hairSelDrag && ed.modelMode) {
+                if (lmb) {
+                    ed.hairSelX1 = mx;
+                    ed.hairSelY1 = my;
+                } else {
+                    float x0 = std::min(ed.hairSelX0, ed.hairSelX1), x1 = std::max(ed.hairSelX0, ed.hairSelX1);
+                    float y0 = std::min(ed.hairSelY0, ed.hairSelY1), y1 = std::max(ed.hairSelY0, ed.hairSelY1);
+                    bool add = keyDown(VK_SHIFT) || keyDown(VK_CONTROL);
+                    if (!add) {
+                        ensureSolidMark();
+                        std::fill(solidMark.begin(), solidMark.end(), 0);
+                        ed.selSolid = -1;
+                    }
+                    ensureSolidMark();
+                    for (int i = 0; i < (int)editModel.solids.size(); i++) {
+                        const mat::Solid& s = editModel.solids[i];
+                        float sx, sy;
+                        if (!projectView(s.c[0] - 0.5f, s.c[1], s.c[2] - 0.5f, sx, sy)) continue;
+                        if (sx < x0 || sx > x1 || sy < y0 || sy > y1) continue;
+                        solidMark[i] = 1;
+                        ed.selSolid = i;
+                    }
+                    if (ed.selSolid >= 0) {
+                        ensureSelMark();
+                        std::fill(selMark.begin(), selMark.end(), 0);
+                    }
+                    ed.hairSelDrag = false;
+                }
+            }
+            if (lmb && !prevLmb && inLeft3d && ed.modelToolHover < 0 && ed.matHover < 0 && partToolHover < 0 &&
+                !partBrush && !ed.hairSelect &&
                 !faceHov && !blkHov && !smHov && !tinyHov && !midSaveHov && !midUndoHov) {
                 bool addSel = keyDown(VK_SHIFT) || keyDown(VK_CONTROL);
                 if (ed.modelTool == 6) {
@@ -7884,10 +9279,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     leftRay(mx, my, ro, rd);
                     float ox, oy, oz, texS;
                     if (pickTinyOrigin(ro, rd, ox, oy, oz, texS)) addTinyAt(ox, oy, oz, texS);
-                } else if (!addSel && ed.gizmoHover != 0 && !editModel.quads.empty() &&
+                } else if (!addSel && ed.gizmoHover != 0 &&
+                    (!editModel.quads.empty() || (ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size())) &&
                     (ed.modelTool == 0 || clickOnlyTool() ||
                      ((ed.modelTool == 1 || ed.modelTool == 2) && gizmoIsDeform(ed.gizmoHover)) ||
-                     (solidStretchOn() && !gizmoIsDeform(ed.gizmoHover)))) {
+                     ((solidStretchOn() || partStretchOn()) && !gizmoIsDeform(ed.gizmoHover)))) {
                     gzDrag = ed.gizmoHover;
                     gzPressMx = mx; gzPressMy = my;
                     gzDidDrag = false; gzUndoPushed = false;
@@ -7919,10 +9315,25 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         if (gizmoIsRot(gzDrag)) gzAppliedAng = rotAngleAt(axis, gzGrabC, ro, rd);
                         else gzAppliedT = closestAxisT(gzGrabC, kAxis[axis], ro, rd);
                         if (solidStretchOn()) captureSolidGrab();
+                        if (partStretchOn()) {
+                            partGrabI = solidIds();
+                            partGrabH.clear();
+                            partGrabC.clear();
+                            for (int i : partGrabI) {
+                                for (int k = 0; k < 3; k++) {
+                                    partGrabH.push_back(editModel.solids[i].h[k]);
+                                    partGrabC.push_back(editModel.solids[i].c[k]);
+                                }
+                            }
+                            partGrabT0 = gzAppliedT;
+                        }
                     }
                 } else {
                     Vec3 ro, rd;
                     leftRay(mx, my, ro, rd);
+                    float tSolid;
+                    Vec3 nSolid;
+                    int si = pickItemSolid(ro, rd, tSolid, nSolid);
                     float best = 1e9f;
                     int hit = -1;
                     for (int i = 0; i < (int)editModel.quads.size(); i++) {
@@ -7932,7 +9343,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         if (rayHitTri(ro, rd, p[0], p[1], p[2], t) && t < best) { best = t; hit = i; }
                         if (rayHitTri(ro, rd, p[0], p[2], p[3], t) && t < best) { best = t; hit = i; }
                     }
-                    if (hit >= 0) {
+                    if (si >= 0 && (hit < 0 || tSolid <= best)) {
+                        if (addSel) {
+                            ensureSolidMark();
+                            if (si < (int)solidMark.size()) solidMark[si] = 1;
+                            ed.selSolid = si;
+                            ensureSelMark();
+                            std::fill(selMark.begin(), selMark.end(), 0);
+                        } else selectOnlySolid(si);
+                    } else if (hit >= 0) {
                         markObject(hit, addSel);
                         if (ed.modelTool == 2) snapshotFillBase();
                     }
@@ -7947,7 +9366,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     tileDrag = true;
                     tileDragMy = my;
                     auto idx = selectedIndices();
-                    tileDragS = idx.empty() ? 1.0f : mat::quadTexScale(editModel.quads[idx[0]]);
+                    if (!idx.empty()) tileDragS = mat::quadTexScale(editModel.quads[idx[0]]);
+                    else {
+                        auto ss = solidIds();
+                        tileDragS = ss.empty() ? 1.0f : editModel.solids[ss[0]].texScale;
+                        if (tileDragS < 1e-4f) tileDragS = 1.0f;
+                    }
                     tileUndoPushed = false;
                 }
                 if (lmb && tileDrag) {
@@ -7960,7 +9384,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
             if (!lmb) tileDrag = false;
             if (!lmb && gzDrag != 0) {
-                if (!editModel.quads.empty()) {
+                if (!editModel.quads.empty() || (ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size())) {
                     if (ed.modelTool == 3) {
                         int axis = gizmoAxisOf(gzDrag);
                         float s = gizmoIsHead(gzDrag) ? gizmoHeadSign(gzDrag) : 1.0f;
@@ -8056,13 +9480,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (keyDown('4')) ed.selCorner = 3;
             static bool prevN = false, prevDel = false, prevD = false;
             if (keyDown('N') && !prevN) addFace();
-            if (keyDown(VK_DELETE) && !prevDel && !editModel.quads.empty()) {
+            if (keyDown(VK_DELETE) && !prevDel) {
                 auto idx = selectedIndices();
-                if (!idx.empty()) {
+                if (idx.empty()) eraseSolids(solidIds());
+                else if (!idx.empty()) {
                     pushModelUndo();
                     std::vector<uint8_t> kill(editModel.quads.size(), 0);
                     for (int i : idx) kill[i] = 1;
-                    mat::Model kept;
+                    mat::Model kept = editModel;
+                    kept.quads.clear();
                     for (int i = 0; i < (int)editModel.quads.size(); i++)
                         if (!kill[i]) kept.quads.push_back(editModel.quads[i]);
                     editModel = std::move(kept);
@@ -8113,7 +9539,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (rmb && !prevRmb) {
                 lastMx = mx; lastMy = my;
                 if (applyRandHov || saveHov || cancelHov || overExit || overBlockPanel || overSliders || overRightHdr ||
-                    overMidHdr || overMatBar || faceHov || blkHov || smHov || tinyHov || midSaveHov || midUndoHov ||
+                    overMidHdr || overMatBar || paintSlideHov || colorSlideHov || faceHov || blkHov || smHov || tinyHov || midSaveHov || midUndoHov ||
                     ed.modelToolHover >= 0 || ed.gizmoHover != 0 || gzDrag != 0) orbitPane = 0;
                 else if (inRight3d) orbitPane = 2;
                 else if (inLeft3d) orbitPane = 1;
@@ -8458,6 +9884,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         std::vector<float> entTex;       // entity textured cutouts (pos+color+uv)
         struct TexBatch { unsigned tex = 0; int wrap = 0; std::vector<float> verts; };
         std::vector<TexBatch> leftBatches;
+        std::vector<float> itemSolid;
+        std::vector<float> itemSolidRand;
         std::vector<TexBatch> entBatches;
         std::vector<float> entRightSolid;
         std::vector<TexBatch> entRightBatches;
@@ -9957,17 +11385,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 if (slideHov) stroke2(entSlideX - 1, thY - 1, kEntSlideW + 2, 18.0f, 1, 1, 1, 1);
             }
             if (ed.hairPaint && paintSlideW > 1.0f) {
-                const char* labs[4] = { "1/2", "1/4", "1/8", "1/16" };
-                float trackY = paintSlideY + 22.0f;
+                float trackY = paintSlideY + 5.0f;
                 rect(paintSlideX, trackY, paintSlideW, 6.0f, 0.18f, 0.18f, 0.20f, 1);
                 for (int i = 0; i < 4; i++) {
                     float x = paintSlideX + paintSlideW * ((float)i / 3.0f);
                     rect(x - 1.0f, trackY - 3.0f, 2.0f, 12.0f, 0.45f, 0.45f, 0.48f, 1);
-                    TextTex& lb = getTextTex(labs[i]);
-                    float lx = x - lb.w * 0.5f;
-                    if (i == 0) lx = paintSlideX;
-                    if (i == 3) lx = paintSlideX + paintSlideW - lb.w;
-                    drawTextTex(lb, lx, paintSlideY);
                 }
                 float kx = paintSlideX + paintSlideW * ((float)ed.paintDiv / 3.0f) - 7.0f;
                 rect(kx, trackY - 5.0f, 14.0f, 16.0f, paintSlideHov ? 0.95f : 0.80f, paintSlideHov ? 0.85f : 0.70f, 0.25f, 1);
@@ -10259,12 +11681,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             };
             if (editModel.ok()) {
                 for (const mat::Quad& q : editModel.quads) emitEditQuad(q);
-            } else {
+            } else if (editModel.cube || (editModel.solids.empty() && !mat::modelHasSolidTex(editModel))) {
                 mat::buildBlockPreviewMesh((uint8_t)ed.modelBlock, editModel, previewMesh);
                 TexBatch b;
                 b.tex = atlasTex;
                 appendMesh(b.verts, previewMesh);
                 leftBatches.push_back(std::move(b));
+            }
+            if (editModel.ok() || !editModel.cube) {
+                std::vector<mat::Quad> solidQuads;
+                for (const mat::Solid& s : editModel.solids) mat::appendSolidQuads(s, solidQuads);
+                for (const mat::Quad& q : solidQuads) emitEditQuad(q);
             }
             float pivX = leftPivX, pivY = leftPivY, pivZ = leftPivZ;
             mvp3d = leftMvp;
@@ -10317,14 +11744,90 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     }
                     for (int c = 0; c < 4; c++) line(X[c], Y[c], Z[c], X[(c + 1) % 4], Y[(c + 1) % 4], Z[(c + 1) % 4], cr, cg, cb, 1);
                 }
-            } else {
+            } else if (editModel.cube || editModel.solids.empty()) {
                 float c[8][3] = { {-0.5f,-0.5f,-0.5f},{0.5f,-0.5f,-0.5f},{0.5f,-0.5f,0.5f},{-0.5f,-0.5f,0.5f},
                                   {-0.5f,0.5f,-0.5f},{0.5f,0.5f,-0.5f},{0.5f,0.5f,0.5f},{-0.5f,0.5f,0.5f} };
                 int e[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
                 for (int i = 0; i < 12; i++) line(c[e[i][0]][0],c[e[i][0]][1],c[e[i][0]][2], c[e[i][1]][0],c[e[i][1]][1],c[e[i][1]][2], 0.5f,0.5f,0.5f,1);
             }
 
-            if (ed.modelTool >= 0 && ed.modelTool <= 5 && editModel.ok()) {
+            mat::emitSolidMesh(editModel.solids, itemSolid, [](float x, float y, float z) {
+                return Vec3{ x - 0.5f, y, z - 0.5f };
+            }, true, 1.0f, true);
+            if (itemSheet.ok() && itemSheetGL) {
+                TexBatch sheet;
+                sheet.tex = itemSheetGL;
+                auto pushSheet = [&](std::vector<float>& dst, auto&& xform) {
+                    const float SW = (float)itemSheet.w, SH = (float)itemSheet.h;
+                    for (const mat::Solid& s : editModel.solids) {
+                        if (!mat::solidHasBox(s)) continue;
+                        for (int f = 0; f < 6; f++) {
+                            float x0 = -s.h[0], x1 = s.h[0], y0 = -s.h[1], y1 = s.h[1], z0 = -s.h[2], z1 = s.h[2];
+                            Vec3 ql[4];
+                            switch (f) {
+                                case 0: ql[0] = {x1,y0,z1}; ql[1] = {x1,y0,z0}; ql[2] = {x1,y1,z0}; ql[3] = {x1,y1,z1}; break;
+                                case 1: ql[0] = {x0,y0,z0}; ql[1] = {x0,y0,z1}; ql[2] = {x0,y1,z1}; ql[3] = {x0,y1,z0}; break;
+                                case 2: ql[0] = {x0,y1,z0}; ql[1] = {x1,y1,z0}; ql[2] = {x1,y1,z1}; ql[3] = {x0,y1,z1}; break;
+                                case 3: ql[0] = {x0,y0,z1}; ql[1] = {x1,y0,z1}; ql[2] = {x1,y0,z0}; ql[3] = {x0,y0,z0}; break;
+                                case 4: ql[0] = {x0,y0,z1}; ql[1] = {x1,y0,z1}; ql[2] = {x1,y1,z1}; ql[3] = {x0,y1,z1}; break;
+                                default:ql[0] = {x1,y0,z0}; ql[1] = {x0,y0,z0}; ql[2] = {x0,y1,z0}; ql[3] = {x1,y1,z0}; break;
+                            }
+                            int px, py, fw, fh;
+                            pm::boxFacePx(s.boxX, s.boxY, s.boxW, s.boxH, s.boxD, f, px, py, fw, fh);
+                            float u0 = (float)px / SW, v0 = (float)py / SH;
+                            float u1 = (float)(px + fw) / SW, v1 = (float)(py + fh) / SH;
+                            float uv[4][2] = { {u0, v1}, {u1, v1}, {u1, v0}, {u0, v0} };
+                            Vec3 q[4];
+                            for (int c = 0; c < 4; c++) {
+                                Vec3 w = mat::solidEuler(ql[c], s.rot);
+                                q[c] = xform(s.c[0] + w.x, s.c[1] + w.y, s.c[2] + w.z);
+                            }
+                            int tris[6] = { 0, 1, 2, 0, 2, 3 };
+                            for (int t = 0; t < 6; t++) {
+                                int c = tris[t];
+                                dst.push_back(q[c].x); dst.push_back(q[c].y); dst.push_back(q[c].z);
+                                dst.push_back(1); dst.push_back(1); dst.push_back(1); dst.push_back(1);
+                                dst.push_back(uv[c][0]); dst.push_back(uv[c][1]);
+                            }
+                        }
+                    }
+                };
+                pushSheet(sheet.verts, [](float x, float y, float z) { return Vec3{ x - 0.5f, y, z - 0.5f }; });
+                if (!sheet.verts.empty()) leftBatches.push_back(std::move(sheet));
+            }
+            auto boxLine = [&](const float mn[3], const float mx[3], float r, float g, float b) {
+                float x0 = mn[0] - 0.5f, y0 = mn[1], z0 = mn[2] - 0.5f;
+                float x1 = mx[0] - 0.5f, y1 = mx[1], z1 = mx[2] - 0.5f;
+                line(x0, y0, z0, x1, y0, z0, r, g, b, 1);
+                line(x1, y0, z0, x1, y0, z1, r, g, b, 1);
+                line(x1, y0, z1, x0, y0, z1, r, g, b, 1);
+                line(x0, y0, z1, x0, y0, z0, r, g, b, 1);
+                line(x0, y1, z0, x1, y1, z0, r, g, b, 1);
+                line(x1, y1, z0, x1, y1, z1, r, g, b, 1);
+                line(x1, y1, z1, x0, y1, z1, r, g, b, 1);
+                line(x0, y1, z1, x0, y1, z0, r, g, b, 1);
+                line(x0, y0, z0, x0, y1, z0, r, g, b, 1);
+                line(x1, y0, z0, x1, y1, z0, r, g, b, 1);
+                line(x1, y0, z1, x1, y1, z1, r, g, b, 1);
+                line(x0, y0, z1, x0, y1, z1, r, g, b, 1);
+            };
+            for (int i = 0; i < (int)editModel.solids.size(); i++) {
+                const mat::Solid& s = editModel.solids[i];
+                float mn[3] = { s.c[0] - s.h[0], s.c[1] - s.h[1], s.c[2] - s.h[2] };
+                float mx[3] = { s.c[0] + s.h[0], s.c[1] + s.h[1], s.c[2] + s.h[2] };
+                bool sel = (i == ed.selSolid) || (i < (int)solidMark.size() && solidMark[i]);
+                boxLine(mn, mx, sel ? 1.0f : 0.75f, sel ? 0.85f : 0.65f, sel ? 0.25f : 0.45f);
+            }
+            if (ed.partAddVis && (ed.partAdd || ed.partMeasure || ed.hairPaint || ed.hairCard || ed.hairErase || ed.partCut))
+                boxLine(ed.partMn, ed.partMx, 0.35f, 1.0f, 0.55f);
+            if (ed.measureOn) {
+                line(ed.measureA[0] - 0.5f, ed.measureA[1], ed.measureA[2] - 0.5f,
+                     ed.measureB[0] - 0.5f, ed.measureB[1], ed.measureB[2] - 0.5f,
+                     1.0f, 0.92f, 0.25f, 1);
+            }
+
+            if (ed.modelTool >= 0 && ed.modelTool <= 5 &&
+                (editModel.ok() || (ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size() && selectedIndices().empty()))) {
                 auto pushGz = [&](float x, float y, float r, float gcol, float b, float a) {
                     gizmoOverlay.push_back(x); gizmoOverlay.push_back(y); gizmoOverlay.push_back(0);
                     gizmoOverlay.push_back(r); gizmoOverlay.push_back(gcol); gizmoOverlay.push_back(b); gizmoOverlay.push_back(a);
@@ -10353,13 +11856,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     gzHead(sx0, sy0, sx1, sy1, hot ? 14.0f : 11.0f, r, gc, b);
                 };
                 bool solidStretchDraw = (ed.modelTool == 1 && isSolidGroup(ed.selQuad));
-                if (ed.modelTool == 0 || ed.modelTool == 3 || ed.modelTool == 4 || solidStretchDraw) {
+                bool partStretchDraw = ed.modelTool == 1 && selectedIndices().empty() &&
+                    ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size();
+                if (ed.modelTool == 0 || ed.modelTool == 3 || ed.modelTool == 4 || solidStretchDraw || partStretchDraw) {
                 Vec3 g; gizmoCenterView(g);
                 float L = gizmoSize();
                 float R = L * 0.72f;
                 const float col[3][3] = { {1.0f,0.28f,0.28f},{0.28f,0.92f,0.32f},{0.32f,0.45f,1.0f} };
                 int hov = ed.gizmoHover;
-                bool drawTrans = (ed.modelTool == 0 || ed.modelTool == 4 || solidStretchDraw);
+                bool drawTrans = (ed.modelTool == 0 || ed.modelTool == 4 || solidStretchDraw || partStretchDraw);
                 bool drawRot = (ed.modelTool == 0 || ed.modelTool == 3);
                 for (int a = 0; a < 3; a++) {
                     bool hotT = (hov == 1 + a) || (hov == 10 + a * 2) || (hov == 11 + a * 2);
@@ -10437,9 +11942,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             mat::buildRandAppliedMesh((uint8_t)ed.modelBlock, editModel, editRand, ed.randWx, ed.randWz, randMesh);
             float rpX, rpY, rpZ;
             meshPivot(randMesh, rpX, rpY, rpZ);
+            if (randMesh.empty() && !editModel.solids.empty()) {
+                rpX = rpY = rpZ = 0.0f;
+                for (const mat::Solid& s : editModel.solids) {
+                    rpX += s.c[0] - 0.5f; rpY += s.c[1] - 0.5f; rpZ += s.c[2] - 0.5f;
+                }
+                float n = (float)editModel.solids.size();
+                rpX /= n; rpY /= n; rpZ /= n;
+            }
             float aspectR = (paneRH > 1.0f) ? (paneRW / paneRH) : 1.0f;
             mvpRand = orbitMvp(aspectR, ed.rrotY, ed.rrotX, ed.rzoom, rpX, rpY, rpZ);
             appendMesh(randTexVerts, randMesh);
+            mat::emitSolidMesh(editModel.solids, itemSolidRand, [](float x, float y, float z) {
+                return Vec3{ x - 0.5f, y - 0.5f, z - 0.5f };
+            }, true);
             rline(rpX, rpY, rpZ, rpX + 1, rpY, rpZ, 1, 0.2f, 0.2f, 1);
             rline(rpX, rpY, rpZ, rpX, rpY + 1, rpZ, 0.2f, 1, 0.2f, 1);
             rline(rpX, rpY, rpZ, rpX, rpY, rpZ + 1, 0.2f, 0.3f, 1, 1);
@@ -10452,6 +11968,31 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             rect(splitX - 1, kTopH, 2, (float)g_winH - kTopH, 0.25f, 0.25f, 0.28f, 1);
             rect(paneLX, kTopH, paneLW, kHdrH, 0.10f, 0.11f, 0.13f, 1);
             rect(paneLX, kTopH + kHdrH, paneLW, kToolH, 0.09f, 0.10f, 0.12f, 1);
+            if (partColW > 1.0f)
+                rect(partColX, paneLY, partColW, paneLH, 0.08f, 0.09f, 0.11f, 1);
+            for (int i = 0; i < 13; i++) {
+                float bx = partToolRect[i][0], by = partToolRect[i][1], bw = partToolRect[i][2], bh = partToolRect[i][3];
+                if (bw < 1.0f) continue;
+                bool hov = (partToolHover == i);
+                bool on = (i == 0 && ed.partAdd) || (i == 1 && ed.hairSelect) || (i == 2 && ed.hairPaint) ||
+                    (i == 3 && ed.hairCard) || (i == 4 && ed.hairErase) || (i == 10 && ed.partCut) ||
+                    (i == 11 && ed.partMeasure) || (i == 12 && ed.partPlane);
+                rect(bx, by, bw, bh, on ? 0.38f : (hov ? 0.28f : 0.16f), on ? 0.48f : (hov ? 0.32f : 0.17f), on ? 0.28f : (hov ? 0.22f : 0.16f), 1);
+                if (hov) rect(bx - 2, by - 2, bw + 4, bh + 4, 1, 1, 1, 1);
+            }
+            for (int i = 0; i < 8; i++) {
+                float bx = partChipRect[i][0], by = partChipRect[i][1], bw = partChipRect[i][2], bh = partChipRect[i][3];
+                if (bw < 1.0f) continue;
+                rect(bx, by, bw, bh, kPaintPal[i][0], kPaintPal[i][1], kPaintPal[i][2], 1);
+                bool on = std::fabs(ed.r - kPaintPal[i][0]) < 0.02f && std::fabs(ed.g - kPaintPal[i][1]) < 0.02f && std::fabs(ed.b - kPaintPal[i][2]) < 0.02f;
+                if (on || partToolHover == 20 + i) {
+                    float fr = on ? 1.0f : 0.85f, fg = on ? 0.85f : 0.85f, fb = on ? 0.2f : 0.85f;
+                    rect(bx - 2, by - 2, bw + 4, 2, fr, fg, fb, 1);
+                    rect(bx - 2, by + bh, bw + 4, 2, fr, fg, fb, 1);
+                    rect(bx - 2, by - 2, 2, bh + 4, fr, fg, fb, 1);
+                    rect(bx + bw, by - 2, 2, bh + 4, fr, fg, fb, 1);
+                }
+            }
             for (int i = 0; i < kNMTools; i++) {
                 float bx = mtoolRect[i][0], by = mtoolRect[i][1], bw = mtoolRect[i][2], bh = mtoolRect[i][3];
                 bool hov = (ed.modelToolHover == i);
@@ -10510,6 +12051,72 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (saveHov) rect(saveX - 2, saveY - 2, kSaveS + 4, kSaveS + 4, 1, 1, 1, 1);
             rect(cancelX, cancelY, kCancelW, kCancelH, cancelHov ? 0.45f : 0.22f, cancelHov ? 0.28f : 0.18f, cancelHov ? 0.22f : 0.18f, 1);
             if (cancelHov) rect(cancelX - 2, cancelY - 2, kCancelW + 4, kCancelH + 4, 1, 1, 1, 1);
+            for (int i = 0; i < 2; i++) {
+                float x = rightTab[i][0], y = rightTab[i][1], w = rightTab[i][2], h = rightTab[i][3];
+                if (w < 1.0f) continue;
+                bool on = ed.modelRightTab == i;
+                bool hov = rightTabHover == i;
+                if (on) rect(x, y, w, h + 2.0f, 0.07f, 0.08f, 0.10f, 1);
+                else rect(x, y + 4.0f, w, h - 4.0f, hov ? 0.20f : 0.14f, hov ? 0.21f : 0.15f, hov ? 0.24f : 0.17f, 1);
+            }
+            if (ed.modelRightTab == 1) {
+                for (int i = 0; i < 9; i++) {
+                    float x = colorTool[i][0], y = colorTool[i][1], w = colorTool[i][2], h = colorTool[i][3];
+                    if (w < 1.0f) continue;
+                    bool on = (i == 3) ? ed.picker : (!ed.picker && ((i == 1) ? (ed.tool == 1 || ed.brushMod) : (ed.tool < 0 ? i == 0 : ed.tool == i)));
+                    bool hov = colorToolHover == i;
+                    rect(x, y, w, h, on ? 0.32f : (hov ? 0.24f : 0.16f), on ? 0.42f : (hov ? 0.26f : 0.16f), on ? 0.24f : (hov ? 0.20f : 0.16f), 1);
+                }
+                {
+                    float x = colorCur[0], y = colorCur[1], w = colorCur[2], h = colorCur[3];
+                    for (int i = 0; i < 8; i++) {
+                        bool ck = (i & 1) != 0;
+                        rect(x + i * (w / 8.0f), y, w / 8.0f + 0.4f, h, ck ? 0.45f : 0.62f, ck ? 0.45f : 0.62f, ck ? 0.45f : 0.62f, 1);
+                    }
+                    rect(x, y, w, h, ed.r, ed.g, ed.b, ed.a);
+                }
+                {
+                    float ch, cs, cv;
+                    rgbToHsv(ed.r, ed.g, ed.b, ch, cs, cv);
+                    float svX = colorSv[0], svY = colorSv[1], svW = colorSv[2];
+                    for (int j = 0; j < 16; j++) for (int i = 0; i < 16; i++) {
+                        float s = (float)i / 15.0f, v = 1.0f - (float)j / 15.0f;
+                        float rr, gg, bb; hsvToRgb(ch, s, v, rr, gg, bb);
+                        rect(svX + i * (svW / 16.0f), svY + j * (svW / 16.0f), svW / 16.0f + 0.5f, svW / 16.0f + 0.5f, rr, gg, bb, 1);
+                    }
+                    rect(svX + cs * svW - 3, svY + (1.0f - cv) * svW - 3, 6, 6, 1, 1, 1, 1);
+                    const int HS = 28;
+                    for (int k = 0; k < HS; k++) {
+                        float a0 = (float)k / HS * 6.2831853f, a1 = (float)(k + 1) / HS * 6.2831853f;
+                        float rr, gg, bb; hsvToRgb((float)k / HS, 1, 1, rr, gg, bb);
+                        float x0 = colorHueCX + std::cos(a0) * colorHueRI, y0 = colorHueCY + std::sin(a0) * colorHueRI;
+                        float x1 = colorHueCX + std::cos(a1) * colorHueRI, y1 = colorHueCY + std::sin(a1) * colorHueRI;
+                        float x2 = colorHueCX + std::cos(a1) * colorHueRO, y2 = colorHueCY + std::sin(a1) * colorHueRO;
+                        float x3 = colorHueCX + std::cos(a0) * colorHueRO, y3 = colorHueCY + std::sin(a0) * colorHueRO;
+                        float v6[6][7] = { {x0,y0,0,rr,gg,bb,1},{x1,y1,0,rr,gg,bb,1},{x2,y2,0,rr,gg,bb,1},
+                                           {x0,y0,0,rr,gg,bb,1},{x2,y2,0,rr,gg,bb,1},{x3,y3,0,rr,gg,bb,1} };
+                        for (auto& e : v6) for (int ii = 0; ii < 7; ii++) verts.push_back(e[ii]);
+                    }
+                    float ca = ch * 6.2831853f;
+                    float hx = colorHueCX + std::cos(ca) * (colorHueRI + colorHueRO) * 0.5f;
+                    float hy = colorHueCY + std::sin(ca) * (colorHueRI + colorHueRO) * 0.5f;
+                    rect(hx - 3, hy - 3, 6, 6, 1, 1, 1, 1);
+                }
+                {
+                    float alX = colorAlpha[0], alY = colorAlpha[1], alW = colorAlpha[2], alH = colorAlpha[3];
+                    for (int i = 0; i < 12; i++) {
+                        bool ck = (i % 2) != 0;
+                        rect(alX + i * (alW / 12.0f), alY, alW / 12.0f, alH, ck ? 0.45f : 0.65f, ck ? 0.45f : 0.65f, ck ? 0.45f : 0.65f, 1);
+                    }
+                    rect(alX, alY, alW * ed.a, alH, 1, 1, 1, 0.85f);
+                    rect(alX + alW * ed.a - 2, alY - 2, 4, alH + 4, 1, 1, 1, 1);
+                }
+                for (size_t k = 0; k < ed.recent.size() && k < 8; k++) {
+                    float x = colorRecent[k][0], y = colorRecent[k][1], w = colorRecent[k][2], h = colorRecent[k][3];
+                    rect(x, y, w, h, ed.recent[k].r / 255.0f, ed.recent[k].g / 255.0f, ed.recent[k].b / 255.0f, ed.recent[k].a / 255.0f);
+                    if (colorRecentHover == (int)k) rect(x - 2, y - 2, w + 4, h + 4, 1, 1, 1, 1);
+                }
+            }
 
             if (showSliders) {
                 rect(paneRX, sliderTop, paneRW, kSliderH, 0.11f, 0.12f, 0.14f, 1);
@@ -10630,8 +12237,50 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         };
 
         if (startMode >= 0 && ed.modelMode) {
-            drawPane3D(paneLX, paneLY, paneLW, paneLH, mvp3d, nullptr, 0, &leftBatches, lineVerts, true);
-            drawPane3D(paneRX, paneRY, paneRW, paneRH, mvpRand, &randTexVerts, atlasTex, nullptr, randLineVerts, true);
+            if (ed.modelRightTab == 1 && colorFaceVis) {
+                Vec3 e1 = colorFaceQ[1] - colorFaceQ[0];
+                Vec3 e2 = colorFaceQ[3] - colorFaceQ[0];
+                Vec3 n = e1.cross(e2);
+                float nl = n.length();
+                if (nl > 1e-8f) n = n * (0.008f / nl);
+                Vec3 q0 = colorFaceQ[0] + n, q1 = colorFaceQ[1] + n, q2 = colorFaceQ[2] + n, q3 = colorFaceQ[3] + n;
+                line(q0.x, q0.y, q0.z, q1.x, q1.y, q1.z, 1.0f, 0.9f, 0.2f, 1);
+                line(q1.x, q1.y, q1.z, q2.x, q2.y, q2.z, 1.0f, 0.9f, 0.2f, 1);
+                line(q2.x, q2.y, q2.z, q3.x, q3.y, q3.z, 1.0f, 0.9f, 0.2f, 1);
+                line(q3.x, q3.y, q3.z, q0.x, q0.y, q0.z, 1.0f, 0.9f, 0.2f, 1);
+            }
+            drawPane3D(paneLX, paneLY, viewLW, paneLH, mvp3d, nullptr, 0, &leftBatches, lineVerts, true, &itemSolid);
+            if (ed.modelRightTab == 1)
+                drawPane3D(paneRX, paneRY, colorViewW, paneRH, colorMvp, nullptr, 0, &leftBatches, lineVerts, true, &itemSolid);
+            else
+                drawPane3D(paneRX, paneRY, paneRW, paneRH, mvpRand, &randTexVerts, atlasTex, nullptr, randLineVerts, true, &itemSolidRand);
+            if ((ed.hairPaint && paintSlideW > 1.0f) || (ed.modelRightTab == 1 && colorSlideW > 1.0f)) {
+                verts.clear();
+                auto drawStops = [&](float sx, float sy, float sw, bool hot) {
+                    float trackY = sy + 5.0f;
+                    rect(sx, trackY, sw, 6.0f, 0.18f, 0.18f, 0.20f, 1);
+                    for (int i = 0; i < 4; i++) {
+                        float x = sx + sw * ((float)i / 3.0f);
+                        rect(x - 1.0f, trackY - 3.0f, 2.0f, 12.0f, 0.45f, 0.45f, 0.48f, 1);
+                    }
+                    float kx = sx + sw * ((float)ed.paintDiv / 3.0f) - 7.0f;
+                    rect(kx, trackY - 5.0f, 14.0f, 16.0f, hot ? 0.95f : 0.80f, hot ? 0.85f : 0.70f, 0.25f, 1);
+                };
+                if (ed.hairPaint && paintSlideW > 1.0f) drawStops(paintSlideX, paintSlideY, paintSlideW, paintSlideHov);
+                if (ed.modelRightTab == 1 && colorSlideW > 1.0f) drawStops(colorSlideX, colorSlideY, colorSlideW, colorSlideHov);
+                gl::Disable(GL_DEPTH_TEST);
+                gl::DepthMask(GL_FALSE);
+                gl::Viewport(0, 0, g_winW, g_winH);
+                gl::BindVertexArray(vao);
+                gl::BindBuffer(GL_ARRAY_BUFFER, vbo);
+                gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size() * sizeof(float)), verts.data(), GL_STREAM_DRAW);
+                gl::UseProgram(prog);
+                gl::UniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.m);
+                gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(verts.size() / 7));
+                gl::BindVertexArray(0);
+                gl::DepthMask(GL_TRUE);
+                verts.clear();
+            }
             if (!gizmoOverlay.empty()) {
                 gl::Disable(GL_DEPTH_TEST);
                 gl::DepthMask(GL_FALSE);
@@ -10657,8 +12306,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 gl::DepthMask(GL_TRUE);
             }
         } else if (startMode >= 0 && ed.entityMode) {
-            if (!ed.entSkinView && !hairToolsOn)
-                drawPane3D(paneLX, paneLY, paneLW, paneLH, mvp3d, nullptr, 0, &entBatches, lineVerts, true, &entSolid);
+            if (!ed.entSkinView) {
+                float entLeftH = paneLH;
+                if (hairToolsOn && entMatY > paneLY + 40.0f) {
+                    entLeftH = entMatY - 6.0f - paneLY;
+                    if (entLeftH < 40.0f) entLeftH = 40.0f;
+                }
+                drawPane3D(paneLX, paneLY, paneLW, entLeftH, mvp3d, nullptr, 0, &entBatches, lineVerts, true, &entSolid);
+            }
             drawPane3D(paneRX, paneRY, entViewRW, paneRH, rightEntMvp, nullptr, 0, &entRightBatches, randLineVerts, true, &entRightSolid);
             verts.clear();
             auto flushUi = [&]() {
@@ -10675,6 +12330,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 gl::DepthMask(GL_TRUE);
                 verts.clear();
             };
+            if (paintSlideW > 1.0f) {
+                float trackY = paintSlideY + 5.0f;
+                rect(paintSlideX, trackY, paintSlideW, 6.0f, 0.18f, 0.18f, 0.20f, 1);
+                for (int i = 0; i < 4; i++) {
+                    float x = paintSlideX + paintSlideW * ((float)i / 3.0f);
+                    rect(x - 1.0f, trackY - 3.0f, 2.0f, 12.0f, 0.45f, 0.45f, 0.48f, 1);
+                }
+                float kx = paintSlideX + paintSlideW * ((float)ed.paintDiv / 3.0f) - 7.0f;
+                rect(kx, trackY - 5.0f, 14.0f, 16.0f, paintSlideHov ? 0.95f : 0.80f, paintSlideHov ? 0.85f : 0.70f, 0.25f, 1);
+                flushUi();
+            }
             int lsx = 0, lsy = g_winH - (int)entListBot, lsw = (int)leftBarW, lsh = (int)(entListBot - entListTop);
             if (lsw < 1) lsw = 1;
             if (lsh < 1) lsh = 1;
@@ -10951,20 +12617,38 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 const mat::Model& mdl = (b == ed.modelBlock) ? editModel : mat::itemModel((uint8_t)b);
                 std::vector<Vertex> iconMesh;
                 mat::buildItemDisplayMesh((uint8_t)b, mdl, iconMesh);
-                if (iconMesh.empty()) continue;
+                std::vector<float> iconSolid;
+                if (!mdl.solids.empty()) {
+                    mat::emitSolidMesh(mdl.solids, iconSolid, [](float x, float y, float z) {
+                        return Vec3{ x, y, z };
+                    }, true);
+                }
+                if (iconMesh.empty() && iconSolid.empty()) continue;
                 Vec3 ctr{ 0.0f, 0.0f, 0.0f };
-                for (const Vertex& v : iconMesh) ctr += Vec3{ v.px, v.py, v.pz };
-                ctr = ctr / (float)iconMesh.size();
+                int nctr = 0;
+                for (const Vertex& v : iconMesh) { ctr += Vec3{ v.px, v.py, v.pz }; nctr++; }
+                for (const mat::Solid& s : mdl.solids) { ctr += Vec3{ s.c[0], s.c[1], s.c[2] }; nctr++; }
+                if (nctr > 0) ctr = ctr / (float)nctr;
                 Mat4 iconView = Mat4::lookAt(ctr + iconDir * 8.0f, ctr, iconUp);
                 float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f, minZ = 1e9f, maxZ = -1e9f;
-                for (const Vertex& v : iconMesh) {
-                    Vec4 p = iconView * Vec4{ v.px, v.py, v.pz, 1.0f };
+                auto expandIcon = [&](const Vec3& w) {
+                    Vec4 p = iconView * Vec4{ w.x, w.y, w.z, 1.0f };
                     if (p.x < minX) minX = p.x;
                     if (p.x > maxX) maxX = p.x;
                     if (p.y < minY) minY = p.y;
                     if (p.y > maxY) maxY = p.y;
                     if (p.z < minZ) minZ = p.z;
                     if (p.z > maxZ) maxZ = p.z;
+                };
+                for (const Vertex& v : iconMesh) expandIcon({ v.px, v.py, v.pz });
+                for (const mat::Solid& s : mdl.solids) {
+                    for (int c = 0; c < 8; c++) {
+                        expandIcon({
+                            s.c[0] + ((c & 1) ? s.h[0] : -s.h[0]),
+                            s.c[1] + ((c & 2) ? s.h[1] : -s.h[1]),
+                            s.c[2] + ((c & 4) ? s.h[2] : -s.h[2])
+                        });
+                    }
                 }
                 float span = std::max(maxX - minX, maxY - minY) * 0.58f;
                 if (span < 0.02f) span = 0.02f;
@@ -10977,7 +12661,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 Mat4 iconMvp = Mat4::ortho(mx2 - span, mx2 + span, my2 - span, my2 + span, znear, zfar) * iconView;
                 std::vector<float> iconVerts;
                 appendMesh(iconVerts, iconMesh);
-                drawPane3D(cx + 3, cy + 3, thumb - 6, thumb - 6, iconMvp, &iconVerts, atlasTex, nullptr, iconNoLines, true);
+                drawPane3D(cx + 3, cy + 3, thumb - 6, thumb - 6, iconMvp, &iconVerts, atlasTex, nullptr, iconNoLines, true, &iconSolid);
             }
             TextTex& ph = getTextTex("Items");
             if (ph.tex) drawTextTex(ph, pX, 22);
@@ -10985,9 +12669,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             if (ar.tex) drawTextTex(ar, arX + (kArW - ar.w) * 0.5f, arY + (kArH - ar.h) * 0.5f);
             TextTex& cl = getTextTex("Cancel");
             if (cl.tex) drawTextTex(cl, cancelX + (kCancelW - cl.w) * 0.5f, cancelY + (kCancelH - cl.h) * 0.5f);
-            TextTex& rp = getTextTex("Rand preview");
-            if (rp.tex && paneRX + 10.0f + rp.w < cancelX - 8.0f)
-                drawTextTex(rp, paneRX + 10.0f, arY + (kArH - rp.h) * 0.5f);
+            const char* tabLab[2] = { "Rand", "Color" };
+            for (int i = 0; i < 2; i++) {
+                if (rightTab[i][2] < 1.0f) continue;
+                TextTex& t = getTextTex(tabLab[i]);
+                drawTextFit(t, rightTab[i][0], rightTab[i][1], rightTab[i][2], rightTab[i][3]);
+            }
             TextTex& md = getTextTex("Model");
             if (md.tex) drawTextTex(md, paneLX + 10.0f, midBtnY + (kBtnH - md.h) * 0.5f);
             auto drawBtnLabel = [&](const char* s, float x, float w) {
@@ -10998,6 +12685,31 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             drawBtnLabel("Block", blkX, kBlkW);
             drawBtnLabel("Small", smX, kSmW);
             drawBtnLabel("Tiny", tinyX, kTinyW);
+            for (int i = 0; i < 13; i++) {
+                TextTex& t = getTextTex(partLab[i]);
+                if (!t.tex || partToolRect[i][2] < 1.0f) continue;
+                drawTextFit(t, partToolRect[i][0], partToolRect[i][1], partToolRect[i][2], partToolRect[i][3]);
+            }
+            if (ed.modelMode && ed.modelRightTab == 1) {
+                for (int i = 0; i < 9; i++) {
+                    if (colorTool[i][2] < 1.0f) continue;
+                    TextTex& t = getTextTex(colorLab[i]);
+                    drawTextFit(t, colorTool[i][0], colorTool[i][1], colorTool[i][2], colorTool[i][3]);
+                }
+                if (!itemPaintName.empty()) {
+                    TextTex& t = getTextTex(itemPaintName);
+                    if (t.tex) drawTextTex(t, paneRX + 12.0f, paneRY + 4.0f);
+                }
+            }
+            if (ed.modelMode && ed.measureOn) {
+                float dx = ed.measureB[0] - ed.measureA[0];
+                float dy = ed.measureB[1] - ed.measureA[1];
+                float dz = ed.measureB[2] - ed.measureA[2];
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.3f", std::sqrt(dx * dx + dy * dy + dz * dz));
+                TextTex& t = getTextTex(buf);
+                if (t.tex) drawTextTex(t, paneLX + 8.0f, paneLY + 8.0f);
+            }
             for (int i = 0; i < kNMTools; i++) {
                 TextTex& t = getTextTex(kMToolLab[i]);
                 if (t.tex) {

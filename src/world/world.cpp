@@ -1,4 +1,5 @@
 #include "world.hpp"
+#include "drop_geom.hpp"
 #include "saves.hpp"
 #include "tree_canopy.hpp"
 #include "tree_grow.hpp"
@@ -2358,6 +2359,10 @@ void World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Ve
         }
         d.yaw = 0.0f;
         d.spin = 0.0f;
+        if (!inPlace && dropgeom::cached(item).form != dropgeom::Form::Cube) {
+            d.yaw = (float)(m_drops.size() % 8) * 0.75f;
+            d.spin = (m_drops.size() & 1) ? 3.2f : -3.2f;
+        }
         d.age = 0.0f;
         m_drops.push_back(d);
     }
@@ -2370,14 +2375,18 @@ int World::raycastDrop(const Vec3& origin, const Vec3& dir, float maxDist, float
     float len = nd.length();
     if (len < 1e-8f) return -1;
     nd = nd / len;
-    const float h = cfg::DROP_SIZE * 0.5f;
     for (int i = 0; i < (int)m_drops.size(); i++) {
         const loot::Drop& d = m_drops[(size_t)i];
         if (d.item == AIR || d.count == 0) continue;
-        Vec3 mn{ d.pos.x - h, d.pos.y - h, d.pos.z - h };
-        Vec3 mx{ d.pos.x + h, d.pos.y + h, d.pos.z + h };
+        const dropgeom::Shape& sh = dropgeom::cached(d.item);
+        float c = std::cos(d.yaw), s = std::sin(d.yaw);
+        Vec3 rel = origin - d.pos;
+        Vec3 localO{ c * rel.x + s * rel.z, rel.y, -s * rel.x + c * rel.z };
+        Vec3 localD{ c * nd.x + s * nd.z, nd.y, -s * nd.x + c * nd.z };
+        Vec3 mn{ -sh.half.x, -sh.half.y, -sh.half.z };
+        Vec3 mx{ sh.half.x, sh.half.y, sh.half.z };
         float t = 0.0f;
-        if (!loot::rayAabb(origin, nd, mn, mx, t)) continue;
+        if (!loot::rayAabb(localO, localD, mn, mx, t)) continue;
         if (t < 0.0f || t > maxDist || t >= tHit) continue;
         tHit = t;
         best = i;
@@ -2544,7 +2553,6 @@ bool World::applyMineHit(int phys, int x, int y, int z, uint8_t heldTool, int fa
 
 void World::updateDrops(float dt) {
     const float S = cfg::BLOCK_SCALE;
-    const float h = cfg::DROP_SIZE * 0.5f;
     for (size_t i = 0; i < m_drops.size();) {
         loot::Drop& d = m_drops[i];
         d.age += dt;
@@ -2556,18 +2564,21 @@ void World::updateDrops(float dt) {
         d.yaw += d.spin * dt;
         if (!d.grounded) d.vel.y -= cfg::GRAVITY * dt;
         d.vel.y = clampf(d.vel.y, -28.0f, 28.0f);
+        float ex = 0.0f, ey = 0.0f, ez = 0.0f;
+        dropgeom::worldHalf(d.item, d.yaw, ex, ey, ez);
 
         auto moveAxis = [&](int axis, float delta) {
             if (std::fabs(delta) < 1e-8f) return;
             float prev = (axis == 0) ? d.pos.x : (axis == 1) ? d.pos.y : d.pos.z;
+            float he = (axis == 0) ? ex : (axis == 1) ? ey : ez;
             if (axis == 0) d.pos.x += delta;
             else if (axis == 1) d.pos.y += delta;
             else d.pos.z += delta;
             // Inset so a drop that exactly fills its cell does not count as
             // already inside the block it is resting on.
             const float pad = 1e-3f;
-            Vec3 mn{ d.pos.x - h + pad, d.pos.y - h + pad, d.pos.z - h + pad };
-            Vec3 mx{ d.pos.x + h - pad, d.pos.y + h - pad, d.pos.z + h - pad };
+            Vec3 mn{ d.pos.x - ex + pad, d.pos.y - ey + pad, d.pos.z - ez + pad };
+            Vec3 mx{ d.pos.x + ex - pad, d.pos.y + ey - pad, d.pos.z + ez - pad };
             int x0 = (int)std::floor(mn.x / S), x1 = (int)std::floor(mx.x / S);
             int y0 = (int)std::floor(mn.y / S), y1 = (int)std::floor(mx.y / S);
             int z0 = (int)std::floor(mn.z / S), z1 = (int)std::floor(mx.z / S);
@@ -2582,7 +2593,7 @@ void World::updateDrops(float dt) {
                 return;
             }
             if (axis == 0) {
-                d.pos.x = (prev < hx * S) ? (hx * S - h - 1e-4f) : (hx * S + S + h + 1e-4f);
+                d.pos.x = (prev < hx * S) ? (hx * S - he - 1e-4f) : (hx * S + S + he + 1e-4f);
                 d.vel.x *= -0.18f;
             } else if (axis == 1) {
                 // Resolve from where the drop was, not from the sign of velocity.
@@ -2590,18 +2601,18 @@ void World::updateDrops(float dt) {
                 // as a ceiling and pushed the drop under the ground.
                 float blockMid = (hy + 0.5f) * S;
                 if (prev >= blockMid) {
-                    d.pos.y = hy * S + S + h + 1e-4f;
+                    d.pos.y = hy * S + S + he + 1e-4f;
                     if (d.vel.y < -2.4f) d.vel.y *= -0.28f;
                     else {
                         d.vel.y = 0.0f;
                         d.grounded = true;
                     }
                 } else {
-                    d.pos.y = hy * S - h - 1e-4f;
+                    d.pos.y = hy * S - he - 1e-4f;
                     d.vel.y = 0.0f;
                 }
             } else {
-                d.pos.z = (prev < hz * S) ? (hz * S - h - 1e-4f) : (hz * S + S + h + 1e-4f);
+                d.pos.z = (prev < hz * S) ? (hz * S - he - 1e-4f) : (hz * S + S + he + 1e-4f);
                 d.vel.z *= -0.18f;
             }
         };

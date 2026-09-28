@@ -25,9 +25,41 @@ struct Quad {
     std::vector<std::pair<std::string, std::string>> extra; // unknown flags/keys, round-tripped
 };
 
-// A block model = a list of quads.
+// Cuboid in the same block space as quads. Empty `tex` is a solid color.
+// A material stem draws the block atlas (Face / Block / Tex). `kind` 1 is a
+// thin double-sided card. `rot` is Euler XYZ radians around the center.
+inline constexpr float kSolidGrid = 0.04f;
+
+struct Solid {
+    float c[3] = { 0.5f, 0.5f, 0.5f }; // center
+    float h[3] = { 0.02f, 0.02f, 0.02f }; // half extents
+    float rgb[3] = { 0.55f, 0.42f, 0.28f };
+    float rot[3] = {};
+    int bind = -1;
+    int kind = 0;            // 0 box, 1 card
+    int face = 5;            // card face index
+    int uvFlip = 0;          // bit0 mirror U, bit1 mirror V
+    float texScale = 1.0f;
+    bool crop = false;
+    std::string tex;
+    int boxX = -1, boxY = -1, boxW = 0, boxH = 0, boxD = 0; // unwrap island on this model's sheet
+};
+
+inline bool solidTextured(const Solid& s) { return !s.tex.empty(); }
+inline bool solidHasBox(const Solid& s) {
+    return s.boxX >= 0 && s.boxW > 0 && s.boxH > 0 && s.boxD > 0;
+}
+inline bool solidRotated(const Solid& s) {
+    return s.rot[0] * s.rot[0] + s.rot[1] * s.rot[1] + s.rot[2] * s.rot[2] > 1e-8f;
+}
+
+// Remove the overlap of box [cmn, cmx] from one cuboid. Remainder is up to six slabs.
+bool subtractSolid(std::vector<Solid>& parts, int index, const float cmn[3], const float cmx[3]);
+
+// A block model = quads (atlas faces) plus optional colored cuboids.
 struct Model {
     std::vector<Quad> quads;
+    std::vector<Solid> solids;
     bool cube = false; // symbolic cube (six faces from block tiles); not expanded here
     std::vector<std::string> extraLines; // unknown record types, round-tripped
     bool ok() const { return !quads.empty(); }

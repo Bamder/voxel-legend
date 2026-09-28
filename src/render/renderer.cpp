@@ -13,6 +13,7 @@
 #include "../world/hold_bind.hpp"
 #include "../plugin/plugin.hpp"
 #include "../world/loot.hpp"
+#include "../world/drop_geom.hpp"
 #include "../world/wear.hpp"
 #include "../world/matchmap.hpp"
 #include "../world/structure.hpp"
@@ -824,7 +825,9 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
 
         if (ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
             const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
-            drawOutlineAt(vp, eye, d.pos, cfg::DROP_SIZE * 1.08f, d.yaw, 1.0f, 1.0f, 1.0f, 0.95f);
+            const dropgeom::Shape& sh = dropgeom::cached(d.item);
+            Vec3 box{ sh.half.x * 2.16f, sh.half.y * 2.16f, sh.half.z * 2.16f };
+            drawOutlineAt(vp, eye, d.pos, box, d.yaw, 1.0f, 1.0f, 1.0f, 0.95f);
         } else if (ui.hasTarget) {
             if (ui.targetPhys >= 0 && ui.targetPhys < (int)world.physicsIslands().size()) {
                 const PhysicsIsland& t = world.physicsIslands()[(size_t)ui.targetPhys];
@@ -939,7 +942,7 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
 
     drawRange(false);
     drawFallingTrees(w, eye, vp, s.sunDir);
-    drawDrops(w, eye, vp);
+    drawDrops(w, eye, vp, s);
 
     gl::Enable(GL_BLEND);
     gl::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1003,46 +1006,119 @@ static void emitDropCube(uint8_t item, std::vector<Vertex>& out) {
     }
 }
 
-void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp) {
+void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const Sky& sky) {
     if (!fallVAO) return;
     const auto& drops = w.drops();
     if (drops.empty()) return;
-    gl::UseProgram(progWorld);
-    gl::ActiveTexture(GL_TEXTURE0);
-    gl::BindTexture(GL_TEXTURE_2D, atlasTex);
-    gl::Uniform1i(uAtlas, 0);
-    gl::BindVertexArray(fallVAO);
-    gl::BindBuffer(GL_ARRAY_BUFFER, fallVBO);
+
+    auto bindWorld = [&]() {
+        gl::UseProgram(progWorld);
+        gl::ActiveTexture(GL_TEXTURE0);
+        gl::BindTexture(GL_TEXTURE_2D, atlasTex);
+        gl::Uniform1i(uAtlas, 0);
+        gl::Uniform1f(uBlockScale, cfg::BLOCK_SCALE);
+    };
+    bindWorld();
     gl::Enable(GL_BLEND);
     gl::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     gl::Disable(GL_CULL_FACE);
-    const float S = cfg::DROP_SIZE;
-    for (const loot::Drop& d : drops) {
-        if (d.item == AIR || d.count == 0) continue;
-        emitDropCube(d.item, m_fallMesh);
-        if (m_fallMesh.empty()) continue;
+    gl::Enable(GL_DEPTH_TEST);
+    gl::DepthMask(GL_TRUE);
+
+    auto drawAtlas = [&](const Mat4& mvp, const Vec3& chunkOff, float blockScale) {
+        if (m_fallMesh.empty()) return;
+        bindWorld();
+        gl::Uniform1f(uBlockScale, blockScale);
+        gl::BindVertexArray(fallVAO);
+        gl::BindBuffer(GL_ARRAY_BUFFER, fallVBO);
         gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(m_fallMesh.size() * sizeof(Vertex)),
                        m_fallMesh.data(), GL_STREAM_DRAW);
         setVertexAttribs();
+        gl::UniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.m);
+        gl::Uniform3f(uChunkOffset, chunkOff.x, chunkOff.y, chunkOff.z);
+        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)m_fallMesh.size());
+    };
+    auto drawGarmentTex = [&](const std::vector<float>& tv, unsigned tex, const Mat4& mvp) {
+        if (tv.empty() || !tex || !humTexVAO) return;
+        gl::UseProgram(progHumTex);
+        gl::Uniform1f(uHumTexLit, 1.0f);
+        gl::UniformMatrix4fv(uHumTexMVP, 1, GL_FALSE, mvp.m);
+        gl::Uniform1i(uHumTexAtlas, 0);
+        gl::Uniform3f(uHumTexSunDir, sky.sunDir.x, sky.sunDir.y, sky.sunDir.z);
+        gl::Uniform3f(uHumTexSunColor, sky.sunColor.x, sky.sunColor.y, sky.sunColor.z);
+        gl::Uniform3f(uHumTexAmbient, sky.ambient.x, sky.ambient.y, sky.ambient.z);
+        gl::Uniform3f(uHumTexFogColor, sky.fogColor.x, sky.fogColor.y, sky.fogColor.z);
+        gl::Uniform1f(uHumTexFogDensity, cfg::FOG_DENSITY);
+        gl::ActiveTexture(GL_TEXTURE0);
+        gl::BindTexture(GL_TEXTURE_2D, tex);
+        gl::BindVertexArray(humTexVAO);
+        gl::BindBuffer(GL_ARRAY_BUFFER, humTexVBO);
+        gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(tv.size() * sizeof(float)), tv.data(), GL_STREAM_DRAW);
+        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(tv.size() / 9));
+        gl::BindVertexArray(0);
+    };
+
+    for (const loot::Drop& d : drops) {
+        if (d.item == AIR || d.count == 0) continue;
+        const dropgeom::Shape& sh = dropgeom::cached(d.item);
         float c = std::cos(d.yaw), s = std::sin(d.yaw);
         Mat4 R = Mat4::fromBasis({ c, 0, s }, { 0, 1, 0 }, { -s, 0, c });
-        Mat4 model = Mat4::translate(d.pos - eye) * R * Mat4::scale({ S, S, S });
-        Mat4 mvp = vp * model;
-        gl::UniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.m);
-        gl::Uniform3f(uChunkOffset, d.pos.x - eye.x, d.pos.y - eye.y, d.pos.z - eye.z);
-        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)m_fallMesh.size());
+        Mat4 placed = Mat4::translate(d.pos - eye) * R;
+        Vec3 chunkOff{ d.pos.x - eye.x, d.pos.y - eye.y, d.pos.z - eye.z };
+
+        if (sh.form == dropgeom::Form::Model) {
+            const float S = cfg::BLOCK_SCALE;
+            Vec3 o = sh.center;
+            auto xform = [&](float x, float y, float z) {
+                return Vec3{ (x - o.x) * S, (y - o.y) * S, (z - o.z) * S };
+            };
+            m_fallMesh.clear();
+            const mat::Model& mdl = mat::itemModel(d.item);
+            if (!mdl.quads.empty())
+                mat::emitModelMesh(mdl, m_fallMesh, xform, blockOf(d.item).icon);
+            std::vector<float> solid;
+            if (!mdl.solids.empty())
+                mat::emitSolidMesh(mdl.solids, solid, xform, false, 1.0f);
+            Mat4 mvp = vp * placed;
+            drawAtlas(mvp, chunkOff, 1.0f);
+            if (!solid.empty()) drawHumSolid(solid, mvp, &sky, cfg::FOG_DENSITY);
+            if (!m_fallMesh.empty() || !solid.empty()) continue;
+        } else if (sh.form == dropgeom::Form::Garment) {
+            const std::vector<pm::Part>& parts = wear::garment(d.item);
+            Vec3 o = sh.center;
+            auto xform = [&](const pm::Part&, float x, float y, float z) {
+                return Vec3{ x - o.x, y - o.y, z - o.z };
+            };
+            const wear::GarmentAsset& gasset = wear::garmentAsset(d.item);
+            unsigned gtex = 0;
+            auto git = garmentTex.find((int)d.item);
+            if (git != garmentTex.end()) gtex = git->second;
+            pdraw::Mesh mesh;
+            pdraw::build(parts, xform, [](const std::string&) { return false; },
+                         false, false, mesh, false, gtex ? gasset.sheetW : 0, gtex ? gasset.sheetH : 0);
+            Mat4 mvp = vp * placed;
+            if (!mesh.solid.empty()) drawHumSolid(mesh.solid, mvp, &sky, cfg::FOG_DENSITY);
+            drawGarmentTex(mesh.sheet, gtex, mvp);
+            if (!mesh.solid.empty() || (!mesh.sheet.empty() && gtex)) continue;
+        }
+
+        emitDropCube(d.item, m_fallMesh);
+        if (m_fallMesh.empty()) continue;
+        Mat4 model = placed * Mat4::scale({ cfg::DROP_SIZE, cfg::DROP_SIZE, cfg::DROP_SIZE });
+        drawAtlas(vp * model, chunkOff, cfg::BLOCK_SCALE);
     }
+    bindWorld();
     gl::Enable(GL_CULL_FACE);
     gl::Disable(GL_BLEND);
 }
 
-void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, float size, float yaw,
+void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size, float yaw,
                              float r, float g, float b, float a) {
     gl::UseProgram(progFlat);
     float c = std::cos(yaw), s = std::sin(yaw);
     Mat4 R = Mat4::fromBasis({ c, 0, s }, { 0, 1, 0 }, { -s, 0, c });
     Mat4 model = Mat4::translate(center - eye) * R *
-                 Mat4::scale({ size, size, size }) *
+                 Mat4::scale(size) *
                  Mat4::translate({ -0.5f, -0.5f, -0.5f });
     Mat4 mvp = vp * model;
     gl::UniformMatrix4fv(uFlatMVP, 1, GL_FALSE, mvp.m);
@@ -1442,12 +1518,19 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
     const hold::File& holds = hold::playerHold();
     const std::string locClip = (clip && !clip->name.empty()) ? clip->name : std::string("idle");
 
-    auto emitHeldMesh = [&](uint8_t block, std::vector<Vertex>& mesh, float alpha, auto&& xform) {
+    auto heldModel = [&](uint8_t block) -> const mat::Model& {
         const mat::Material* tm = mat::toolMaterial(block);
-        if (tm && tm->model.ok() && !tm->model.cube) {
-            mat::emitModelMesh(tm->model, mesh, xform, blockOf(block).icon);
+        if (tm) return tm->model;
+        return mat::itemModel(block);
+    };
+    auto emitHeldMesh = [&](uint8_t block, std::vector<Vertex>& mesh, float alpha, auto&& xform) {
+        const mat::Model& mdl = heldModel(block);
+        bool custom = !mdl.quads.empty() || mat::modelHasSolidTex(mdl);
+        if (custom && !mdl.cube) {
+            mat::emitModelMesh(mdl, mesh, xform, blockOf(block).icon);
             return;
         }
+        if (!mdl.cube && !mdl.solids.empty()) return;
         const BlockInfo& info = blockOf(block);
         for (int f = 0; f < 6; f++) {
             const geo::FaceDef& F = geo::kFaces[f];
@@ -1470,6 +1553,8 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
             mesh.push_back(vv[0]); mesh.push_back(vv[1]); mesh.push_back(vv[2]);
             mesh.push_back(vv[0]); mesh.push_back(vv[2]); mesh.push_back(vv[3]);
         }
+        if (custom)
+            mat::emitModelMesh(mdl, mesh, xform, blockOf(block).icon);
     };
 
     auto drawBound = [&](uint8_t block, const char* side, const std::string& clipName, float alpha = 1.0f) {
@@ -1500,15 +1585,20 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
             }
         }
         if (!ok) return;
-        std::vector<Vertex> held;
-        emitHeldMesh(block, held, alpha, [&](float x, float y, float z) {
+        auto holdXform = [&](float x, float y, float z) {
             Vec3 m = hold::pointOnBone(spec, xf, x, y, z);
             float rx, rz;
             pm::lookYawXZ(m.x, m.z, bodyYaw, rx, rz);
             return Vec3{ pos.x + rx - eye.x, pos.y + m.y - eye.y, pos.z + rz - eye.z };
-        });
+        };
+        std::vector<Vertex> held;
+        emitHeldMesh(block, held, alpha, holdXform);
         for (Vertex& v : held) v.alpha = alpha;
-        if (held.empty() || !fallVAO) return;
+        std::vector<float> solid;
+        const mat::Model& mdl = heldModel(block);
+        if (!mdl.solids.empty())
+            mat::emitSolidMesh(mdl.solids, solid, holdXform, false, alpha);
+        if ((held.empty() && solid.empty()) || !fallVAO) return;
         gl::UseProgram(progWorld);
         gl::ActiveTexture(GL_TEXTURE0);
         gl::BindTexture(GL_TEXTURE_2D, atlasTex);
@@ -1528,14 +1618,17 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         // lookYawXZ is a reflection (det -1), which flips triangle winding.
         // Same as drops: draw both sides so no held face is culled.
         gl::Disable(GL_CULL_FACE);
-        gl::BindVertexArray(fallVAO);
-        gl::BindBuffer(GL_ARRAY_BUFFER, fallVBO);
-        gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(held.size() * sizeof(Vertex)),
-                       held.data(), GL_STREAM_DRAW);
-        setVertexAttribs();
-        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)held.size());
-        gl::BindVertexArray(0);
+        if (!held.empty()) {
+            gl::BindVertexArray(fallVAO);
+            gl::BindBuffer(GL_ARRAY_BUFFER, fallVBO);
+            gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(held.size() * sizeof(Vertex)),
+                           held.data(), GL_STREAM_DRAW);
+            setVertexAttribs();
+            gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)held.size());
+            gl::BindVertexArray(0);
+        }
         gl::Uniform1f(uBlockScale, cfg::BLOCK_SCALE);
+        drawHumSolid(solid, vp, sun, cfg::FOG_DENSITY);
         if (ghost) {
             gl::DepthMask(GL_TRUE);
             gl::Disable(GL_BLEND);
@@ -1827,11 +1920,44 @@ void Renderer::drawBlockIcon(uint8_t block, float x, float y, float size) {
     drawModelItemIcon(block, mat::itemModel(block), x, y, size);
 }
 
+void Renderer::drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, const Sky* sun, float fogDensity) {
+    if (solid.empty() || !humVAO) return;
+    gl::UseProgram(progHum);
+    gl::UniformMatrix4fv(uHumMVP, 1, GL_FALSE, mvp.m);
+    if (sun) {
+        gl::Uniform1f(uHumLit, 1.0f);
+        gl::Uniform3f(uHumSunDir, sun->sunDir.x, sun->sunDir.y, sun->sunDir.z);
+        gl::Uniform3f(uHumSunColor, sun->sunColor.x, sun->sunColor.y, sun->sunColor.z);
+        gl::Uniform3f(uHumAmbient, sun->ambient.x, sun->ambient.y, sun->ambient.z);
+        gl::Uniform3f(uHumFogColor, sun->fogColor.x, sun->fogColor.y, sun->fogColor.z);
+        gl::Uniform1f(uHumFogDensity, fogDensity);
+    } else {
+        gl::Uniform1f(uHumLit, 1.0f);
+        gl::Uniform3f(uHumSunDir, -0.35f, 0.85f, 0.40f);
+        gl::Uniform3f(uHumSunColor, 0.55f, 0.55f, 0.52f);
+        gl::Uniform3f(uHumAmbient, 0.55f, 0.55f, 0.55f);
+        gl::Uniform3f(uHumFogColor, 0.0f, 0.0f, 0.0f);
+        gl::Uniform1f(uHumFogDensity, 0.0f);
+    }
+    gl::Disable(GL_CULL_FACE);
+    gl::BindVertexArray(humVAO);
+    gl::BindBuffer(GL_ARRAY_BUFFER, humVBO);
+    gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(solid.size() * sizeof(float)), solid.data(), GL_STREAM_DRAW);
+    gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(solid.size() / 7));
+    gl::BindVertexArray(0);
+}
+
 void Renderer::drawModelItemIcon(uint8_t block, const mat::Model& model, float x, float y, float size) {
     if (!fallVAO || size < 2.0f) return;
     std::vector<Vertex> mesh;
     mat::buildItemDisplayMesh(block, model, mesh);
-    if (mesh.empty()) return;
+    std::vector<float> solid;
+    if (!model.solids.empty()) {
+        mat::emitSolidMesh(model.solids, solid, [](float x, float y, float z) {
+            return Vec3{ x, y, z };
+        }, false);
+    }
+    if (mesh.empty() && solid.empty()) return;
 
     int vx = (int)std::floor(x);
     int vy = scrH - (int)std::floor(y + size);
@@ -1863,12 +1989,15 @@ void Renderer::drawModelItemIcon(uint8_t block, const mat::Model& model, float x
     gl::Uniform3f(uSunColor, 0.55f, 0.55f, 0.52f);
     gl::Uniform3f(uAmbient, 0.55f, 0.55f, 0.55f);
 
-    gl::BindVertexArray(fallVAO);
-    gl::BindBuffer(GL_ARRAY_BUFFER, fallVBO);
-    gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(mesh.size() * sizeof(Vertex)), mesh.data(), GL_STREAM_DRAW);
-    setVertexAttribs();
-    gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)mesh.size());
-    gl::BindVertexArray(0);
+    if (!mesh.empty()) {
+        gl::BindVertexArray(fallVAO);
+        gl::BindBuffer(GL_ARRAY_BUFFER, fallVBO);
+        gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(mesh.size() * sizeof(Vertex)), mesh.data(), GL_STREAM_DRAW);
+        setVertexAttribs();
+        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)mesh.size());
+        gl::BindVertexArray(0);
+    }
+    drawHumSolid(solid, mvp, nullptr, 0.0f);
 
     gl::Uniform1f(uBlockScale, cfg::BLOCK_SCALE);
     gl::Uniform1f(uFogDensity, cfg::FOG_DENSITY);
@@ -3157,6 +3286,7 @@ void Renderer::drawNote(UIState& ui) {
 }
 
 void Renderer::drawInventory(UIState& ui) {
+    ui.pointerInInventory = false;
     if (!ui.inventory) return;
     if (ui.noteRitual >= 0) {
         ui.noteX = 24.0f; ui.noteY = 16.0f; ui.noteW = 88.0f; ui.noteH = 32.0f;
@@ -3169,6 +3299,7 @@ void Renderer::drawInventory(UIState& ui) {
         centeredText("笔记", ui.noteX + ui.noteW * 0.5f, ui.noteY + ui.noteH * 0.5f, 1.0f, 0.95f, 0.9f, 0.75f, 1);
     }
     if (ui.noteOpen && ui.noteRitual >= 0) {
+        ui.pointerInInventory = true;
         drawNote(ui);
         return;
     }
@@ -3373,6 +3504,20 @@ void Renderer::drawInventory(UIState& ui) {
     const float py0 = hotY + slot + 16.0f;
     const float hotLabelY = carryY - 14.0f;
 
+    auto cover = [&](float x, float y, float w, float h, float pad = 8.0f) {
+        if (w <= 1.0f || h <= 1.0f) return;
+        if (ui.mouseX >= x - pad && ui.mouseX < x + w + pad
+            && ui.mouseY >= y - pad && ui.mouseY < y + h + pad)
+            ui.pointerInInventory = true;
+    };
+    cover(gx0, gy0, gridW, titleH + gridH);
+    cover(carryInvX, hotLabelY, (rightHX + groupW) - carryInvX, (hotY + slot) - hotLabelY);
+    cover(wearX, wearY0, wearS, wearTotal);
+    cover(bodyX, dollY, dollW, dollH);
+    if (survival) cover(barX, barY - 20.0f, barW, (float)nBars * barGap);
+    if (placeable > 0) cover(px0, py0, palW, palH);
+    if (ui.noteRitual >= 0) cover(ui.noteX, ui.noteY, ui.noteW, ui.noteH, 0.0f);
+
     quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.55f);
 
     for (int i = 0; i < cfg::MAIN_SLOTS; i++) {
@@ -3563,7 +3708,7 @@ void Renderer::drawInventory(UIState& ui) {
              "移动中背包锁定  |  仅可操作左右手栏  |  停下后可整理背包");
     } else {
         text(10, helpY, 0.7f, 0.85f, 0.85f, 0.85f, 0.9f,
-             survival ? "拖动=移动单个  |  Shift+拖动=移动整组  |  拖到身体左侧穿戴  |  肢体颜色=健康  槽=耐力"
-                      : "拖动=移动单个  |  Shift+拖动=移动整组  |  拖到身体左侧穿戴  |  点击下方方块=取一组");
+             survival ? "拖动=移动单个  |  Shift+拖动=移动整组  |  拖到左侧穿戴  |  拖出界面=丢弃  |  肢体颜色=健康"
+                      : "拖动=移动单个  |  Shift+拖动=移动整组  |  拖出界面=丢弃  |  点击下方方块=取一组");
     }
 }

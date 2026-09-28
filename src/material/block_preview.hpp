@@ -46,13 +46,15 @@ inline void buildBlockPreviewMesh(uint8_t block, const Model& model, std::vector
         }
         return;
     }
-    if (model.ok() && !model.cube) {
+    bool custom = !model.quads.empty() || modelHasSolidTex(model);
+    if (custom && !model.cube) {
         const BlockInfo& info = blockOf(block);
         emitModelMesh(model, out, [](float x, float y, float z) {
             return Vec3{ x - 0.5f, y - 0.5f, z - 0.5f };
         }, info.icon);
         return;
     }
+    if (!model.cube && !model.solids.empty()) return;
 
     const BlockInfo& info = blockOf(block);
     for (int f = 0; f < 6; f++) {
@@ -68,6 +70,11 @@ inline void buildBlockPreviewMesh(uint8_t block, const Model& model, std::vector
         }
         out.push_back(vv[0]); out.push_back(vv[1]); out.push_back(vv[2]);
         out.push_back(vv[0]); out.push_back(vv[2]); out.push_back(vv[3]);
+    }
+    if (custom) {
+        emitModelMesh(model, out, [](float x, float y, float z) {
+            return Vec3{ x - 0.5f, y - 0.5f, z - 0.5f };
+        }, info.icon);
     }
 }
 
