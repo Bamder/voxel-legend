@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "room_net.hpp"
+#include "room_body.hpp"
 #include "../core/config.hpp"
 #include "../world/animation.hpp"
 #include "../world/world.hpp"
@@ -74,6 +75,7 @@ struct SeenSlice {
 };
 
 struct SClient {
+    room_body::State body;
     NetConn conn;
     uint32_t id = 0;
     std::string name;
@@ -790,41 +792,21 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.landZ = c.z;
                     c.yaw = 0.4f;
                     c.pitch = -0.15f;
+                    room_body::spawn(c.body, {c.x, c.y, c.z});
+                    c.body.player.yaw = c.yaw;
+                    c.body.player.pitch = c.pitch;
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
                     if (!decodePlayInput(p, end, in)) continue;
-                    float keepX = c.x, keepY = c.y, keepZ = c.z;
-                    c.x = in.x;
-                    c.y = in.y;
-                    c.z = in.z;
-                    c.yaw = in.yaw;
-                    c.pitch = in.pitch;
-                    c.bodyYaw = in.bodyYaw;
-                    c.vx = in.vx;
-                    c.vz = in.vz;
-                    bool holdPos = !c.landed;
-                    if (!holdPos && c.fade > 0.0f) {
-                        float dx = c.x - c.landX;
-                        float dz = c.z - c.landZ;
-                        if (dx * dx + dz * dz > 9.0f) holdPos = true;
+                    if (!room_body::accept(c.body, in, serverTick)) continue;
+                    c.yaw = c.body.player.yaw;
+                    c.pitch = c.body.player.pitch;
+                    // Spectator coordinates drive streaming only, never combat.
+                    if (c.spectator) {
+                        if (!std::isfinite(in.x) || !std::isfinite(in.y) || !std::isfinite(in.z) ||
+                            std::fabs(in.x) > 100000 || std::fabs(in.y) > 100000 || std::fabs(in.z) > 100000) continue;
+                        c.x = in.x; c.y = in.y; c.z = in.z;
                     }
-                    if (holdPos) {
-                        c.x = keepX;
-                        c.y = keepY;
-                        c.z = keepZ;
-                        c.vx = 0.0f;
-                        c.vz = 0.0f;
-                    } else {
-                        Vec3 p{ c.x, c.y, c.z };
-                        Vec3 v{ c.vx, 0.0f, c.vz };
-                        matchmap::clampOutside(p, v);
-                        c.x = p.x;
-                        c.z = p.z;
-                        c.vx = v.x;
-                        c.vz = v.z;
-                    }
-                    c.flying = (in.flags & kPfFly) != 0;
-                    c.sprinting = (in.flags & kPfSprint) != 0;
                     c.heldL = in.heldL;
                     c.heldR = in.heldR;
                     c.carried = in.carried;
@@ -838,8 +820,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.mineCooldown = in.mineCooldown;
                     c.pickRaised = in.pickRaised;
                     c.hasInput = true;
-                    c.spectator = in.spectator || c.team == 0;
-                    if (!c.spectator && c.landed && !holdPos) {
+                    if (!c.spectator && c.landed && !c.body.player.dead) {
                         for (const PlayInputNet::MineEdit& e : in.mines) applyMine(world, e);
                         for (const BlockEditNet& e : in.edits) applyEdit(world, e);
                         for (const PlayInputNet::BarkEdit& e : in.bark) applyBark(world, e);
@@ -855,6 +836,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     if (!decodeDeploy(p, end, action, bx, bz)) continue;
                     if (c.spectator || c.team < 1 || c.team > matchmap::kCombatTeams) continue;
                     if (action == 2) {
+                        if (!c.body.player.dead) continue; // death is never a client declaration
                         c.landed = false;
                         c.deathDeploy = true;
                         c.pin = false;
@@ -944,6 +926,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 c.z = c.landZ;
                                 c.vx = 0.0f;
                                 c.vz = 0.0f;
+                                room_body::spawn(c.body, {c.x, c.y, c.z});
                             }
                         } else if (c.landed && c.fade > 0.0f) {
                             c.fade -= stepDt / matchmap::kDeployFade;
@@ -956,12 +939,22 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                 world.sodTick(2048, serverTick);
                 world.waterTick(serverTick);
                 noteAuth(srvChunks, world);
-                for (SClient& c : clients)
-                    if (c.sentWelcome) stepAvatar(c);
+                for (SClient& c : clients) {
+                    if (!c.sentWelcome) continue;
+                    if (!c.spectator) {
+                        room_body::tick(c.body, world, serverTick, c.landed, c.mineCharge > 0);
+                        const Player& p = c.body.player;
+                        c.x = p.pos.x; c.y = p.pos.y; c.z = p.pos.z;
+                        c.vx = p.vel.x; c.vz = p.vel.z;
+                        c.bodyYaw = p.bodyYaw; c.flying = false; c.sprinting = p.sprinting;
+                    }
+                    stepAvatar(c);
+                }
                 for (SClient& c : clients) {
                     if (!c.sentWelcome) continue;
                     PlayDeltaNet d;
                     d.serverTick = serverTick;
+                    d.body = room_body::snapshot(c.body, c.landed);
                     fillChunkSync(world, srvChunks, c, d, serverTick);
                     fillTrees(world, c, d, serverTick);
                     fillMines(world, c, d);

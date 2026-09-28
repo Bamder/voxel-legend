@@ -3,16 +3,22 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <cmath>
 #include "../core/config.hpp"
+#include "../world/vitals.hpp"
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609271431u;
+constexpr uint32_t kRoomProto = 2609281701u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
 constexpr uint8_t kPfFly = 2;
 constexpr uint8_t kPfGround = 4;
+
+// Movement intent, never a client position or simulation timestep.
+constexpr uint8_t kMoveForward = 1, kMoveBack = 2, kMoveLeft = 4, kMoveRight = 8;
+constexpr uint8_t kMoveJump = 16, kMoveSneak = 32, kMoveSprint = 64;
 
 constexpr uint8_t kStrikeNone = 0;
 constexpr uint8_t kStrikePunch = 1;
@@ -76,6 +82,7 @@ struct PlayerPoseNet {
 };
 
 struct PlayInputNet {
+    uint8_t movement = 0;
     float x = 0, y = 0, z = 0, yaw = 0, pitch = 0, bodyYaw = 0;
     float vx = 0, vz = 0;
     bool spectator = false;
@@ -421,6 +428,7 @@ inline bool decodePlayWelcome(const uint8_t* p, const uint8_t* end, uint32_t& id
 
 inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
     Buf b;
+    b.u8(in.movement);
     b.f32(in.x);
     b.f32(in.y);
     b.f32(in.z);
@@ -484,6 +492,7 @@ inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
 
 inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& in) {
     in = PlayInputNet{};
+    if (!Buf::u8(p, end, in.movement) || (in.movement & 128)) return false;
     uint8_t spec = 0;
     uint16_t n = 0;
     uint8_t raised = 0;
@@ -541,7 +550,15 @@ inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& 
     return true;
 }
 
+struct BodyStateNet {
+    float x = 0, y = 0, z = 0, vx = 0, vy = 0, vz = 0;
+    vitals::Vitals vitals;
+    vitals::Fatigue fatigue;
+    uint8_t flags = 0; // bit0: landed; bit1: grounded; bit2: in water
+};
+
 struct PlayDeltaNet {
+    BodyStateNet body; // recipient's authoritative body, fixed-size wire layout
     uint32_t serverTick = 0;
     std::vector<uint32_t> removed;
     std::vector<PlayerPoseNet> players;
@@ -559,6 +576,20 @@ struct PlayDeltaNet {
 inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
     Buf b;
     b.u32(d.serverTick);
+    b.f32(d.body.x); b.f32(d.body.y); b.f32(d.body.z);
+    b.f32(d.body.vx); b.f32(d.body.vy); b.f32(d.body.vz);
+    b.u8(d.body.flags);
+    for (const auto& limb : d.body.vitals.limb) {
+        b.f32(limb.health); b.f32(limb.stamina);
+    }
+    b.f32(d.body.vitals.hunger); b.f32(d.body.vitals.thirst);
+    b.f32(d.body.vitals.cardio); b.f32(d.body.vitals.inspire);
+    for (int i = 0; i < vitals::Count; ++i) {
+        b.u8(d.body.fatigue.emptied[i] ? 1 : 0);
+        b.f32(d.body.fatigue.recoverDelay[i]);
+    }
+    b.i32(d.body.fatigue.jumpChain); b.f32(d.body.fatigue.jumpChainTimer);
+    b.u8(d.body.fatigue.jumpChainArmed ? 1 : 0);
     b.u16((uint16_t)d.removed.size());
     for (uint32_t id : d.removed) b.u32(id);
     b.u16((uint16_t)d.players.size());
@@ -712,6 +743,30 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
 inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& d) {
     d = PlayDeltaNet{};
     if (!Buf::u32(p, end, d.serverTick)) return false;
+    auto finiteFloat = [&](float& value) {
+        return Buf::f32(p, end, value) && std::isfinite(value);
+    };
+    auto unitFloat = [&](float& value) {
+        return finiteFloat(value) && value >= 0 && value <= 1;
+    };
+    if (!finiteFloat(d.body.x) || !finiteFloat(d.body.y) || !finiteFloat(d.body.z) ||
+        !finiteFloat(d.body.vx) || !finiteFloat(d.body.vy) || !finiteFloat(d.body.vz) ||
+        !Buf::u8(p, end, d.body.flags) || (d.body.flags & ~7)) return false;
+    for (auto& limb : d.body.vitals.limb)
+        if (!unitFloat(limb.health) || !unitFloat(limb.stamina)) return false;
+    if (!unitFloat(d.body.vitals.hunger) || !unitFloat(d.body.vitals.thirst) ||
+        !unitFloat(d.body.vitals.cardio) || !unitFloat(d.body.vitals.inspire)) return false;
+    for (int i = 0; i < vitals::Count; ++i) {
+        uint8_t emptied = 0;
+        if (!Buf::u8(p, end, emptied) || emptied > 1 ||
+            !finiteFloat(d.body.fatigue.recoverDelay[i]) || d.body.fatigue.recoverDelay[i] < 0) return false;
+        d.body.fatigue.emptied[i] = emptied != 0;
+    }
+    uint8_t armed = 0;
+    if (!Buf::i32(p, end, d.body.fatigue.jumpChain) || d.body.fatigue.jumpChain < 0 ||
+        !finiteFloat(d.body.fatigue.jumpChainTimer) || d.body.fatigue.jumpChainTimer < 0 ||
+        !Buf::u8(p, end, armed) || armed > 1) return false;
+    d.body.fatigue.jumpChainArmed = armed != 0;
     uint16_t nr = 0;
     if (!Buf::u16(p, end, nr) || nr > 64) return false;
     d.removed.resize(nr);

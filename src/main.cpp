@@ -20,6 +20,7 @@
 #include "material/registry.hpp"
 #include "plugin/plugin.hpp"
 #include "net/room_net.hpp"
+#include "net/room_body.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -1392,6 +1393,7 @@ int main(int argc, char** argv) {
     float lobbyBroadcastAccum = 0.0f;
     bool lobbyDirty = false;
     float roomNetAccum = 0.0f;
+    uint8_t roomMovement = 0;
     struct ChunkNetState {
         uint32_t rev = 0;
         bool ready = false;
@@ -1478,6 +1480,7 @@ int main(int argc, char** argv) {
     };
 
     auto shutdownRoom = [&]() {
+        roomMovement = 0;
         lobbyHost.close();
         lobbyGuest.close();
         gameClient.close();
@@ -1818,6 +1821,7 @@ int main(int argc, char** argv) {
         if (death) gameClient.sendDeploy(2, 0, 0);
     };
     auto enterRoomPlay = [&]() {
+        roomMovement = 0;
         int team = gameClient.team();
         for (RoomPlayerView& rp : roomPlayers)
             if (rp.local) rp.team = team;
@@ -1990,6 +1994,19 @@ int main(int argc, char** argv) {
                 return;
             }
             for (PlayDeltaNet& d : gameClient.takeDeltas()) {
+                if (!spectating && !structureEdit) {
+                    player.vitals = d.body.vitals;
+                    player.fatigue = d.body.fatigue;
+                    player.dead = vitals::isDead(player.vitals);
+                    if (!deploying && !storyOpen && (d.body.flags & 1)) {
+                        player.pos = {d.body.x, d.body.y, d.body.z};
+                        player.vel = {d.body.vx, d.body.vy, d.body.vz};
+                        player.onGround = (d.body.flags & 2) != 0;
+                        player.inWater = (d.body.flags & 4) != 0;
+                        player.flying = player.noclip = false;
+                    }
+                    if (player.dead && !deploying) openDeploy(true);
+                }
                 if (!roomTickInit || d.serverTick > roomTick) {
                     roomTick = d.serverTick;
                     roomTickAt = std::chrono::steady_clock::now();
@@ -2227,6 +2244,8 @@ int main(int argc, char** argv) {
                 roomNetAccum = 0.0f;
                 size_t n = g_roomEdits.size() < 32 ? g_roomEdits.size() : 32;
                 PlayInputNet netIn;
+                netIn.movement = (g_focused && !paused && !deploying && !storyOpen && !player.dead)
+                    ? roomMovement : 0;
                 netIn.x = player.pos.x;
                 netIn.y = player.pos.y;
                 netIn.z = player.pos.z;
@@ -2513,6 +2532,10 @@ int main(int argc, char** argv) {
             in.forward = true;
             if ((frameCounter / 150) % 2 == 0) in.jump = true;
         }
+
+        roomMovement = (in.forward ? kMoveForward : 0) | (in.back ? kMoveBack : 0) |
+            (in.left ? kMoveLeft : 0) | (in.right ? kMoveRight : 0) |
+            (in.jump ? kMoveJump : 0) | (in.sneak ? kMoveSneak : 0) | (in.sprint ? kMoveSprint : 0);
 
         bool f3 = keyDown(VK_F3);
         if (playing && !roomSession && f3 && !prevF3) showDebug = !showDebug;
@@ -3487,7 +3510,9 @@ int main(int argc, char** argv) {
             else accumulator += dt;
             int sub = 0;
             while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS && !deploying && !storyOpen) {
-                player.update(world, in, cfg::FIXED_DT);
+                // Local motion is prediction only; server snapshots correct it.
+                player.update(world, in, cfg::FIXED_DT,
+                    roomSession && !spectating && !structureEdit ? room_body::limits(player, in) : MovementLimits{});
                 if (roomSession && !structureEdit)
                     matchmap::clampOutside(player.pos, player.vel);
                 if (!roomSession) world.treeFallPhysics(cfg::FIXED_DT);
@@ -3497,7 +3522,7 @@ int main(int argc, char** argv) {
                     em->strategy->onTick(ev);
                     em->strategy->think(ev);
                 }
-                if (!player.privilegeMode && !spectating) {
+                if (!player.privilegeMode && !spectating && !roomSession) {
                     vitals::TickInput vin;
                     vin.moving = in.forward || in.back || in.left || in.right;
                     vin.sprint = in.sprint && !player.flying && vitals::canSprint(player.vitals);
