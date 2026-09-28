@@ -827,7 +827,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
             const dropgeom::Shape& sh = dropgeom::cached(d.item);
             Vec3 box{ sh.half.x * 2.16f, sh.half.y * 2.16f, sh.half.z * 2.16f };
-            drawOutlineAt(vp, eye, d.pos, box, d.yaw, 1.0f, 1.0f, 1.0f, 0.95f);
+            drawOutlineAt(vp, eye, d.pos, box, d.ax, d.ay, d.az, 1.0f, 1.0f, 1.0f, 0.95f);
         } else if (ui.hasTarget) {
             if (ui.targetPhys >= 0 && ui.targetPhys < (int)world.physicsIslands().size()) {
                 const PhysicsIsland& t = world.physicsIslands()[(size_t)ui.targetPhys];
@@ -1061,8 +1061,7 @@ void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const 
     for (const loot::Drop& d : drops) {
         if (d.item == AIR || d.count == 0) continue;
         const dropgeom::Shape& sh = dropgeom::cached(d.item);
-        float c = std::cos(d.yaw), s = std::sin(d.yaw);
-        Mat4 R = Mat4::fromBasis({ c, 0, s }, { 0, 1, 0 }, { -s, 0, c });
+        Mat4 R = Mat4::fromBasis(d.ax, d.ay, d.az);
         Mat4 placed = Mat4::translate(d.pos - eye) * R;
         Vec3 chunkOff{ d.pos.x - eye.x, d.pos.y - eye.y, d.pos.z - eye.z };
 
@@ -1112,11 +1111,11 @@ void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::Disable(GL_BLEND);
 }
 
-void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size, float yaw,
+void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size,
+                             const Vec3& ax, const Vec3& ay, const Vec3& az,
                              float r, float g, float b, float a) {
     gl::UseProgram(progFlat);
-    float c = std::cos(yaw), s = std::sin(yaw);
-    Mat4 R = Mat4::fromBasis({ c, 0, s }, { 0, 1, 0 }, { -s, 0, c });
+    Mat4 R = Mat4::fromBasis(ax, ay, az);
     Mat4 model = Mat4::translate(center - eye) * R *
                  Mat4::scale(size) *
                  Mat4::translate({ -0.5f, -0.5f, -0.5f });

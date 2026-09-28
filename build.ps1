@@ -6,6 +6,7 @@
 # Run from this folder in Windows PowerShell:
 #   .\build.ps1
 $ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
 
 function Test-ExeLocked($path) {
     if (-not (Test-Path $path)) { return $false }

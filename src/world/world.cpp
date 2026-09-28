@@ -2357,11 +2357,24 @@ void World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Ve
             d.vel = vel;
             d.grounded = false;
         }
-        d.yaw = 0.0f;
-        d.spin = 0.0f;
-        if (!inPlace && dropgeom::cached(item).form != dropgeom::Form::Cube) {
-            d.yaw = (float)(m_drops.size() % 8) * 0.75f;
-            d.spin = (m_drops.size() & 1) ? 3.2f : -3.2f;
+        d.ax = { 1, 0, 0 };
+        d.ay = { 0, 1, 0 };
+        d.az = { 0, 0, 1 };
+        d.angVel = { 0, 0, 0 };
+        if (!inPlace) {
+            const dropgeom::Shape& sh = dropgeom::cached(item);
+            float radius = std::max(sh.half.y, 0.06f);
+            Vec3 horiz{ vel.x, 0.0f, vel.z };
+            float sp = std::sqrt(horiz.lengthSq());
+            if (sp > 0.15f) {
+                Vec3 axis = horiz.cross(Vec3{ 0, 1, 0 });
+                float al = std::sqrt(axis.lengthSq());
+                if (al > 1e-6f) d.angVel = axis * (sp / (al * radius));
+            }
+            float side = (m_drops.size() & 1) ? 1.0f : -1.0f;
+            d.angVel.x += 1.4f * side;
+            d.angVel.y += 0.7f * side;
+            d.angVel.z += 1.0f;
         }
         d.age = 0.0f;
         m_drops.push_back(d);
@@ -2379,10 +2392,9 @@ int World::raycastDrop(const Vec3& origin, const Vec3& dir, float maxDist, float
         const loot::Drop& d = m_drops[(size_t)i];
         if (d.item == AIR || d.count == 0) continue;
         const dropgeom::Shape& sh = dropgeom::cached(d.item);
-        float c = std::cos(d.yaw), s = std::sin(d.yaw);
         Vec3 rel = origin - d.pos;
-        Vec3 localO{ c * rel.x + s * rel.z, rel.y, -s * rel.x + c * rel.z };
-        Vec3 localD{ c * nd.x + s * nd.z, nd.y, -s * nd.x + c * nd.z };
+        Vec3 localO{ rel.dot(d.ax), rel.dot(d.ay), rel.dot(d.az) };
+        Vec3 localD{ nd.dot(d.ax), nd.dot(d.ay), nd.dot(d.az) };
         Vec3 mn{ -sh.half.x, -sh.half.y, -sh.half.z };
         Vec3 mx{ sh.half.x, sh.half.y, sh.half.z };
         float t = 0.0f;
@@ -2561,11 +2573,28 @@ void World::updateDrops(float dt) {
             m_drops.pop_back();
             continue;
         }
-        d.yaw += d.spin * dt;
         if (!d.grounded) d.vel.y -= cfg::GRAVITY * dt;
         d.vel.y = clampf(d.vel.y, -28.0f, 28.0f);
+        const dropgeom::Shape& sh = dropgeom::cached(d.item);
         float ex = 0.0f, ey = 0.0f, ez = 0.0f;
-        dropgeom::worldHalf(d.item, d.yaw, ex, ey, ez);
+        dropgeom::worldHalf(sh, d.ax, d.ay, d.az, ex, ey, ez);
+        Vec3 horiz{ d.vel.x, 0.0f, d.vel.z };
+        float hspeed = std::sqrt(horiz.lengthSq());
+        if (d.grounded && hspeed > 0.12f) {
+            Vec3 axis = horiz.cross(Vec3{ 0, 1, 0 });
+            float al = std::sqrt(axis.lengthSq());
+            if (al > 1e-6f) {
+                float radius = std::max(ey, 0.05f);
+                d.angVel = axis * (hspeed / (al * radius));
+            }
+        } else if (d.grounded) {
+            d.angVel = d.angVel * std::pow(0.04f, dt);
+            if (d.angVel.lengthSq() < 0.04f) d.angVel = { 0, 0, 0 };
+        }
+        float bottom = d.pos.y - ey;
+        dropgeom::spinBasis(d.ax, d.ay, d.az, d.angVel, dt);
+        dropgeom::worldHalf(sh, d.ax, d.ay, d.az, ex, ey, ez);
+        if (d.grounded) d.pos.y = bottom + ey;
 
         auto moveAxis = [&](int axis, float delta) {
             if (std::fabs(delta) < 1e-8f) return;
@@ -2602,8 +2631,13 @@ void World::updateDrops(float dt) {
                 float blockMid = (hy + 0.5f) * S;
                 if (prev >= blockMid) {
                     d.pos.y = hy * S + S + he + 1e-4f;
-                    if (d.vel.y < -2.4f) d.vel.y *= -0.28f;
-                    else {
+                    if (d.vel.y < -2.4f) {
+                        d.vel.y *= -0.28f;
+                        Vec3 slide{ d.vel.x, 0.0f, d.vel.z };
+                        Vec3 kick = slide.cross(Vec3{ 0, 1, 0 });
+                        float kl = std::sqrt(kick.lengthSq());
+                        if (kl > 1e-4f) d.angVel = d.angVel + kick * (2.2f / kl);
+                    } else {
                         d.vel.y = 0.0f;
                         d.grounded = true;
                     }
@@ -2622,10 +2656,8 @@ void World::updateDrops(float dt) {
         if (d.grounded) {
             d.vel.x *= std::pow(0.08f, dt);
             d.vel.z *= std::pow(0.08f, dt);
-            d.spin *= std::pow(0.12f, dt);
             if (std::fabs(d.vel.x) < 0.03f) d.vel.x = 0.0f;
             if (std::fabs(d.vel.z) < 0.03f) d.vel.z = 0.0f;
-            if (std::fabs(d.spin) < 0.05f) d.spin = 0.0f;
         }
         i++;
     }

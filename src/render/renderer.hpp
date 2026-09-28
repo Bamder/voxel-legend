@@ -322,7 +322,8 @@ private:
                              int lx, int ly, int lz, float r, float g, float b, float a);
     void drawOutline(const Mat4& vp, const Vec3& eye, const IVec3& block,
                      float r, float g, float b, float a);
-    void drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size, float yaw,
+    void drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size,
+                       const Vec3& ax, const Vec3& ay, const Vec3& az,
                        float r, float g, float b, float a);
     void drawBreakOverlay(const Mat4& vp, const Vec3& eye, const UIState& ui, const World& world);
     void drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,

@@ -8,7 +8,7 @@
 // Ground-drop shape. Placeable blocks stay a cube the size of one voxel.
 // Tools, worn equipment, and props use their own mesh: block-space models are
 // scaled by BLOCK_SCALE, garment parts stay in player space. The collision
-// box is that mesh's local AABB (yaw expands it on XZ).
+// box is that mesh's local AABB, expanded by the drop's full orientation.
 namespace dropgeom {
 
 enum class Form : uint8_t { Cube = 0, Model = 1, Garment = 2 };
@@ -104,13 +104,45 @@ inline const Shape& cached(uint8_t item) {
     return cache[item];
 }
 
-inline void worldHalf(uint8_t item, float yaw, float& ex, float& ey, float& ez) {
-    const Shape& s = cached(item);
-    float c = std::fabs(std::cos(yaw));
-    float sn = std::fabs(std::sin(yaw));
-    ex = c * s.half.x + sn * s.half.z;
-    ey = s.half.y;
-    ez = sn * s.half.x + c * s.half.z;
+inline void worldHalf(const Shape& s, const Vec3& ax, const Vec3& ay, const Vec3& az,
+                      float& ex, float& ey, float& ez) {
+    auto absf = [](float v) { return v < 0.0f ? -v : v; };
+    ex = absf(ax.x) * s.half.x + absf(ay.x) * s.half.y + absf(az.x) * s.half.z;
+    ey = absf(ax.y) * s.half.x + absf(ay.y) * s.half.y + absf(az.y) * s.half.z;
+    ez = absf(ax.z) * s.half.x + absf(ay.z) * s.half.y + absf(az.z) * s.half.z;
+    const float m = 0.02f;
+    if (ex < m) ex = m;
+    if (ey < m) ey = m;
+    if (ez < m) ez = m;
+}
+
+inline Vec3 rotateAbout(const Vec3& v, const Vec3& axis, float ang) {
+    float len = std::sqrt(axis.lengthSq());
+    if (len < 1e-8f || std::fabs(ang) < 1e-8f) return v;
+    Vec3 u = axis * (1.0f / len);
+    float c = std::cos(ang), s = std::sin(ang);
+    return v * c + u.cross(v) * s + u * (u.dot(v) * (1.0f - c));
+}
+
+// Turn the local axes by a world-space angular velocity and keep them orthonormal.
+inline void spinBasis(Vec3& ax, Vec3& ay, Vec3& az, const Vec3& angVel, float dt) {
+    float w2 = angVel.lengthSq();
+    if (w2 < 1e-10f || dt <= 0.0f) return;
+    float ang = std::sqrt(w2) * dt;
+    ax = rotateAbout(ax, angVel, ang);
+    ay = rotateAbout(ay, angVel, ang);
+    float lx = std::sqrt(ax.lengthSq());
+    ax = (lx < 1e-6f) ? Vec3{ 1, 0, 0 } : ax * (1.0f / lx);
+    ay = ay - ax * ay.dot(ax);
+    float ly = std::sqrt(ay.lengthSq());
+    if (ly < 1e-6f) {
+        Vec3 t = (std::fabs(ax.y) < 0.9f) ? Vec3{ 0, 1, 0 } : Vec3{ 1, 0, 0 };
+        ay = t - ax * t.dot(ax);
+        ly = std::sqrt(ay.lengthSq());
+        if (ly < 1e-6f) ly = 1.0f;
+    }
+    ay = ay * (1.0f / ly);
+    az = ax.cross(ay);
 }
 
 } // namespace dropgeom
