@@ -7,6 +7,7 @@ hardness 2.4
 durability 4
 efficiency 0
 weight 6
+friction 0.42
 tags 
 harvest_need axe
 harvest_drop planks 1

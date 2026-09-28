@@ -7,6 +7,7 @@ hardness 1.4
 durability 8.8
 efficiency 0
 weight 12
+friction 0.38
 tags 
 harvest_need shovel
 harvest_drop sand 1

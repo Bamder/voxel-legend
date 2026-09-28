@@ -37,6 +37,10 @@ struct BlockInfo {
     uint8_t texTop, texSide, texBottom;
     uint8_t icon;     // atlas tile used for hotbar / palette icon
     float weight;     // mass of one voxel (leaves << wood)
+    float friction;   // kinetic friction of this surface, 0 = slick, ~0.8 = rough
+    bool passable;    // bodies move through; the block is a resisting medium
+    float dragH;      // horizontal damping rate, 1/s (v *= exp(-drag * dt))
+    float dragV;      // vertical damping rate, 1/s
 };
 
 // enum Block values 0..BLOCK_COUNT-1 are the save/world-gen contract.
@@ -49,20 +53,33 @@ inline int liveBlockCount() { return g_blockCount; }
 inline bool validBlock(uint8_t b) { return b < liveBlockCount(); }
 inline const BlockInfo& blockOf(uint8_t b) {
     if (g_blockCount > 0 && b < g_blockCount) return g_blockInfo[b];
-    static const BlockInfo kMissing = { "?", false, false, false, false, 0, 0, 0, 0, 1.0f };
+    static const BlockInfo kMissing = {
+        "?", false, false, false, false, 0, 0, 0, 0, 1.0f, 0.0f, false, 0.0f, 0.0f
+    };
     return kMissing;
 }
 inline bool isOpaque(uint8_t b) { return validBlock(b) && blockOf(b).opaque; }
 inline bool isTransparent(uint8_t b) { return validBlock(b) && blockOf(b).transparent; }
 inline bool isSolid(uint8_t b) { return validBlock(b) && blockOf(b).collides; }
+inline bool isPassable(uint8_t b) { return validBlock(b) && blockOf(b).passable; }
+// A passable block is a medium, not a wall, even if collides was also set.
+inline bool blocksMotion(uint8_t b) { return isSolid(b) && !isPassable(b); }
 inline bool isLiquid(uint8_t b) { return validBlock(b) && blockOf(b).liquid; }
 inline bool isPassableCutout(uint8_t b) {
     return validBlock(b) && !blockOf(b).collides && !blockOf(b).liquid && !blockOf(b).transparent;
 }
 
-// Foliage blocks that slow the player the same way leaves do.
+// Tree and shrub foliage identity (crush, falling trees). Movement drag is BlockInfo::passable.
 inline bool isFoliage(uint8_t b) {
     return b == LEAVES || b == SHRUB_STEM || b == SHRUB_LEAF;
+}
+
+// Strongest passable medium overlapping a body wins on each axis.
+inline void accumPassableDrag(uint8_t b, float& dragH, float& dragV) {
+    if (!isPassable(b)) return;
+    const BlockInfo& info = blockOf(b);
+    if (info.dragH > dragH) dragH = info.dragH;
+    if (info.dragV > dragV) dragV = info.dragV;
 }
 
 inline bool isTreeWood(uint8_t b) { return b == LOG; }
@@ -88,6 +105,14 @@ inline float blockWeight(uint8_t b) {
     if (b == AIR || !validBlock(b)) return 0.0f;
     float w = blockOf(b).weight;
     return w > 0.0f ? w : 1.0f;
+}
+
+inline float blockFriction(uint8_t b) {
+    if (b == AIR || !validBlock(b)) return 0.0f;
+    float f = blockOf(b).friction;
+    if (f < 0.0f) return 0.0f;
+    if (f > 2.0f) return 2.0f;
+    return f;
 }
 
 constexpr uint8_t FLAG_ALIVE = 1;   // grown living tree wood and leaves

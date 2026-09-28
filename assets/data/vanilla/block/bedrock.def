@@ -7,4 +7,5 @@ hardness 100
 durability 10000
 efficiency 0
 weight 40
+friction 0.85
 tags 

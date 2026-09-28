@@ -36,6 +36,10 @@ struct ObjectDef {
     float chargeSec = 0.5f;
     float cooldownSec = 0.5f;
     float weight = 1.0f;
+    float friction = -1.0f; // < 0: keep the block's built-in coefficient
+    int passable = -1;       // < 0: keep the built-in flag; 0/1 otherwise
+    float dragH = -1.0f;     // < 0: keep the built-in horizontal drag
+    float dragV = -1.0f;     // < 0: keep the built-in vertical drag
     float wrongResist = loot::kDefaultWrongResist;
     uint32_t tags = 0;
     bool harvest = false;

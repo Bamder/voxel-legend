@@ -827,7 +827,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
             const dropgeom::Shape& sh = dropgeom::cached(d.item);
             Vec3 box{ sh.half.x * 2.16f, sh.half.y * 2.16f, sh.half.z * 2.16f };
-            drawOutlineAt(vp, eye, d.pos, box, d.yaw, 1.0f, 1.0f, 1.0f, 0.95f);
+            drawOutlineAt(vp, eye, d.pos, box, d.ax, d.ay, d.az, 1.0f, 1.0f, 1.0f, 0.95f);
         } else if (ui.hasTarget) {
             if (ui.targetPhys >= 0 && ui.targetPhys < (int)world.physicsIslands().size()) {
                 const PhysicsIsland& t = world.physicsIslands()[(size_t)ui.targetPhys];
@@ -1061,8 +1061,7 @@ void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const 
     for (const loot::Drop& d : drops) {
         if (d.item == AIR || d.count == 0) continue;
         const dropgeom::Shape& sh = dropgeom::cached(d.item);
-        float c = std::cos(d.yaw), s = std::sin(d.yaw);
-        Mat4 R = Mat4::fromBasis({ c, 0, s }, { 0, 1, 0 }, { -s, 0, c });
+        Mat4 R = Mat4::fromBasis(d.ax, d.ay, d.az);
         Mat4 placed = Mat4::translate(d.pos - eye) * R;
         Vec3 chunkOff{ d.pos.x - eye.x, d.pos.y - eye.y, d.pos.z - eye.z };
 
@@ -1112,11 +1111,11 @@ void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::Disable(GL_BLEND);
 }
 
-void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size, float yaw,
+void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size,
+                             const Vec3& ax, const Vec3& ay, const Vec3& az,
                              float r, float g, float b, float a) {
     gl::UseProgram(progFlat);
-    float c = std::cos(yaw), s = std::sin(yaw);
-    Mat4 R = Mat4::fromBasis({ c, 0, s }, { 0, 1, 0 }, { -s, 0, c });
+    Mat4 R = Mat4::fromBasis(ax, ay, az);
     Mat4 model = Mat4::translate(center - eye) * R *
                  Mat4::scale(size) *
                  Mat4::translate({ -0.5f, -0.5f, -0.5f });
@@ -2474,6 +2473,124 @@ void Renderer::drawWorldsMenu(UIState& ui) {
         centeredText(ui.menuMessage, scrW * 0.5f, (float)scrH - 28.0f, 0.85f, 0.85f, 0.95f, 0.55f, 1);
 }
 
+void Renderer::drawStructurePicker(UIState& ui) {
+    ui.structureItemHover = -1;
+    ui.structureDeleteHover = -1;
+    ui.structureBtnHover = -1;
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.05f, 0.05f, 0.06f, 0.94f);
+
+    if (ui.structureNaming) {
+        const float bw = 420.0f, bh = 52.0f;
+        const float bx = (scrW - bw) * 0.5f;
+        const float fieldY = scrH * 0.5f - 40.0f;
+        const float fieldH = 48.0f;
+        const float createY = fieldY + 80.0f;
+        const float backY = createY + bh + 14.0f;
+
+        bool fieldHover = (ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= fieldY && ui.mouseY < fieldY + fieldH);
+        if (fieldHover) ui.structureBtnHover = 0;
+        quad(bx, fieldY, bw, fieldH, 0, 0, 0, 0, 0.12f, 0.12f, 0.12f, 1.0f);
+        float ff = (ui.nameFieldActive || fieldHover) ? 0.22f : 0.16f;
+        quad(bx + 2, fieldY + 2, bw - 4, fieldH - 4, 0, 0, 0, 0, ff, ff, ff, 1.0f);
+        if (ui.nameFieldActive)
+            quad(bx, fieldY, bw, 2, 0, 0, 0, 0, 0.55f, 0.75f, 0.35f, 1.0f);
+
+        bool createHover = (ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= createY && ui.mouseY < createY + bh);
+        bool backHover = (ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= backY && ui.mouseY < backY + bh);
+        if (createHover) ui.structureBtnHover = 1;
+        if (backHover) ui.structureBtnHover = 2;
+        buttonChrome(bx, createY, bw, bh, createHover, 0.28f, 0.48f, 0.24f);
+        buttonChrome(bx, backY, bw, bh, backHover);
+        flushUI(progUI, whiteTex);
+
+        centeredText("新建建筑", scrW * 0.5f, scrH * 0.5f - 130.0f, 1.3f, 1, 1, 1, 1);
+        centeredText("建筑名称", scrW * 0.5f, fieldY - 22.0f, 0.9f, 0.85f, 0.85f, 0.85f, 1);
+        std::string shown = ui.structureNewName;
+        bool caret = ((int)(ui.timeOfDay / 10.0f) % 2) == 0;
+        if (ui.nameFieldActive && caret) shown += "|";
+        if (shown.empty())
+            centeredText("点击输入", bx + bw * 0.5f, fieldY + fieldH * 0.5f, 0.95f, 0.5f, 0.5f, 0.5f, 1);
+        else
+            centeredText(shown, bx + bw * 0.5f, fieldY + fieldH * 0.5f, 1.0f, 1, 1, 1, 1);
+        centeredText("创建", bx + bw * 0.5f, createY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+        centeredText("返回", bx + bw * 0.5f, backY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+        if (!ui.menuMessage.empty())
+            centeredText(ui.menuMessage, scrW * 0.5f, (float)scrH - 28.0f, 0.85f, 0.85f, 0.95f, 0.55f, 1);
+        return;
+    }
+
+    const float bw = 460.0f, bh = 48.0f, gap = 8.0f;
+    const float bx = (scrW - bw) * 0.5f;
+    const float titleY = 56.0f;
+    const int vis = 6;
+    const float listY = 118.0f;
+    const float btnH = 52.0f;
+    const float btnW = 200.0f;
+    const float delW = 96.0f;
+    const float nameW = bw - delW - 10.0f;
+
+    int n = (int)ui.structureNames.size();
+    int maxScroll = std::max(0, n - vis);
+    if (ui.structureScroll < 0) ui.structureScroll = 0;
+    if (ui.structureScroll > maxScroll) ui.structureScroll = maxScroll;
+
+    for (int i = 0; i < vis; i++) {
+        int idx = ui.structureScroll + i;
+        float y = listY + i * (bh + gap);
+        if (idx >= n) {
+            quad(bx, y, bw, bh, 0, 0, 0, 0, 0.10f, 0.10f, 0.10f, 0.35f);
+            continue;
+        }
+        float delX = bx + nameW + 10.0f;
+        bool delHover = (ui.mouseX >= delX && ui.mouseX < delX + delW &&
+                         ui.mouseY >= y && ui.mouseY < y + bh);
+        bool nameHover = !delHover && (ui.mouseX >= bx && ui.mouseX < bx + nameW &&
+                                       ui.mouseY >= y && ui.mouseY < y + bh);
+        if (delHover) ui.structureDeleteHover = idx;
+        if (nameHover) ui.structureItemHover = idx;
+        buttonChrome(bx, y, nameW, bh, nameHover);
+        bool armed = (ui.structurePendingDelete == ui.structureNames[idx]);
+        buttonChrome(delX, y, delW, bh, delHover,
+                     armed ? 0.62f : 0.50f,
+                     armed ? 0.16f : 0.22f,
+                     armed ? 0.14f : 0.18f);
+    }
+
+    float btnY = listY + vis * (bh + gap) + 18.0f;
+    float createX = ui.structureCanReturn ? (scrW * 0.5f - btnW - 12.0f) : ((scrW - btnW) * 0.5f);
+    float backX = scrW * 0.5f + 12.0f;
+    bool createHover = (ui.mouseX >= createX && ui.mouseX < createX + btnW && ui.mouseY >= btnY && ui.mouseY < btnY + btnH);
+    bool backHover = ui.structureCanReturn &&
+        (ui.mouseX >= backX && ui.mouseX < backX + btnW && ui.mouseY >= btnY && ui.mouseY < btnY + btnH);
+    if (createHover) ui.structureBtnHover = 0;
+    if (backHover) ui.structureBtnHover = 1;
+    buttonChrome(createX, btnY, btnW, btnH, createHover, 0.28f, 0.48f, 0.24f);
+    if (ui.structureCanReturn) buttonChrome(backX, btnY, btnW, btnH, backHover);
+    flushUI(progUI, whiteTex);
+
+    centeredText("选择建筑", scrW * 0.5f, titleY, 1.3f, 1, 1, 1, 1);
+    if (ui.structureCanReturn)
+        centeredText("载入后会替换当前建筑，未保存的修改会丢失", scrW * 0.5f, titleY + 28.0f, 0.75f, 0.75f, 0.75f, 0.7f, 1);
+    if (n == 0)
+        centeredText("还没有建筑，点击下方新建", scrW * 0.5f, listY + vis * (bh + gap) * 0.4f, 0.9f, 0.75f, 0.75f, 0.75f, 1);
+    for (int i = 0; i < vis; i++) {
+        int idx = ui.structureScroll + i;
+        if (idx >= n) break;
+        float y = listY + i * (bh + gap);
+        float delX = bx + nameW + 10.0f;
+        bool armed = (ui.structurePendingDelete == ui.structureNames[idx]);
+        centeredText(ui.structureNames[idx], bx + nameW * 0.5f, y + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+        centeredText(armed ? "确认" : "删除", delX + delW * 0.5f, y + bh * 0.5f, 0.95f, 1.0f, 0.82f, 0.78f, 1);
+    }
+    centeredText("新建", createX + btnW * 0.5f, btnY + btnH * 0.5f, 1.0f, 1, 1, 1, 1);
+    if (ui.structureCanReturn)
+        centeredText("返回", backX + btnW * 0.5f, btnY + btnH * 0.5f, 1.0f, 1, 1, 1, 1);
+    if (n > vis)
+        centeredText("滚轮翻页", scrW * 0.5f, btnY + btnH + 22.0f, 0.75f, 0.7f, 0.7f, 0.7f, 1);
+    if (!ui.menuMessage.empty())
+        centeredText(ui.menuMessage, scrW * 0.5f, (float)scrH - 28.0f, 0.85f, 0.85f, 0.95f, 0.55f, 1);
+}
+
 void Renderer::drawWorldDetail(UIState& ui) {
     const float bw = 400.0f, bh = 46.0f, gap = 8.0f;
     const float bx = (scrW - bw) * 0.5f;
@@ -2968,6 +3085,11 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
+    if (ui.structureEdit && ui.structurePicker) {
+        drawStructurePicker(ui);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
 
     const float cx = scrW * 0.5f;
     const float cy = scrH * 0.5f;
@@ -2981,7 +3103,7 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     const float carryY = hbY + slot - carryS;
     leftX = carryX + carryS + 12.0f;
     const bool carrying = ui.carrySlot && !ui.carrySlot->empty();
-    const bool fPrompt = carrying || ui.targetDrop >= 0;
+    const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0);
 
     CrosshairPrompt promptItems[4];
     int promptCount = 0;
@@ -2999,7 +3121,7 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     quad(cx - 1, cy - 9, 2, 18, 0, 0, 0, 0, 1, 1, 1, 0.9f);
     drawCrosshairPromptChrome(promptBoxes);
 
-    {
+    if (!ui.structureEdit) {
         float bg = carrying ? 0.50f : 0.22f;
         quad(carryX, carryY, carryS, carryS, 0, 0, 0, 0, 0.10f, 0.08f, 0.05f, bg + 0.15f);
         const float bw = 3.0f;
@@ -3010,46 +3132,44 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         quad(carryX - bw, carryY + carryS, carryS + 2 * bw, bw, 0, 0, 0, 0, br, bgc, bb, 0.95f);
         quad(carryX - bw, carryY, bw, carryS, 0, 0, 0, 0, br, bgc, bb, 0.95f);
         quad(carryX + carryS, carryY, bw, carryS, 0, 0, 0, 0, br, bgc, bb, 0.95f);
-    }
 
-    for (int i = 0; i < n; i++) {
-        float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
-        float bg = splitHotbarSelected(i, ui) ? (carrying ? 0.40f : 0.55f) : (carrying ? 0.18f : 0.28f);
-        quad(sx, hbY, slot, slot, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, bg);
-    }
-    for (int i = 0; i < n; i++) {
-        if (!splitHotbarSelected(i, ui)) continue;
-        float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
-        const float bw = 3.0f;
-        float a = carrying ? 0.45f : 0.95f;
-        quad(sx - bw, hbY - bw, slot + 2 * bw, bw, 0, 0, 0, 0, 1, 1, 1, a);
-        quad(sx - bw, hbY + slot, slot + 2 * bw, bw, 0, 0, 0, 0, 1, 1, 1, a);
-        quad(sx - bw, hbY, bw, slot, 0, 0, 0, 0, 1, 1, 1, a);
-        quad(sx + slot, hbY, bw, slot, 0, 0, 0, 0, 1, 1, 1, a);
-    }
-    flushUI(progUI, whiteTex);
+        for (int i = 0; i < n; i++) {
+            float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
+            float slotBg = splitHotbarSelected(i, ui) ? (carrying ? 0.40f : 0.55f) : (carrying ? 0.18f : 0.28f);
+            quad(sx, hbY, slot, slot, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, slotBg);
+        }
+        for (int i = 0; i < n; i++) {
+            if (!splitHotbarSelected(i, ui)) continue;
+            float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
+            const float border = 3.0f;
+            float a = carrying ? 0.45f : 0.95f;
+            quad(sx - border, hbY - border, slot + 2 * border, border, 0, 0, 0, 0, 1, 1, 1, a);
+            quad(sx - border, hbY + slot, slot + 2 * border, border, 0, 0, 0, 0, 1, 1, 1, a);
+            quad(sx - border, hbY, border, slot, 0, 0, 0, 0, 1, 1, 1, a);
+            quad(sx + slot, hbY, border, slot, 0, 0, 0, 0, 1, 1, 1, a);
+        }
+        flushUI(progUI, whiteTex);
 
-    // ---- icon pass (block atlas / 3D item models) ----
-    if (carrying) {
-        uint8_t b = ui.carrySlot->block;
-        if (b != AIR && b < liveBlockCount())
-            drawBlockIcon(b, carryX + 4, carryY + 4, carryS - 8);
-    }
-    for (int i = 0; i < n; i++) {
-        uint8_t b = ui.inventory ? ui.inventory[i].block : (uint8_t)AIR;
-        if (b == AIR || b >= liveBlockCount()) continue;
-        float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
-        drawBlockIcon(b, sx + 3, hbY + 3, slot - 6);
-    }
-    flushUI(progUI, atlasTex);
+        if (carrying) {
+            uint8_t b = ui.carrySlot->block;
+            if (b != AIR && b < liveBlockCount())
+                drawBlockIcon(b, carryX + 4, carryY + 4, carryS - 8);
+        }
+        for (int i = 0; i < n; i++) {
+            uint8_t b = ui.inventory ? ui.inventory[i].block : (uint8_t)AIR;
+            if (b == AIR || b >= liveBlockCount()) continue;
+            float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
+            drawBlockIcon(b, sx + 3, hbY + 3, slot - 6);
+        }
+        flushUI(progUI, atlasTex);
 
-    // ---- text pass ----
-    float barW = cfg::HAND_SLOTS * slot + (cfg::HAND_SLOTS - 1) * gap;
-    centeredText("搬运", carryX + carryS * 0.5f, carryY - 14.0f, 0.55f, 0.90f, 0.78f, 0.50f, 0.95f);
-    centeredText("左手  1-3", leftX + barW * 0.5f, hbY - 14.0f, 0.55f, 0.85f, 0.85f, 0.85f, carrying ? 0.55f : 0.9f);
-    centeredText("右手  4-6", rightX + barW * 0.5f, hbY - 14.0f, 0.55f, 0.85f, 0.85f, 0.85f, carrying ? 0.55f : 0.9f);
+        float barW = cfg::HAND_SLOTS * slot + (cfg::HAND_SLOTS - 1) * gap;
+        centeredText("搬运", carryX + carryS * 0.5f, carryY - 14.0f, 0.55f, 0.90f, 0.78f, 0.50f, 0.95f);
+        centeredText("左手  1-3", leftX + barW * 0.5f, hbY - 14.0f, 0.55f, 0.85f, 0.85f, 0.85f, carrying ? 0.55f : 0.9f);
+        centeredText("右手  4-6", rightX + barW * 0.5f, hbY - 14.0f, 0.55f, 0.85f, 0.85f, 0.85f, carrying ? 0.55f : 0.9f);
+    }
     drawCrosshairPromptText(promptBoxes);
-    if (ui.inventory) {
+    if (ui.inventory && !ui.structureEdit) {
         for (int i = 0; i < n; i++) {
             const ItemSlot& s = ui.inventory[i];
             if (s.empty() || s.count <= 1) continue;
@@ -3081,6 +3201,7 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     if (!ui.goalText.empty())
         centeredText(ui.goalText.c_str(), scrW * 0.5f, 28.0f, 1.0f, 0.95f, 0.92f, 0.78f, 1.0f);
 
+    ui.structureOpHover = -1;
     if (ui.structureEdit && ui.blockBarOpen) {
         std::vector<uint8_t> blocks;
         structure::collectBuildBlocks(blocks);
@@ -3114,6 +3235,31 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
             drawBlockIcon(blocks[(size_t)i], x + 4, y + 4, cell - 8);
         }
         centeredText("方块", x0 + cell, y0 - 22.0f, 0.8f, 1, 1, 1, 1);
+
+        const float opW = 248.0f;
+        const float opX = (float)scrW - opW - 16.0f;
+        const float opY = 40.0f;
+        const float opBtnH = 46.0f;
+        const float opBtnW = opW - 28.0f;
+        const float opBtnX = opX + 14.0f;
+        const float saveY = opY + 78.0f;
+        const float switchY = saveY + opBtnH + 10.0f;
+        const float opH = (switchY + opBtnH + 16.0f) - opY;
+        quad(opX, opY, opW, opH, 0, 0, 0, 0, 0.08f, 0.08f, 0.10f, 0.92f);
+        bool saveHover = ui.mouseX >= opBtnX && ui.mouseX < opBtnX + opBtnW
+            && ui.mouseY >= saveY && ui.mouseY < saveY + opBtnH;
+        bool switchHover = ui.mouseX >= opBtnX && ui.mouseX < opBtnX + opBtnW
+            && ui.mouseY >= switchY && ui.mouseY < switchY + opBtnH;
+        if (saveHover) ui.structureOpHover = 0;
+        if (switchHover) ui.structureOpHover = 1;
+        buttonChrome(opBtnX, saveY, opBtnW, opBtnH, saveHover, 0.28f, 0.48f, 0.24f);
+        buttonChrome(opBtnX, switchY, opBtnW, opBtnH, switchHover);
+        flushUI(progUI, whiteTex);
+        centeredText("操作", opX + opW * 0.5f, opY + 22.0f, 0.9f, 1, 1, 1, 1);
+        centeredText(ui.structureFile.empty() ? "未命名" : ui.structureFile,
+                     opX + opW * 0.5f, opY + 48.0f, 0.72f, 0.85f, 0.85f, 0.8f, 1);
+        centeredText("保存建筑", opBtnX + opBtnW * 0.5f, saveY + opBtnH * 0.5f, 0.95f, 1, 1, 1, 1);
+        centeredText("切换建筑文件", opBtnX + opBtnW * 0.5f, switchY + opBtnH * 0.5f, 0.9f, 1, 1, 1, 1);
     }
 
     gl::Enable(GL_DEPTH_TEST);

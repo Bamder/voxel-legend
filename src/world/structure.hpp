@@ -37,6 +37,13 @@ bool offeringPlaced(World& world, int ritual, int relic);
 bool inVolume(int x, int y, int z);
 bool paintFile(World& world, const std::string& path);
 bool saveFile(const World& world, const std::string& path);
+void clearVolume(World& world);
+
+bool validName(const std::string& name);
+std::string pathFor(const std::string& name);
+void listFiles(std::vector<std::string>& names);
+bool createFile(const std::string& name);
+bool deleteFile(const std::string& name);
 
 void collectBuildBlocks(std::vector<uint8_t>& out);
 

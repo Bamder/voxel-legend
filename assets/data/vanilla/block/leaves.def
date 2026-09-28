@@ -7,6 +7,10 @@ hardness 0.3
 durability 6.6
 efficiency 0
 weight 0.15
+friction 0.28
+passable yes
+drag_h 8
+drag_v 4
 tags 
 harvest_need shears
 harvest_drop leaves 1

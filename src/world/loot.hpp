@@ -130,8 +130,10 @@ void clearHarvest(uint8_t block);
 struct Drop {
     Vec3 pos{ 0, 0, 0 };
     Vec3 vel{ 0, 0, 0 };
-    float yaw = 0.0f;
-    float spin = 0.0f;
+    Vec3 ax{ 1, 0, 0 }; // local axes in world space; tumble updates these
+    Vec3 ay{ 0, 1, 0 };
+    Vec3 az{ 0, 0, 1 };
+    Vec3 angVel{ 0, 0, 0 }; // world-space radians / second
     float age = 0.0f;
     uint8_t item = AIR;
     uint8_t count = 1;

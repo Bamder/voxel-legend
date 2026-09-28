@@ -9,4 +9,5 @@ efficiency 2.5
 charge_sec 1
 cooldown_sec 1
 weight 1.2
+friction 0.55
 tags axe,woodworking,one_hand
