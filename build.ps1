@@ -36,11 +36,25 @@ function Explain-LinkFailure($name, $code) {
     exit $code
 }
 
+# Fold libgcc / libstdc++ into the exe so it runs on machines that do not have
+# MinGW on PATH. posix-thread toolchains (MSYS2) also need a static winpthread;
+# win32-thread MinGW-Builds does not ship that library.
+function Get-MingwRuntimeLinkFlags {
+    $flags = @("-static-libgcc", "-static-libstdc++")
+    $pthread = & g++ -print-file-name=libwinpthread.a
+    if ($pthread -and (Test-Path -LiteralPath $pthread)) {
+        $flags += @("-Wl,-Bstatic,--whole-archive", "-lwinpthread", "-Wl,--no-whole-archive,-Bdynamic")
+    }
+    return $flags
+}
+
+$rt = Get-MingwRuntimeLinkFlags
+
 function Build($name, $sources) {
     Fail-IfLocked $name
     Write-Output "Sources ($name):"
     $sources | ForEach-Object { Write-Output "  $_" }
-    & g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -finput-charset=UTF-8 -fexec-charset=UTF-8 @sources -o $name -lopengl32 -lgdi32 -luser32 -lgdiplus -lcomdlg32 -lws2_32
+    & g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -finput-charset=UTF-8 -fexec-charset=UTF-8 @sources -o $name @rt -lopengl32 -lgdi32 -luser32 -lgdiplus -lcomdlg32 -lws2_32
     if ($LASTEXITCODE -ne 0) { Explain-LinkFailure $name $LASTEXITCODE }
     Write-Output "BUILD OK -> $name"
 }
@@ -71,7 +85,7 @@ $editorSrc = @(
 ) | ForEach-Object { (Resolve-Path $_).Path }
 Write-Output "Sources (editor.exe):"
 $editorSrc | ForEach-Object { Write-Output "  $_" }
-& g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -finput-charset=UTF-8 -fexec-charset=UTF-8 @editorSrc -o editor.exe -lopengl32 -lgdi32 -luser32 -lgdiplus -lcomdlg32 -mwindows
+& g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type -finput-charset=UTF-8 -fexec-charset=UTF-8 @editorSrc -o editor.exe @rt -lopengl32 -lgdi32 -luser32 -lgdiplus -lcomdlg32 -mwindows
 if ($LASTEXITCODE -ne 0) { Explain-LinkFailure "editor.exe" $LASTEXITCODE }
 Write-Output "BUILD OK -> editor.exe"
 
