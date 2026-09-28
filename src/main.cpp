@@ -1425,6 +1425,11 @@ int main(int argc, char** argv) {
     int storyPhase = 0;
     float storyAlpha = 0.0f;
     bool structurePainted = false;
+    bool structurePicker = false;
+    bool structureNaming = false;
+    bool structureChosen = false;
+    bool structureCanReturn = false;
+    std::string structureNote;
     float saveFlash = 0.0f;
     constexpr int kRoomMinPlayers = 1;
     float tickSpeed = 1.0f;
@@ -2439,7 +2444,12 @@ int main(int argc, char** argv) {
 
     if (structureEdit) {
         structure::ensureLibrary();
-        if (structurePath.empty()) structurePath = structure::defaultPath();
+        structure::listFiles(ui.structureNames);
+        structurePath.clear();
+        structurePicker = true;
+        structureChosen = false;
+        structureCanReturn = false;
+        carry.clear();
         world.setSaveEnabled(false);
         world.setBuildCanvas(true);
         player.privilegeMode = true;
@@ -2447,6 +2457,7 @@ int main(int argc, char** argv) {
         player.setSpawn({ 12.0f, 10.0f, 18.0f });
         appScreen = AppScreen::Playing;
         ui.appScreen = AppScreen::Playing;
+        ui.structurePicker = true;
         firstLook = true;
     }
 
@@ -2495,8 +2506,78 @@ int main(int argc, char** argv) {
             player.flying = true;
             player.dead = false;
         }
-        bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen);
+        bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
+                        && !(structureEdit && structurePicker));
         bool lookLocked = (canMove && !inventoryOpen && !(structureEdit && blockBarOpen));
+
+        auto refreshStructureList = [&]() {
+            structure::listFiles(ui.structureNames);
+        };
+        auto openStructurePicker = [&](bool canReturn) {
+            refreshStructureList();
+            structurePicker = true;
+            structureNaming = false;
+            structureCanReturn = canReturn;
+            blockBarOpen = false;
+            ui.structurePendingDelete.clear();
+            ui.structureScroll = 0;
+            ui.menuMessage.clear();
+            g_textTarget = nullptr;
+            ui.nameFieldActive = false;
+            g_textDigits = false;
+        };
+        auto loadStructureFile = [&](const std::string& name) {
+            structurePath = structure::pathFor(name);
+            structureChosen = true;
+            structurePainted = false;
+            if (world.columnLoaded(0, 0)) {
+                structure::clearVolume(world);
+                structure::paintFile(world, structurePath);
+                structurePainted = true;
+            }
+            structurePicker = false;
+            structureNaming = false;
+            blockBarOpen = false;
+            ui.structurePendingDelete.clear();
+            ui.menuMessage.clear();
+            g_textTarget = nullptr;
+            ui.nameFieldActive = false;
+            firstLook = true;
+        };
+        auto tryCreateStructure = [&]() {
+            std::string name = ui.structureNewName;
+            while (!name.empty() && (unsigned char)name.front() <= 32) name.erase(name.begin());
+            while (!name.empty() && (unsigned char)name.back() <= 32) name.pop_back();
+            if (name.size() > 9) {
+                std::string tail = name.substr(name.size() - 9);
+                for (char& c : tail) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+                if (tail == ".vlstruct") name.resize(name.size() - 9);
+                while (!name.empty() && (unsigned char)name.back() <= 32) name.pop_back();
+            }
+            if (name.empty()) {
+                ui.menuMessage = "请输入名称";
+                return;
+            }
+            if (!structure::validName(name)) {
+                ui.menuMessage = "名称无效";
+                return;
+            }
+            if (!structure::createFile(name)) {
+                ui.menuMessage = "创建失败（名称可能已存在）";
+                return;
+            }
+            ui.structureNewName.clear();
+            loadStructureFile(name);
+        };
+        auto saveCurrentStructure = [&]() {
+            if (!structureChosen || structurePath.empty() || !structurePainted) {
+                structureNote = "还不能保存";
+                saveFlash = 2.0f;
+                return;
+            }
+            structureNote = structure::saveFile(world, structurePath) ? "已保存建筑" : "保存失败";
+            saveFlash = 2.0f;
+        };
 
         InputState in;
         if (canMove) {
@@ -2523,15 +2604,14 @@ int main(int argc, char** argv) {
         prevF = f;
         bool f5 = keyDown(VK_F5);
         if (playing && f5 && !prevF5 && !spectating && !structureEdit) ui.camMode = (ui.camMode + 1) % 3;
-        if (structureEdit && playing && f5 && !prevF5 && structurePainted) {
-            if (structure::saveFile(world, structurePath)) saveFlash = 2.0f;
-        }
+        if (structureEdit && playing && f5 && !prevF5 && !structurePicker)
+            saveCurrentStructure();
         if (spectating) ui.camMode = 0;
         prevF5 = f5;
         bool e = keyDown('E');
         if (playing && e && !prevE && !spectating && !deploying) {
             if (structureEdit) {
-                blockBarOpen = !blockBarOpen;
+                if (!structurePicker) blockBarOpen = !blockBarOpen;
             } else if (!paused) {
                 if (inventoryOpen && drag.active) endDrag(inv, worn, -1, -1, drag);
                 inventoryOpen = !inventoryOpen;
@@ -2593,6 +2673,24 @@ int main(int argc, char** argv) {
                 if (drag.active) endDrag(inv, worn, -1, -1, drag);
                 inventoryOpen = false;
             }
+            else if (structureEdit && structureNaming) {
+                structureNaming = false;
+                g_textTarget = nullptr;
+                ui.nameFieldActive = false;
+                ui.menuMessage.clear();
+            }
+            else if (structureEdit && structurePicker) {
+                if (structureCanReturn && structureChosen) {
+                    structurePicker = false;
+                    ui.menuMessage.clear();
+                    firstLook = true;
+                } else {
+                    paused = !paused;
+                }
+            }
+            else if (structureEdit && blockBarOpen) {
+                blockBarOpen = false;
+            }
             else paused = !paused;
         }
         prevEsc = esc;
@@ -2604,11 +2702,15 @@ int main(int argc, char** argv) {
                 if (appScreen == AppScreen::Worlds) ui.worldScroll -= steps;
                 if (appScreen == AppScreen::WorldDetail) ui.backupScroll -= steps;
             }
+        } else if (g_wheel != 0 && structureEdit && structurePicker && !structureNaming && !paused) {
+            int steps = g_wheel / 120;
+            if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
+            ui.structureScroll -= steps;
         } else if (g_wheel != 0 && structureEdit && blockBarOpen) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
             ui.blockBarScroll -= steps;
-        } else if (g_wheel != 0) {
+        } else if (g_wheel != 0 && !structureEdit) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
             const int n = cfg::HAND_SLOTS;
@@ -2765,7 +2867,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating) {
+        if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating && !structureEdit) {
             if (!inventoryOpen && !carry.empty()) {
                 dropCarriedBlock(world, player, carry);
             } else if (!inventoryOpen && ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
@@ -3125,6 +3227,59 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+            } else if (structureEdit && structurePicker && !paused) {
+                if (structureNaming && g_textSubmit) tryCreateStructure();
+                g_textSubmit = false;
+                if (lmb && !prevLmb) {
+                    if (structureNaming) {
+                        if (ui.structureBtnHover == 0) {
+                            ui.nameFieldActive = true;
+                            g_textTarget = &ui.structureNewName;
+                            g_textMax = 48;
+                        } else if (ui.structureBtnHover == 1) {
+                            tryCreateStructure();
+                        } else if (ui.structureBtnHover == 2) {
+                            structureNaming = false;
+                            g_textTarget = nullptr;
+                            ui.nameFieldActive = false;
+                            ui.menuMessage.clear();
+                        } else {
+                            ui.nameFieldActive = false;
+                            g_textTarget = nullptr;
+                        }
+                    } else if (ui.structureDeleteHover >= 0 && ui.structureDeleteHover < (int)ui.structureNames.size()) {
+                        const std::string& name = ui.structureNames[(size_t)ui.structureDeleteHover];
+                        if (ui.structurePendingDelete != name) {
+                            ui.structurePendingDelete = name;
+                            ui.menuMessage = "再点一次确认删除";
+                        } else if (!structure::deleteFile(name)) {
+                            ui.menuMessage = "删除失败";
+                        } else {
+                            ui.structurePendingDelete.clear();
+                            ui.menuMessage = "已删除";
+                            refreshStructureList();
+                        }
+                    } else if (ui.structureItemHover >= 0 && ui.structureItemHover < (int)ui.structureNames.size()) {
+                        loadStructureFile(ui.structureNames[(size_t)ui.structureItemHover]);
+                    } else if (ui.structureBtnHover == 0) {
+                        structureNaming = true;
+                        ui.structureNewName.clear();
+                        ui.nameFieldActive = true;
+                        g_textTarget = &ui.structureNewName;
+                        g_textMax = 48;
+                        g_textDigits = false;
+                        ui.menuMessage.clear();
+                        ui.structurePendingDelete.clear();
+                    } else if (ui.structureBtnHover == 1 && structureCanReturn && structureChosen) {
+                        structurePicker = false;
+                        ui.menuMessage.clear();
+                        g_textTarget = nullptr;
+                        ui.nameFieldActive = false;
+                        firstLook = true;
+                    } else {
+                        ui.structurePendingDelete.clear();
+                    }
+                }
             } else if (ui.matEditorOpen) {
                 const int T = tex::TILE;
                 static const float kPal[8][3] = {
@@ -3283,7 +3438,7 @@ int main(int argc, char** argv) {
                     player.vel = { 0, 0, 0 };
                     spawnPlayer();
                 }
-            } else if (!carry.empty()) {
+            } else if (!carry.empty() && !structureEdit) {
                 player.mineCharge = 0.0f;
                 player.mineCooldown -= dt;
                 if (player.mineCooldown < 0.0f) player.mineCooldown = 0.0f;
@@ -3320,6 +3475,10 @@ int main(int argc, char** argv) {
 
                 bool canMine = false;
                 uint8_t heldMine = AIR;
+                if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 0)
+                    saveCurrentStructure();
+                if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 1)
+                    openStructurePicker(true);
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.blockBarHover >= 0) {
                     std::vector<uint8_t> blocks;
                     structure::collectBuildBlocks(blocks);
@@ -3462,7 +3621,7 @@ int main(int argc, char** argv) {
         prevRmb = rmb;
 
         // 1-3 选左手，4-6 选右手；滚轮循环右手。
-        if (playing) {
+        if (playing && !structureEdit) {
             for (int i = 0; i < cfg::HAND_SLOTS; i++) {
                 if (keyDown('1' + i)) ui.selectedLeft = i;
                 if (keyDown('4' + i)) ui.selectedRight = i;
@@ -3533,7 +3692,8 @@ int main(int argc, char** argv) {
                 if (paintDeployColumns(world, deployOx, deployOz, deploySpan, deployPainted, deployPixels))
                     deployStamp++;
             }
-            if (structureEdit && !structurePainted && world.columnLoaded(0, 0)) {
+            if (structureEdit && structureChosen && !structurePainted && world.columnLoaded(0, 0)) {
+                structure::clearVolume(world);
                 structure::paintFile(world, structurePath);
                 structurePainted = true;
             }
@@ -3634,8 +3794,12 @@ int main(int argc, char** argv) {
             }
         }
         ui.structureEdit = structureEdit;
-        ui.blockBarOpen = structureEdit && blockBarOpen;
+        ui.blockBarOpen = structureEdit && blockBarOpen && !structurePicker;
         ui.structureBlock = editBlock;
+        ui.structurePicker = structurePicker;
+        ui.structureNaming = structureNaming;
+        ui.structureCanReturn = structureCanReturn && structureChosen;
+        ui.structureFile = structurePath.empty() ? std::string() : std::filesystem::path(structurePath).stem().string();
         if (roomSession) {
             float t = matchmap::outwardT(player.pos.x, player.pos.z);
             ui.borderT = t;
@@ -3690,8 +3854,10 @@ int main(int argc, char** argv) {
             }
         }
         if (saveFlash > 0.0f) saveFlash -= dt;
-        if (structureEdit) {
-            ui.goalText = (saveFlash > 0.0f) ? "已保存建筑" : "E 打开方块栏   左键拆除   右键放置   F5 保存";
+        if (structureEdit && !structurePicker) {
+            if (saveFlash > 0.0f) ui.goalText = structureNote;
+            else if (ui.structureFile.empty()) ui.goalText = "E 打开菜单   左键拆除   右键放置";
+            else ui.goalText = ui.structureFile + "    E 打开菜单   左键拆除   右键放置";
         } else {
             ui.goalText.clear();
         }

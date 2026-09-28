@@ -125,6 +125,18 @@ struct UIState {
     int blockBarHover = -1;
     int blockBarScroll = 0;
     uint8_t structureBlock = PLANKS;
+    bool structurePicker = false;
+    bool structureNaming = false;
+    bool structureCanReturn = false;
+    int structureItemHover = -1;
+    int structureDeleteHover = -1;
+    int structureBtnHover = -1;   // list: 0 new, 1 back; naming: 0 field, 1 create, 2 back
+    int structureOpHover = -1;    // 0 save, 1 switch file
+    int structureScroll = 0;
+    std::string structurePendingDelete;
+    std::vector<std::string> structureNames;
+    std::string structureNewName;
+    std::string structureFile;
     std::string goalText;
     bool deploying = false;
     const std::vector<uint8_t>* deployPixels = nullptr;
@@ -384,6 +396,7 @@ private:
     void drawRoomLoading(UIState& ui);
     void drawMenuPortrait(const World& world, float timeOfDay, UIState& ui);
     void drawWorldsMenu(UIState& ui);
+    void drawStructurePicker(UIState& ui);
     void drawWorldDetail(UIState& ui);
     void drawCreateWorld(UIState& ui);
     void drawInventory(UIState& ui);

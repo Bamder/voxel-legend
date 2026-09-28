@@ -317,7 +317,12 @@ bool saveFile(const World& world, const std::string& path) {
             }
         }
     }
-    if (maxX < minX) return writeBlueprint(path, makeRoom());
+    if (maxX < minX) {
+        Blueprint empty;
+        empty.sx = empty.sy = empty.sz = 1;
+        empty.blocks.assign(1, (uint8_t)AIR);
+        return writeBlueprint(path, empty);
+    }
     Blueprint b;
     b.sx = maxX - minX + 1;
     b.sy = maxY - minY + 1;
@@ -331,6 +336,76 @@ bool saveFile(const World& world, const std::string& path) {
         }
     }
     return writeBlueprint(path, b);
+}
+
+void clearVolume(World& world) {
+    for (int y = kEditY; y < kEditY + kEditH; y++) {
+        for (int z = kEditZ; z < kEditZ + kEditD; z++) {
+            for (int x = kEditX; x < kEditX + kEditW; x++) {
+                if (world.getBlock(x, y, z) != AIR)
+                    world.setBlock(x, y, z, AIR, false, true);
+            }
+        }
+    }
+}
+
+bool validName(const std::string& name) {
+    if (name.empty() || name.size() > 48) return false;
+    if (name == "." || name == "..") return false;
+    unsigned char tail = (unsigned char)name.back();
+    if (tail <= 32 || name.back() == '.') return false;
+    for (unsigned char c : name) {
+        if (c < 32) return false;
+        switch (c) {
+        case '\\': case '/': case ':': case '*': case '?':
+        case '"': case '<': case '>': case '|':
+            return false;
+        default: break;
+        }
+    }
+    std::string upper = name;
+    for (char& c : upper) if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    size_t dot = upper.find('.');
+    std::string stem = (dot == std::string::npos) ? upper : upper.substr(0, dot);
+    if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL") return false;
+    if (stem.size() == 4 && (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0)
+        && stem[3] >= '1' && stem[3] <= '9')
+        return false;
+    return true;
+}
+
+std::string pathFor(const std::string& name) {
+    return "assets/structures/" + name + ".vlstruct";
+}
+
+void listFiles(std::vector<std::string>& names) {
+    names.clear();
+    std::filesystem::path dir("assets/structures");
+    if (!std::filesystem::exists(dir)) return;
+    for (const auto& ent : std::filesystem::directory_iterator(dir)) {
+        if (!ent.is_regular_file()) continue;
+        if (ent.path().extension() != ".vlstruct") continue;
+        names.push_back(ent.path().stem().string());
+    }
+    std::sort(names.begin(), names.end());
+}
+
+bool createFile(const std::string& name) {
+    if (!validName(name)) return false;
+    std::string path = pathFor(name);
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) return false;
+    Blueprint empty;
+    empty.name = name;
+    empty.sx = empty.sy = empty.sz = 1;
+    empty.blocks.assign(1, (uint8_t)AIR);
+    return writeBlueprint(path, empty);
+}
+
+bool deleteFile(const std::string& name) {
+    if (!validName(name)) return false;
+    std::error_code ec;
+    return std::filesystem::remove(pathFor(name), ec) && !ec;
 }
 
 void collectBuildBlocks(std::vector<uint8_t>& out) {
