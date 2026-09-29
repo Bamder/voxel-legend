@@ -1383,6 +1383,8 @@ int main(int argc, char** argv) {
     bool paused = false;
     bool settingsOpen = false;
     bool inventoryOpen = false;
+    std::vector<TrainingTarget> targets;
+    int targetPanel = -1;
     bool showDebug = false;
     bool debugMenuOpen = false;
     bool humidityMode = false;
@@ -1601,6 +1603,8 @@ int main(int argc, char** argv) {
         paused = false;
         settingsOpen = false;
         inventoryOpen = false;
+        targets.clear();
+        targetPanel = -1;
         debugMenuOpen = false;
         ui.matEditorOpen = false;
         accumulator = 0.0f;
@@ -1700,6 +1704,8 @@ int main(int argc, char** argv) {
         paused = false;
         settingsOpen = false;
         inventoryOpen = false;
+        targets.clear();
+        targetPanel = -1;
         debugMenuOpen = false;
         ui.matEditorOpen = false;
         ui.dummyActive = false;
@@ -2078,6 +2084,8 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < cfg::INVENTORY_SLOTS; i++) inv[i].clear();
                 for (int i = 0; i < wear::Count; i++) worn[i].clear();
                 carry.clear();
+                targets.clear();
+                targetPanel = -1;
                 timeOfDay = 6000.0f;
                 player.setSpawn({ gameClient.spawnX(), gameClient.spawnY(), gameClient.spawnZ() });
                 player.yaw = 0.4f;
@@ -2718,9 +2726,10 @@ int main(int argc, char** argv) {
             player.dead = false;
         }
         if (!player.privilegeMode || roomSession || structureEdit) ui.quickBreak = false;
+        if (player.dead) targetPanel = -1;
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
                         && !(structureEdit && structurePicker));
-        bool lookLocked = (canMove && !inventoryOpen && !(structureEdit && blockBarOpen));
+        bool lookLocked = (canMove && !inventoryOpen && targetPanel < 0 && !(structureEdit && blockBarOpen));
 
         auto refreshStructureList = [&]() {
             structure::listFiles(ui.structureNames);
@@ -2829,10 +2838,14 @@ int main(int argc, char** argv) {
             if (structureEdit) {
                 if (!structurePicker) blockBarOpen = !blockBarOpen;
             } else if (!paused) {
-                if (inventoryOpen && drag.active) endDrag(inv, worn, -1, -1, drag);
-                inventoryOpen = !inventoryOpen;
-                ui.noteOpen = false;
-                if (inventoryOpen) { drag.active = false; drag.block = AIR; drag.count = 0; drag.sourceSlot = -1; drag.sourceWear = -1; }
+                if (targetPanel >= 0) {
+                    targetPanel = -1;
+                } else {
+                    if (inventoryOpen && drag.active) endDrag(inv, worn, -1, -1, drag);
+                    inventoryOpen = !inventoryOpen;
+                    ui.noteOpen = false;
+                    if (inventoryOpen) { drag.active = false; drag.block = AIR; drag.count = 0; drag.sourceSlot = -1; drag.sourceWear = -1; }
+                }
             }
         }
         prevE = e;
@@ -2885,6 +2898,9 @@ int main(int argc, char** argv) {
             else if (deploying) {
             }
             else if (storyOpen) {
+            }
+            else if (targetPanel >= 0) {
+                targetPanel = -1;
             }
             else if (inventoryOpen) {
                 if (drag.active) endDrag(inv, worn, -1, -1, drag);
@@ -3049,7 +3065,9 @@ int main(int argc, char** argv) {
         int dropHit = -1;
         float dropT = cfg::REACH + 1.0f;
         bool entityTarget = false;
+        float entityDist = 1.0e9f;
         uint8_t entityAttackHand = 1;
+        int dummyAim = -1;
         bool arcaneCastClick = false;
         if (playing) {
             hitOk = world.raycast(player.eye(), player.lookDir(), cfg::REACH, hit, prev, nrm, &physHit, &hitT);
@@ -3082,7 +3100,11 @@ int main(int argc, char** argv) {
                         if (remote.spectator || remote.dead || remoteTeam == gameClient.team()) continue;
                         auto entity = combat::rayPlayer(player.eye(), player.lookDir(), remote.pos,
                                                         remote.bodyYaw, def->reach, best);
-                        if (entity && entity->distance < best) { best = entity->distance; entityTarget = true; }
+                        if (entity && entity->distance < best) {
+                            best = entity->distance;
+                            entityDist = entity->distance;
+                            entityTarget = true;
+                        }
                     }
                     if (entityTarget) { hitOk = false; physHit = -1; dropHit = -1; }
                 }
@@ -3132,9 +3154,48 @@ int main(int argc, char** argv) {
             };
             ui.guardianHurt = 1.0f - (float)guardianHit.hp / (float)guardianHit.maxHp;
         }
+        if (playing && !inventoryOpen && !paused && !spectating && !structureEdit &&
+            !player.dead && targetPanel < 0) {
+            float limit = cfg::REACH;
+            if (hitOk) limit = std::min(limit, hitT);
+            if (dropHit >= 0) limit = std::min(limit, dropT);
+            if (guardianRelic >= 0) limit = std::min(limit, guardianT);
+            if (entityTarget) limit = std::min(limit, entityDist);
+            float bestDummy = limit;
+            for (int i = 0; i < (int)targets.size(); ++i) {
+                auto hit = combat::rayPlayer(player.eye(), player.lookDir(), targets[(size_t)i].feet,
+                                             targets[(size_t)i].yaw, limit, bestDummy);
+                if (hit && hit->distance < bestDummy) {
+                    bestDummy = hit->distance;
+                    dummyAim = i;
+                }
+            }
+            if (dummyAim >= 0) {
+                hitOk = false;
+                physHit = -1;
+                dropHit = -1;
+                guardianRelic = -1;
+                entityTarget = false;
+            }
+        }
+        ui.targetGuardian = guardianRelic;
         ui.hasTarget = hitOk && !inventoryOpen && !paused && playing && !spectating;
         ui.targetBlock = hit;
         ui.hasPlacePreview = false;
+        ui.targetPlaceReady = false;
+        if (hitOk && physHit < 0 && !player.dead && carry.empty() && lookLocked && targetPanel < 0) {
+            auto heldTarget = [&](int slot) {
+                return slot >= 0 && slot < cfg::INVENTORY_SLOTS && !inv[slot].empty()
+                    && inv[slot].block == ITEM_TARGET;
+            };
+            int slot = heldTarget(ui.selectedSlot) ? ui.selectedSlot
+                     : (heldTarget(ui.selectedLeft) ? ui.selectedLeft : -1);
+            if (slot >= 0) {
+                uint8_t beside = world.getBlock(prev.x, prev.y, prev.z);
+                if ((beside == AIR || isLiquid(beside)) && !playerOverlapsCell(prev, player.pos))
+                    ui.targetPlaceReady = true;
+            }
+        }
         if (ui.hasTarget && physHit < 0 && !player.dead && !carry.empty()
             && hold::isCarryBlock(carry.block)
             && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
@@ -3191,7 +3252,11 @@ int main(int argc, char** argv) {
         }
 
         if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating && !structureEdit) {
-            if (!inventoryOpen && !carry.empty()) {
+            if (targetPanel >= 0) {
+                targetPanel = -1;
+            } else if (!inventoryOpen && dummyAim >= 0) {
+                targetPanel = dummyAim;
+            } else if (!inventoryOpen && !carry.empty()) {
                 if (!roomSession) dropCarriedBlock(world, player, carry);
             } else if (!inventoryOpen && ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
                 const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
@@ -3776,6 +3841,20 @@ int main(int argc, char** argv) {
                     if (drag.active) endDrag(inv, worn, -1, -1, drag);
                     else inventoryOpen = false;
                 }
+            } else if (targetPanel >= 0) {
+                player.mineCharge = 0.0f;
+                player.mineCooldown = 0.0f;
+                player.strikeName.clear();
+                player.pickRaised = false;
+                if (lmb && !prevLmb && targetPanel < (int)targets.size()) {
+                    if (ui.targetBtnHover == 0) {
+                        targets.erase(targets.begin() + targetPanel);
+                        targetPanel = -1;
+                        dummyAim = -1;
+                    } else if (ui.targetBtnHover == 1) {
+                        vitals::reset(targets[(size_t)targetPanel].vitals);
+                    }
+                }
             } else if (player.dead && !deploying) {
                 player.strikeName.clear();
                 player.pickRaised = false;
@@ -3824,7 +3903,9 @@ int main(int argc, char** argv) {
 
                 bool canMine = false;
                 bool guardianSwing = false;
+                bool dummySwing = false;
                 uint8_t heldMine = AIR;
+                uint8_t heldDummy = AIR;
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 0)
                     saveCurrentStructure();
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 1)
@@ -3843,6 +3924,17 @@ int main(int argc, char** argv) {
                 if (!structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead && !spectating) {
                     guardianSwing = true;
                     heldMine = inv[ui.selectedSlot].block;
+                }
+                if (!structureEdit && lmb && dummyAim >= 0 && lookLocked && !player.dead && !spectating) {
+                    int rightSlot = ui.selectedSlot;
+                    int leftSlot = ui.selectedLeft;
+                    if (rightSlot >= 0 && rightSlot < cfg::HOTBAR_SLOTS &&
+                        combat::slotUsable(player.vitals, rightSlot) && combat::weapon(inv[rightSlot].block))
+                        heldDummy = inv[rightSlot].block;
+                    else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
+                             combat::slotUsable(player.vitals, leftSlot) && combat::weapon(inv[leftSlot].block))
+                        heldDummy = inv[leftSlot].block;
+                    if (heldDummy != AIR) dummySwing = true;
                 }
                 if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
                     heldMine = inv[ui.selectedSlot].block;
@@ -3881,6 +3973,7 @@ int main(int argc, char** argv) {
                         player.pickRaised = false;
                         canMine = false;
                         guardianSwing = false;
+                        dummySwing = false;
                         // A click stays down for several frames. Space the breaks so one
                         // click removes a single block; holding keeps breaking at this rate.
                         if (ui.quickBreakWait <= 0.0f) {
@@ -3889,7 +3982,7 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
-                if (!canMine && !guardianSwing) {
+                if (!canMine && !guardianSwing && !dummySwing) {
                     player.mineCharge = 0.0f;
                 } else if (player.mineCooldown > 0.0f) {
                     // Cooling down: holding or click-spam cannot skip this.
@@ -3934,6 +4027,54 @@ int main(int argc, char** argv) {
                                 Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
                                 world.spawnDrop(dropPos, item, 1, true);
                             }
+                        }
+                    }
+                } else if (dummySwing) {
+                    auto def = combat::weapon(heldDummy);
+                    bool axe = hasItemTags(heldDummy, TAG_AXE);
+                    bool pick = hasItemTags(heldDummy, TAG_PICK);
+                    if (player.strikeName.empty()
+                        || (axe && player.strikeName != "axe_chop")
+                        || (pick && player.strikeName != "pick_mine")) {
+                        player.strikeName = axe ? "axe_chop" : "pick_mine";
+                        if (!pick) player.pickRaised = false;
+                        player.strikeCharge = axe ? anim::axeChopSec()
+                            : (player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec());
+                        player.strikeCool = axe ? loot::mineCooldownSec(heldDummy) : anim::pickUpSec();
+                    }
+                    player.mineCharge += dt;
+                    float need = axe ? anim::axeChopSec()
+                                     : (player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec());
+                    float recover = axe ? loot::mineCooldownSec(heldDummy) : anim::pickUpSec();
+                    player.strikeCharge = need;
+                    player.strikeCool = recover;
+                    if (player.mineCharge >= need && def) {
+                        player.mineCharge = 0.0f;
+                        player.mineCooldown = recover;
+                        if (pick) player.pickRaised = true;
+                        float obstruction = def->reach + 0.01f;
+                        IVec3 blockHit{}, prevHit{};
+                        Vec3 hitNormal{};
+                        float blockT = obstruction;
+                        if (world.raycast(player.eye(), player.lookDir(), def->reach,
+                                          blockHit, prevHit, hitNormal, nullptr, &blockT))
+                            obstruction = blockT;
+                        int best = -1;
+                        std::optional<combat::LimbHit> bestHit;
+                        for (int i = 0; i < (int)targets.size(); ++i) {
+                            auto hit = combat::rayPlayer(player.eye(), player.lookDir(),
+                                                         targets[(size_t)i].feet, targets[(size_t)i].yaw,
+                                                         def->reach, obstruction);
+                            if (hit && (!bestHit || hit->distance < bestHit->distance)) {
+                                bestHit = hit;
+                                best = i;
+                            }
+                        }
+                        if (best >= 0 && bestHit) {
+                            combat::DamageSource source{ 1, 1, def->item, combat::DamageCategory::Physical };
+                            auto result = combat::damagePlayer(targets[(size_t)best].vitals, source,
+                                                               def->damage, bestHit->limb);
+                            if (result.applied) hitMarker = 0.22f;
                         }
                     }
                 } else {
@@ -3993,7 +4134,30 @@ int main(int argc, char** argv) {
                     player.strikeName.clear();
                     player.pickRaised = false;
                 }
-                if (!structureEdit && rmb && !prevRmb && hitOk && !arcaneCastClick) {
+                if (!structureEdit && rmb && !prevRmb && hitOk && !arcaneCastClick && ui.targetPlaceReady) {
+                    int slot = (!inv[ui.selectedSlot].empty() && inv[ui.selectedSlot].block == ITEM_TARGET)
+                        ? ui.selectedSlot : ui.selectedLeft;
+                    if (slot >= 0 && slot < cfg::INVENTORY_SLOTS && !inv[slot].empty()
+                        && inv[slot].block == ITEM_TARGET) {
+                        const float S = cfg::BLOCK_SCALE;
+                        TrainingTarget placed;
+                        placed.feet = { (prev.x + 0.5f) * S, prev.y * S, (prev.z + 0.5f) * S };
+                        float dx = player.pos.x - placed.feet.x;
+                        float dz = player.pos.z - placed.feet.z;
+                        placed.yaw = std::atan2(dx, -dz);
+                        bool stacked = false;
+                        for (const TrainingTarget& old : targets) {
+                            float ox = old.feet.x - placed.feet.x;
+                            float oy = old.feet.y - placed.feet.y;
+                            float oz = old.feet.z - placed.feet.z;
+                            if (ox * ox + oy * oy + oz * oz < 0.16f) stacked = true;
+                        }
+                        if (!stacked) {
+                            targets.push_back(placed);
+                            if (--inv[slot].count == 0) inv[slot].clear();
+                        }
+                    }
+                } else if (!structureEdit && rmb && !prevRmb && hitOk && !arcaneCastClick) {
                     if (roomSession && !combat::slotUsable(player.vitals, ui.selectedSlot)) {
                         // A destroyed right hand preserves the slot but cannot use it.
                     } else
@@ -4183,6 +4347,9 @@ int main(int argc, char** argv) {
 
         ui.showDebug = roomSession ? false : showDebug;
         ui.inventoryOpen = inventoryOpen;
+        ui.targets = &targets;
+        ui.targetAim = targetPanel >= 0 ? -1 : dummyAim;
+        ui.targetPanel = targetPanel;
         ui.bagLocked = inventoryOpen && (in.forward || in.back || in.left || in.right
             || (player.vel.x * player.vel.x + player.vel.z * player.vel.z) > 0.16f);
         ui.appScreen = appScreen;

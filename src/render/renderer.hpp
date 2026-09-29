@@ -7,6 +7,7 @@
 #include "../world/player.hpp"
 #include "../world/world.hpp"
 #include "../world/vitals.hpp"
+#include "../world/target.hpp"
 
 namespace anim { struct Clip; }
 namespace mat { struct Model; }
@@ -93,6 +94,11 @@ struct UIState {
     int targetFace = 0;
     int targetPhys = -1;
     int targetDrop = -1;
+    const std::vector<TrainingTarget>* targets = nullptr;
+    int targetAim = -1;          // training dummy under the crosshair
+    int targetPanel = -1;        // open status panel, index into targets
+    int targetBtnHover = -1;     // 0 dismantle, 1 reset health
+    bool targetPlaceReady = false;
     int targetGuardian = -1; // relic index while the crosshair is on its guardian
     Vec3 guardianCenter{ 0, 0, 0 };
     Vec3 guardianSize{ 1, 1, 1 };
@@ -385,7 +391,8 @@ private:
                          const vitals::Vitals* tint = nullptr,
                          const anim::Clip* strike = nullptr, float strikeAt = 0.0f,
                          const Sky* sun = nullptr,
-                         uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR);
+                         uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR,
+                         bool bare = false);
     void drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun);
     void drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
                            const UIState& ui, bool firstPerson);
@@ -440,7 +447,9 @@ private:
     void drawCreateWorld(UIState& ui);
     void drawInventory(UIState& ui);
     void drawNote(UIState& ui);
-    void drawInventoryDoll(UIState& ui, float x, float y, float w, float h);
+    void drawInventoryDoll(UIState& ui, float x, float y, float w, float h,
+                           const vitals::Vitals* health = nullptr, bool showStamina = true);
+    void drawTargetPanel(UIState& ui);
     void drawDeath(UIState& ui);
     void drawMaterialEditor(UIState& ui);
     void paletteLayout(int& x0, int& y0, int& cell, int& cols, int& rows) const;

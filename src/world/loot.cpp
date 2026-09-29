@@ -53,6 +53,7 @@ void fillBuiltin() {
     for (int i = ITEM_ELEM_CORE; i <= ITEM_EYELESS; i++)
         kind((uint8_t)i, Kind::Item, 1);
     kind(ITEM_ARCANE_FIREBALL, Kind::Item, 8);
+    kind(ITEM_TARGET, Kind::Item, 16);
 
     auto blk = [](uint8_t id, float h, float d) {
         g_block[id] = { h, d, 0.0f };

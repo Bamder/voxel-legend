@@ -18,3 +18,5 @@ hold item * clip hold_block side right bone chest grip 0.5000 0.5000 0.5000 offs
 hold item * clip hold_block side left bone chest grip 0.5000 0.5000 0.5000 offset 0.00000 -0.13000 0.34000 rot 0.00000 0.00000 0.00000 scale 0.3600
 hold item * clip tuck_r side right bone chest grip 0.5000 0.5000 0.5000 offset 0.08000 -0.13000 0.24000 rot 0.00000 0.00000 0.00000 scale 0.2400
 hold item * clip tuck_l side left bone chest grip 0.5000 0.5000 0.5000 offset -0.08000 -0.13000 0.24000 rot 0.00000 0.00000 0.00000 scale 0.2400
+hold item 标靶 clip * side right bone arm_r_palm grip 0.5000 0.0600 0.5000 offset 0.00000 -0.02000 0.04000 rot 0.00000 0.00000 0.00000 scale 0.5200
+hold item 标靶 clip * side left bone arm_l_palm grip 0.5000 0.0600 0.5000 offset 0.00000 -0.02000 0.04000 rot 0.00000 0.00000 0.00000 scale 0.5200

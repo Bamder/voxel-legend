@@ -65,6 +65,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "无目雕像", true, false, true, false, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, 0.55f, 0.58f, false, 0.0f, 0.0f },
     { "火球术卷轴", false, false, false, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "灰白石", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 40.00f, 0.80f, false, 0.0f, 0.0f },
+    { "标靶", false, false, false, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 1.00f, 0.50f, false, 0.0f, 0.0f },
 };
 static_assert(sizeof(kBlocks) / sizeof(kBlocks[0]) == BLOCK_COUNT, "BasicConstruction block table size mismatch");
 
@@ -79,11 +80,12 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "elem_core", "prim_fire", "still_water", "life_sprout", "root_weave",
     "judge_scale", "gold_crown", "judge_tome", "scale_glass", "cycle_mark",
     "abyss_prism", "ancient_totem", "echo_rune", "old_bones", "eyeless", "arcane_fireball",
-    "arena_shell",
+    "arena_shell", "target_dummy",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
 
 bool inCreative(uint8_t id) {
+    if (id == ITEM_TARGET) return true;
     if (id >= ITEM_ELEM_CORE) return false;
     switch (id) {
         case AIR:
@@ -170,6 +172,7 @@ PlayerStrategy g_player;
 
 BlockStrategy* strategyFor(int id) {
     if (id == ARENA_SHELL) return &g_shell;
+    if (id == ITEM_TARGET) return &g_unplaceable;
     if (id == ITEM_ARCANE_FIREBALL) return &g_unplaceable;
     if (id >= ITEM_ELEM_CORE && id <= ITEM_EYELESS) return &g_unplaceable;
     switch (id) {

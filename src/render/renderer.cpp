@@ -825,11 +825,24 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             AIR, AIR, AIR, nullptr, nullptr, 0.0f, &sky);
         }
 
+        if (ui.targets) {
+            const anim::Clip& idle = anim::playerClips().idle;
+            for (const TrainingTarget& t : *ui.targets)
+                drawPlayerModel(t.feet, t.yaw, t.yaw, 0.0f, eye, vp, false,
+                                &idle, 0.0f, AIR, AIR, AIR, &t.vitals, nullptr, 0.0f, &sky,
+                                AIR, AIR, AIR, true);
+        }
+
         drawGuardians(world, eye, vp, &sky);
 
         if (ui.humidityMode) drawHumidity(world, eye, vp);
 
-        if (ui.targetGuardian >= 0) {
+        if (ui.targetAim >= 0 && ui.targets && ui.targetAim < (int)ui.targets->size()) {
+            const TrainingTarget& t = (*ui.targets)[(size_t)ui.targetAim];
+            drawOutlineAt(vp, eye, { t.feet.x, t.feet.y + 0.90f, t.feet.z },
+                          { 0.84f, 1.86f, 0.84f }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 },
+                          1.0f, 1.0f, 1.0f, 0.95f);
+        } else if (ui.targetGuardian >= 0) {
             float hurt = clampf(ui.guardianHurt, 0.0f, 1.0f);
             drawOutlineAt(vp, eye, ui.guardianCenter, ui.guardianSize,
                           { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 },
@@ -1461,7 +1474,7 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
                                const anim::Clip* clip, float frame, uint8_t heldRight,
                                uint8_t heldLeft, uint8_t carried, const vitals::Vitals* tint,
                                const anim::Clip* strike, float strikeAt, const Sky* sun,
-                               uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes) {
+                               uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes, bool bare) {
     const anim::PlayerClips& lib = anim::playerClips();
     const bool hugging = hold::isCarrying(carried);
     std::vector<anim::BoneXform> pose;
@@ -1498,6 +1511,24 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
             if (id >= 0) p.color = vitals::healthColor(tint->limb[id].health);
         }
     }
+    if (bare) {
+        const Vec3 gray{ 0.62f, 0.62f, 0.64f };
+        std::vector<pm::Part> body;
+        body.reserve(parts.size());
+        for (pm::Part& p : parts) {
+            if (pm::isHairPart(p) || pm::isHairCardPart(p)) continue;
+            if (pm::isEyePart(p) || pm::isEyelidPart(p) || pm::isMouthPart(p)) continue;
+            if (pm::isCutoutPart(p) || pm::isDecalPart(p)) continue;
+            if (p.kind == "cloth") continue;
+            int id = vitals::limbFromName(p.name);
+            if (id < 0) id = vitals::limbFromName(p.kind);
+            if (!(tint && id >= 0)) p.color = gray;
+            p.tex.clear();
+            p.kind.clear();
+            body.push_back(std::move(p));
+        }
+        parts.swap(body);
+    }
     uint8_t wornIds[3] = { wearUpper, wearLower, wearShoes };
     const float S = 1.0f; // model parts are in world units (player is ~1.8 world tall)
 
@@ -1518,8 +1549,8 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         return 0;
     };
     pdraw::Mesh mesh;
-    pdraw::build(parts, xform, [&](const std::string& n) { return namedTex(n) != 0; },
-                 skinTex != 0, hideHead, mesh, tint != nullptr);
+    pdraw::build(parts, xform, [&](const std::string& n) { return !bare && namedTex(n) != 0; },
+                 !bare && skinTex != 0, hideHead, mesh, tint != nullptr);
 
     gl::Enable(GL_DEPTH_TEST);
     gl::DepthMask(GL_TRUE);
@@ -3288,6 +3319,11 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
+    if (ui.targetPanel >= 0) {
+        drawTargetPanel(ui);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
     if (ui.playerDead) {
         drawDeath(ui);
         gl::Enable(GL_DEPTH_TEST);
@@ -3341,13 +3377,17 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     const bool carrying = ui.carrySlot && !ui.carrySlot->empty();
     const bool leftSealed = ui.vitals && ui.vitals->limb[vitals::HandL].health <= vitals::kDeadEps;
     const bool rightSealed = ui.vitals && ui.vitals->limb[vitals::HandR].health <= vitals::kDeadEps;
-    const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0);
+    const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0 || ui.targetAim >= 0);
 
     CrosshairPrompt promptItems[4];
     int promptCount = 0;
-    if (fPrompt)
-        promptItems[promptCount++] = { CrosshairKeyKind::Text, "F", carrying ? "放下" : "拾取" };
-    if (ui.hasPlacePreview)
+    if (fPrompt) {
+        const char* action = "拾取";
+        if (ui.targetAim >= 0) action = "状态";
+        else if (carrying) action = "放下";
+        promptItems[promptCount++] = { CrosshairKeyKind::Text, "F", action };
+    }
+    if (ui.hasPlacePreview || ui.targetPlaceReady)
         promptItems[promptCount++] = { CrosshairKeyKind::MouseRight, "", "放置" };
     std::vector<CrosshairPromptBox> promptBoxes;
     layoutCrosshairPrompts(promptItems, promptCount, cx + 36.0f, cy, promptBoxes);
@@ -3539,14 +3579,50 @@ void Renderer::drawDeath(UIState& ui) {
     centeredText("重生", bx + bw * 0.5f, by + bh * 0.5f, 1.0f, 1, 1, 1, 1);
 }
 
-void Renderer::drawInventoryDoll(UIState& ui, float x, float y, float w, float h) {
+void Renderer::drawTargetPanel(UIState& ui) {
+    ui.targetBtnHover = -1;
+    if (!ui.targets || ui.targetPanel < 0 || ui.targetPanel >= (int)ui.targets->size()) return;
+    const TrainingTarget& target = (*ui.targets)[(size_t)ui.targetPanel];
+
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.45f);
+
+    const float dollH = std::min(520.0f, (float)scrH - 96.0f);
+    const float dollW = dollH * (248.0f / 470.0f);
+    const float btnW = 220.0f;
+    const float btnH = 52.0f;
+    const float btnGap = 14.0f;
+    const float midGap = 28.0f;
+    const float groupW = dollW + midGap + btnW;
+    const float groupH = dollH;
+    const float x = ((float)scrW - groupW) * 0.5f;
+    const float y = ((float)scrH - groupH) * 0.5f;
+    drawInventoryDoll(ui, x, y, dollW, dollH, &target.vitals, false);
+
+    const float bx = x + dollW + midGap;
+    const float stackH = btnH * 2.0f + btnGap;
+    const float by0 = y + (dollH - stackH) * 0.5f;
+    const float by1 = by0 + btnH + btnGap;
+    bool dismantle = ui.mouseX >= bx && ui.mouseX < bx + btnW && ui.mouseY >= by0 && ui.mouseY < by0 + btnH;
+    bool reset = ui.mouseX >= bx && ui.mouseX < bx + btnW && ui.mouseY >= by1 && ui.mouseY < by1 + btnH;
+    if (dismantle) ui.targetBtnHover = 0;
+    if (reset) ui.targetBtnHover = 1;
+    buttonChrome(bx, by0, btnW, btnH, dismantle, 0.55f, 0.28f, 0.24f);
+    buttonChrome(bx, by1, btnW, btnH, reset, 0.28f, 0.48f, 0.24f);
+    flushUI(progUI, whiteTex);
+    centeredText("标靶", x + dollW * 0.5f, y - 18.0f, 1.05f, 0.95f, 0.95f, 0.93f, 1.0f);
+    centeredText("拆除标靶", bx + btnW * 0.5f, by0 + btnH * 0.5f, 0.95f, 1, 1, 1, 1);
+    centeredText("重置血量", bx + btnW * 0.5f, by1 + btnH * 0.5f, 0.95f, 1, 1, 1, 1);
+}
+
+void Renderer::drawInventoryDoll(UIState& ui, float x, float y, float w, float h,
+                                 const vitals::Vitals* health, bool showStamina) {
     if (w < 8.0f || h < 8.0f) return;
 
     quad(x - 4, y - 4, w + 8, h + 8, 0, 0, 0, 0, 0.08f, 0.08f, 0.09f, 1.0f);
     quad(x, y, w, h, 0, 0, 0, 0, 0.14f, 0.14f, 0.16f, 1.0f);
 
-    const bool survival = !ui.privilegeMode && ui.vitals;
-    const vitals::Vitals* vp = survival ? ui.vitals : nullptr;
+    const bool survival = health ? showStamina : (!ui.privilegeMode && ui.vitals);
+    const vitals::Vitals* vp = health ? health : (survival ? ui.vitals : nullptr);
     const Vec3 paper{ 0.56f, 0.55f, 0.53f };
     const Vec3 ink = vitals::outlineColor();
 
