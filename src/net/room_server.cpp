@@ -11,10 +11,12 @@
 #include "../core/config.hpp"
 #include "../world/animation.hpp"
 #include "../world/arcane.hpp"
+#include "../world/building_loot.hpp"
 #include "../world/clue.hpp"
 #include "../world/combat.hpp"
 #include "../world/guardian_fight.hpp"
 #include "../world/guardian_fight_world.hpp"
+#include "../world/loot.hpp"
 #include "../world/ritual.hpp"
 #include "../world/structure.hpp"
 #include "../world/world.hpp"
@@ -755,6 +757,9 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     // director. Until it does, no unbound ITEM_CLUE can advance progression.
     clue::Director clueDirector;
 
+    // Building loot spawner for clues, weapons, and arcane items near buildings
+    building_loot::Spawner lootSpawner(world, seed);
+
     // Ritual altar placement: tracks which altars have been placed and team spawn info
     bool ritualAltarsPlaced = false;
     int ritualAltarTeamSpawns[matchmap::kCombatTeams][3] = {}; // [team][x, y, z]
@@ -970,6 +975,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             int spawnX = ritualAltarTeamSpawns[i][0];
                             int spawnY = ritualAltarTeamSpawns[i][1];
                             int spawnZ = ritualAltarTeamSpawns[i][2];
+                            int teamId = i + 1;
 
                             // Place 3 room types: 0=props, 1=weapon, 2=clue
                             // Each room type gets a different offset direction from spawn
@@ -994,12 +1000,77 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 world.ensureColumn(colX, colZ);
 
                                 snprintf(line, sizeof(line), "[DEBUG] Placing room %d (%s) for team %d at wx=%d, wy=%d, wz=%d",
-                                    roomType, structure::roomBuildingName(roomType), i + 1, finalX, wy, finalZ);
+                                    roomType, structure::roomBuildingName(roomType), teamId, finalX, wy, finalZ);
                                 slog(log, line);
                                 structure::paintRoomBuilding(world, finalX, wy, finalZ, roomType);
+
+                                // Spawn clues, weapons, and arcane items near each room building
+                                // Use a seeded RNG based on building position
+                                uint32_t buildingSeed = seed ^ (uint32_t)(teamId * 1000 + roomType * 100 + finalX * 7 + finalZ * 13);
+                                std::mt19937 buildingRng(buildingSeed);
+
+                                // Spawn more loot around each building (8 items per building)
+                                // Weapons, clues, and arcane items are represented as glowing blocks/items in the game
+                                for (int lootIdx = 0; lootIdx < 8; lootIdx++) {
+                                    // Generate random offset around the building (wider spread)
+                                    int lootOffsetX = (int)(buildingRng() % 9) - 4;  // -4 to +4
+                                    int lootOffsetZ = (int)(buildingRng() % 9) - 4;  // -4 to +4
+                                    float lootX = (float)(finalX + lootOffsetX + 2) * cfg::BLOCK_SCALE;
+                                    float lootY = (float)(wy + 2) * cfg::BLOCK_SCALE;
+                                    float lootZ = (float)(finalZ + lootOffsetZ + 2) * cfg::BLOCK_SCALE;
+                                    Vec3 lootPos = {lootX, lootY, lootZ};
+
+                                    // Different items have different visual appearances:
+                                    // - Weapons (ITEM_ELEM_CORE, ITEM_PRIM_FIRE, etc.): Purple/gold glowing blocks
+                                    // - Clues (ITEM_CLUE): Special blinking item
+                                    // - Arcane (ITEM_ARCANE_FIREBALL, etc.): Fire/green glowing blocks
+                                    if (roomType == 0 || roomType == 1) {
+                                        // Props/Weapon rooms: more weapons
+                                        if (lootIdx < 3) {
+                                            // 3 weapons per props/weapon room
+                                            static const uint8_t weaponItems[] = {ITEM_ELEM_CORE, ITEM_PRIM_FIRE, ITEM_JUDGE_SCALE};
+                                            lootSpawner.spawnItemAt(lootPos, {weaponItems[lootIdx % 3], 1});
+                                        } else if (lootIdx < 5) {
+                                            // 2 arcane items
+                                            static const uint8_t arcaneItems[] = {ITEM_ARCANE_FIREBALL, ITEM_ARCANE_HEAL};
+                                            lootSpawner.spawnItemAt(lootPos, {arcaneItems[(lootIdx - 3) % 2], 1});
+                                        } else {
+                                            // 3 clues per props/weapon room
+                                            clue::Link link;
+                                            link.team = (uint8_t)teamId;
+                                            link.stage = clueDirector.currentStage(teamId) + 1;
+                                            link.target = lootPos;
+                                            link.destination = clue::Destination::Clue;
+                                            link.rewardItem = ITEM_GOLD_CROWN;
+                                            lootSpawner.spawnClueAt(lootPos, clueDirector, link);
+                                        }
+                                    } else {
+                                        // Clue room: more clues
+                                        if (lootIdx < 2) {
+                                            // 2 weapons per clue room
+                                            static const uint8_t weaponItems[] = {ITEM_ELEM_CORE, ITEM_PRIM_FIRE};
+                                            lootSpawner.spawnItemAt(lootPos, {weaponItems[lootIdx % 2], 1});
+                                        } else if (lootIdx < 4) {
+                                            // 2 arcane items
+                                            static const uint8_t arcaneItems[] = {ITEM_ARCANE_FIREBALL, ITEM_ARCANE_HEAL, ITEM_ARCANE_FREEZE};
+                                            lootSpawner.spawnItemAt(lootPos, {arcaneItems[lootIdx % 3], 1});
+                                        } else {
+                                            // 4 clues per clue room
+                                            clue::Link link;
+                                            link.team = (uint8_t)teamId;
+                                            link.stage = clueDirector.currentStage(teamId) + 1;
+                                            link.target = lootPos;
+                                            link.destination = clue::Destination::Clue;
+                                            link.rewardItem = ITEM_ANCIENT_TOTEM;
+                                            lootSpawner.spawnClueAt(lootPos, clueDirector, link);
+                                        }
+                                    }
+                                }
+                                snprintf(line, sizeof(line), "[DEBUG] Spawned 8 loot items near room %d for team %d (weapons=purple/gold, arcane=fire/green, clues=blinking)", roomType, teamId);
+                                slog(log, line);
                             }
                         }
-                        slog(log, "[DEBUG] All room buildings placed!");
+                        slog(log, "[DEBUG] All room buildings placed with loot!");
                         ritualAltarsPlaced = true;
                     }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
