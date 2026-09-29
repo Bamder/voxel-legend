@@ -938,6 +938,68 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             structure::paintRitualAltar(world, finalX, wy, finalZ, altarIdx);
                         }
                         slog(log, "[DEBUG] All ritual altars placed!");
+
+                        // Place room buildings near team spawn points (3 types: props, weapon, clue)
+                        // Record altar positions for spacing
+                        struct PlacedBuilding {
+                            int x, z;
+                            int halfSize;
+                        };
+                        std::vector<PlacedBuilding> placedBuildings;
+
+                        // First pass: record altar positions
+                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
+                            if (!ritualAltarUsedForTeam[i]) continue;
+                            int wx = ritualAltarTeamSpawns[i][0];
+                            int wz = ritualAltarTeamSpawns[i][2];
+                            // Estimate altar half-size (ritual altars are roughly 20 blocks diameter)
+                            placedBuildings.push_back({wx, wz, 12});
+                        }
+                        // Extra altar positions
+                        for (int extra = activeTeams; extra < structure::kRitualAltarCount; extra++) {
+                            int zoneIdx = extra % matchmap::kCombatTeams;
+                            matchmap::Zone zone = matchmap::combatZone(zoneIdx);
+                            int wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                            int wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                            placedBuildings.push_back({wx, wz, 12});
+                        }
+
+                        // Place 3 room buildings per team at different positions
+                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
+                            if (!ritualAltarUsedForTeam[i]) continue;
+                            int spawnX = ritualAltarTeamSpawns[i][0];
+                            int spawnY = ritualAltarTeamSpawns[i][1];
+                            int spawnZ = ritualAltarTeamSpawns[i][2];
+
+                            // Place 3 room types: 0=props, 1=weapon, 2=clue
+                            // Each room type gets a different offset direction from spawn
+                            const int roomOffsets[3][2] = {
+                                {8, 0},    // Props room: east
+                                {0, 8},    // Weapon room: south
+                                {-8, 0}    // Clue room: west
+                            };
+
+                            for (int roomType = 0; roomType < 3; roomType++) {
+                                int offsetX = roomOffsets[roomType][0];
+                                int offsetZ = roomOffsets[roomType][1];
+                                int finalX = spawnX + offsetX;
+                                int finalZ = spawnZ + offsetZ;
+                                int wy = spawnY;
+
+                                // Ensure column is loaded
+                                int colX = finalX / cfg::CHUNK_X;
+                                int colZ = finalZ / cfg::CHUNK_Z;
+                                if (finalX < 0 && finalX % cfg::CHUNK_X != 0) colX--;
+                                if (finalZ < 0 && finalZ % cfg::CHUNK_Z != 0) colZ--;
+                                world.ensureColumn(colX, colZ);
+
+                                snprintf(line, sizeof(line), "[DEBUG] Placing room %d (%s) for team %d at wx=%d, wy=%d, wz=%d",
+                                    roomType, structure::roomBuildingName(roomType), i + 1, finalX, wy, finalZ);
+                                slog(log, line);
+                                structure::paintRoomBuilding(world, finalX, wy, finalZ, roomType);
+                            }
+                        }
+                        slog(log, "[DEBUG] All room buildings placed!");
                         ritualAltarsPlaced = true;
                     }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {

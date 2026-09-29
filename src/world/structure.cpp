@@ -850,4 +850,63 @@ bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int alta
     return true;
 }
 
+// Room building file names (props room, weapon room, clue room)
+const char* roomBuildingName(int roomIndex) {
+    switch (roomIndex) {
+        case 0: return "room_basic";
+        case 1: return "room_isometric";
+        case 2: return "room_japanese";
+        default: return "room_basic";
+    }
+}
+
+bool paintRoomBuilding(World& world, int worldX, int worldY, int worldZ, int roomIndex) {
+    if (roomIndex < 0 || roomIndex >= kRoomBuildingCount) roomIndex = 0;
+    std::string path = "assets/structures/";
+    path += roomBuildingName(roomIndex);
+    path += ".vlstruct";
+    bool fileExists = std::filesystem::exists(path);
+    Blueprint b;
+    if (!fileExists || !readBlueprint(path, b)) {
+        // Fallback: create a simple wooden room
+        for (int ly = 0; ly < 4; ly++) {
+            for (int lz = -3; lz <= 3; lz++) {
+                for (int lx = -3; lx <= 3; lx++) {
+                    int x = worldX + lx;
+                    int y = worldY + ly;
+                    int z = worldZ + lz;
+                    if (ly == 0 || lx == -3 || lx == 3 || lz == -3 || lz == 3) {
+                        world.setBlock(x, y, z, (uint8_t)PLANKS, true);
+                    } else if (ly == 3) {
+                        world.setBlock(x, y, z, (uint8_t)WOOD, true);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    // Center the building: place it so its center aligns with worldX, worldZ
+    int offsetX = worldX - b.sx / 2;
+    int offsetY = worldY;
+    int offsetZ = worldZ - b.sz / 2;
+    int placed = 0;
+    for (int ly = 0; ly < b.sy; ly++) {
+        for (int lz = 0; lz < b.sz; lz++) {
+            for (int lx = 0; lx < b.sx; lx++) {
+                uint8_t block = b.at(lx, ly, lz);
+                if (block == AIR) continue;
+                int x = offsetX + lx;
+                int y = offsetY + ly;
+                int z = offsetZ + lz;
+                if (y < 0 || y >= cfg::WORLD_H) continue;
+                world.setBlock(x, y, z, block, true);
+                placed++;
+            }
+        }
+    }
+    fprintf(stderr, "[DEBUG] Room %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d)\n",
+        roomBuildingName(roomIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz);
+    return true;
+}
+
 } // namespace structure

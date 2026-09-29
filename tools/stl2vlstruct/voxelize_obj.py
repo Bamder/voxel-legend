@@ -139,7 +139,7 @@ class OBJModel:
 def voxelize_model(model, target_size=32, flip_yz=True):
     """
     使用射线投射法体素化模型
-    
+
     Args:
         model: OBJModel 实例
         target_size: 目标体素网格大小
@@ -148,104 +148,86 @@ def voxelize_model(model, target_size=32, flip_yz=True):
     bounds = model.get_bounds()
     if not bounds:
         return None
-    
+
     # 获取边界
     min_x, min_y, min_z = bounds['min']
     max_x, max_y, max_z = bounds['max']
-    
+
     # 模型尺寸
     size_x = max_x - min_x
     size_y = max_y - min_y
     size_z = max_z - min_z
-    
+
     # 避免除零
     size_x = max(size_x, 0.001)
     size_y = max(size_y, 0.001)
     size_z = max(size_z, 0.001)
-    
+
     # 计算缩放比例
     max_dim = max(size_x, size_y, size_z)
     scale = (target_size - 2) / max_dim
-    
+
     # 体素网格尺寸
     sx = max(1, min(64, int(size_x * scale) + 2))
     sy = max(1, min(64, int(size_y * scale) + 2))
     sz = max(1, min(64, int(size_z * scale) + 2))
-    
-    # 创建体素网格
+
+    # 创建体素网格 (x, y, z)
     grid = [[[False for _ in range(sz)] for _ in range(sy)] for _ in range(sx)]
     materials = [[[BLOCK_STONE for _ in range(sz)] for _ in range(sy)] for _ in range(sx)]
-    
+
     # 射线投射：从六个方向投射射线
     directions = [
         (1, 0, 0), (-1, 0, 0),
         (0, 1, 0), (0, -1, 0),
         (0, 0, 1), (0, 0, -1)
     ]
-    
-    def voxel_to_world(vx, vy, vz):
-        """体素坐标转世界坐标"""
-        wx = min_x + (vx / (sx - 1)) * size_x if flip_yz else min_x + (vx / (sx - 1)) * size_x
-        wy = min_y + (vy / (sy - 1)) * size_y
-        wz = min_z + (vz / (sz - 1)) * size_z if flip_yz else min_z + (vz / (sz - 1)) * size_z
-        return (wx, wy, wz)
-    
-    def world_to_voxel(wx, wy, wz):
-        """世界坐标转体素坐标"""
-        vx = int((wx - min_x) / size_x * (sx - 1) + 0.5)
-        vy = int((wy - min_y) / size_y * (sy - 1) + 0.5)
-        vz = int((wz - min_z) / size_z * (sz - 1) + 0.5)
-        
-        if flip_yz:
-            # 交换 Y 和 Z
-            return (vx, vz, vy)
-        return (vx, vy, vz)
-    
+
     # 对每个体素进行射线检测
-    for y in range(sy):
-        for z in range(sz):
-            for x in range(sx):
+    for x in range(sx):
+        for y in range(sy):
+            for z in range(sz):
                 # 计算体素中心的世界坐标
+                wx = min_x + (x / (sx - 1)) * size_x
+                wy = min_y + (y / (sy - 1)) * size_y
+                wz = min_z + (z / (sz - 1)) * size_z
+
+                # 如果交换 YZ，调整坐标
                 if flip_yz:
-                    wx = min_x + (x / (sx - 1)) * size_x
-                    wy = min_z + (z / (sz - 1)) * size_z
-                    wz = min_y + (y / (sy - 1)) * size_y
+                    wx_world, wy_world, wz_world = wx, wz, wy
                 else:
-                    wx = min_x + (x / (sx - 1)) * size_x
-                    wy = min_y + (y / (sy - 1)) * size_y
-                    wz = min_z + (z / (sz - 1)) * size_z
-                
+                    wx_world, wy_world, wz_world = wx, wy, wz
+
                 # 从体素中心向六个方向发射射线
                 hit_count = 0
                 for dx, dy, dz in directions:
-                    origin = (wx + dx * 0.001, wy + dy * 0.001, wz + dz * 0.001)
+                    origin = (wx_world + dx * 0.001, wy_world + dy * 0.001, wz_world + dz * 0.001)
                     direction = (dx, dy, dz)
-                    
+
                     # 检测与所有面的相交
                     for face in model.faces:
                         if len(face) < 3:
                             continue
-                        
+
                         v0 = model.vertices[face[0]]
                         v1 = model.vertices[face[1]]
                         v2 = model.vertices[face[2]]
-                        
+
                         # 如果交换了 YZ，需要调整顶点坐标
                         if flip_yz:
                             v0 = (v0[0], v0[2], v0[1])
                             v1 = (v1[0], v1[2], v1[1])
                             v2 = (v2[0], v2[2], v2[1])
-                        
+
                         t = model.ray_triangle_intersect(origin, direction, v0, v1, v2)
                         if t is not None and t < target_size:
                             hit_count += 1
                             break
-                
-                # 如果射线从偶数个方向命中（偶数=内部，奇数=表面）
-                # 这里用 hit_count > 0 表示表面
+
+                # 如果射线命中，表示这是表面体素
                 if hit_count > 0:
-                    grid[x][y if not flip_yz else z][z if not flip_yz else y] = True
-    
+                    grid[x][y][z] = True
+
     return grid, materials, sx, sy, sz
 
 
@@ -275,12 +257,17 @@ def save_vlstruct(filepath, grid, materials, sx, sy, sz):
 def main():
     # 转换配置
     CONVERSIONS = [
+        # 祭祀台
         ('altar.obj', 'ritual_element.vlstruct', 40),
         ('altar1.obj', 'ritual_god.vlstruct', 40),
         ('altarOBJ.obj', 'ritual_old_god.vlstruct', 32),
         ('oltarz_low1.OBJ', 'ritual_outer.vlstruct', 40),
         ('Postament.obj', 'ritual_time.vlstruct', 32),
         ('Scaniverse.obj', 'ritual_worldtree.vlstruct', 48),
+        # 房间
+        ('Isometric room.obj', 'room_isometric.vlstruct', 48),
+        ('japanese room.obj', 'room_japanese.vlstruct', 48),
+        ('room.obj', 'room_basic.vlstruct', 32),
     ]
     
     base_dir = Path('C:/Users/ThinkBook/Desktop/voxel-legend-main/tools/raw_models')

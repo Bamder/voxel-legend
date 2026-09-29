@@ -102,6 +102,11 @@ bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int alta
 // Number of available ritual altar variants
 inline constexpr int kRitualAltarCount = 6;
 const char* ritualAltarName(int altarIndex);
+
+// Room building count and names (for props room, weapon room, clue room)
+inline constexpr int kRoomBuildingCount = 3;
+const char* roomBuildingName(int roomIndex);
+bool paintRoomBuilding(World& world, int worldX, int worldY, int worldZ, int roomIndex);
 bool saveFile(const World& world, const std::string& path);
 void clearVolume(World& world);
 
