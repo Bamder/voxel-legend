@@ -4,8 +4,9 @@
 #include <cstdint>
 #include <optional>
 
-// Server-side rules. This module owns no parallel HP and performs no network,
-// rendering, inventory mutation or AI. The room server supplies validated actors.
+// Player-versus-player rules. This module owns no parallel HP and performs no
+// network, rendering, inventory mutation or AI. The room server supplies
+// validated actors. Trial guardians keep a separate integer pool.
 namespace combat {
 
 enum class EntityCategory : uint8_t { Player, Boss };
@@ -66,8 +67,8 @@ struct DamageResult {
     float amount = 0.0f; // total actual normalized limb health removed
 };
 
-// Boss implementations adapt this resolved value to their own health model.
-// Weapon definitions do not depend on the target's implementation.
+// EntityCategory::Boss scales a limb fraction for a future room boss.
+// It is not the trial guardian's hit-point pool.
 float damageFor(const DamageSpec& spec, EntityCategory target);
 DamageResult damagePlayer(vitals::Vitals& body, const DamageSource& source,
                           const DamageSpec& spec, int limb);

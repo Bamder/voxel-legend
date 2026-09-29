@@ -62,12 +62,14 @@ int main() {
     input.pickupSequence = 4; input.pickupDrop = 77;
     input.layoutSequence = 5; input.layoutBaseRevision = 3;
     input.layout[0] = {HAND_PICK,1}; input.combatAck = 12; input.arcaneAck = 14;
+    input.guardianSequence = 6; input.guardianRelic = 4;
     auto bytes = encodePlayInput(input);
     PlayInputNet decoded;
     check(decodePlayInput(bytes.data(), bytes.data()+bytes.size(), decoded) && decoded.movement == input.movement &&
           decoded.attackSequence == 9 && decoded.pickupDrop == 77 &&
           decoded.castSequence == 10 && decoded.castHand == 0 &&
-          decoded.layout[0].block == HAND_PICK && decoded.combatAck == 12 && decoded.arcaneAck == 14,
+          decoded.layout[0].block == HAND_PICK && decoded.combatAck == 12 && decoded.arcaneAck == 14 &&
+          decoded.guardianSequence == 6 && decoded.guardianRelic == 4,
           "movement protocol roundtrip");
     for (size_t n = 0; n < bytes.size(); ++n)
         check(!decodePlayInput(bytes.data(), bytes.data()+n, decoded), "all truncated input packets rejected");
@@ -101,6 +103,7 @@ int main() {
     delta.projectiles.push_back({31,1,ArcaneProjectileKind::Freeze,2,3,4,5,6,7});
     delta.arcane.push_back({17,ArcaneEventKind::HealPulse,8,9,10});
     delta.clue = {true, 3, (uint8_t)clue::Destination::Boss, ITEM_ELEM_CORE, false, 24, 2, -16};
+    delta.guardians.push_back({3, 120, 320});
     bytes = encodePlayDelta(delta);
     PlayDeltaNet output;
     check(decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output) &&
@@ -121,8 +124,10 @@ int main() {
           output.arcane.size() == 1 && output.arcane[0].serial == 17 &&
           output.arcane[0].kind == ArcaneEventKind::HealPulse && output.arcane[0].z == 10 &&
           output.clue.active && output.clue.stage == 3 &&
-          output.clue.destination == (uint8_t)clue::Destination::Boss && output.clue.x == 24,
-          "inventory combat status arcane and clue snapshot roundtrip");
+          output.clue.destination == (uint8_t)clue::Destination::Boss && output.clue.x == 24 &&
+          output.guardians.size() == 1 && output.guardians[0].relic == 3 &&
+          output.guardians[0].hp == 120 && output.guardians[0].maxHp == 320,
+          "inventory combat status arcane guardian and clue snapshot roundtrip");
     for (size_t n = 0; n < bytes.size(); ++n)
         check(!decodePlayDelta(bytes.data(), bytes.data()+n, output), "all truncated authority snapshots rejected");
     delta.body.vitals.limb[0].health = nan;
@@ -137,12 +142,16 @@ int main() {
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize player vector rejected");
     delta.players.clear(); delta.projectiles.clear(); delta.arcane.clear(); delta.combat.clear(); delta.drops.clear();
     delta.clue = {};
+    delta.guardians.clear();
     bytes = encodePlayDelta(delta);
-    bytes[bytes.size()-3] = 65;
+    bytes[bytes.size()-4] = 65;
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize projectile vector rejected");
     bytes = encodePlayDelta(delta);
-    bytes[bytes.size()-2] = 33;
+    bytes[bytes.size()-3] = 33;
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize arcane event vector rejected");
+    bytes = encodePlayDelta(delta);
+    bytes[bytes.size()-2] = 17;
+    check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize guardian vector rejected");
     delta.clue = {true, 1, 4, AIR, false, 1, 2, 3};
     bytes = encodePlayDelta(delta);
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "unknown clue destination rejected");

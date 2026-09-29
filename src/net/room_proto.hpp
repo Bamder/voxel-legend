@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609290103u;
+constexpr uint32_t kRoomProto = 2609290104u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -130,6 +130,8 @@ struct PlayInputNet {
     std::array<ItemSlot, cfg::INVENTORY_SLOTS> layout{};
     uint32_t combatAck = 0;
     uint32_t arcaneAck = 0;
+    uint32_t guardianSequence = 0;
+    uint8_t guardianRelic = 255; // meaningful when guardianSequence != 0
 };
 
 struct AuthCellNet {
@@ -519,6 +521,8 @@ inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
     for (const auto& slot : in.layout) { b.u8(slot.block); b.u8(slot.count); }
     b.u32(in.combatAck);
     b.u32(in.arcaneAck);
+    b.u32(in.guardianSequence);
+    b.u8(in.guardianRelic);
     return b.data();
 }
 
@@ -587,7 +591,9 @@ inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& 
         !Buf::u32(p, end, in.layoutSequence) || !Buf::u32(p, end, in.layoutBaseRevision)) return false;
     for (auto& slot : in.layout)
         if (!Buf::u8(p, end, slot.block) || !Buf::u8(p, end, slot.count) || !validWireSlot(slot)) return false;
-    if (!Buf::u32(p, end, in.combatAck) || !Buf::u32(p, end, in.arcaneAck)) return false;
+    if (!Buf::u32(p, end, in.combatAck) || !Buf::u32(p, end, in.arcaneAck) ||
+        !Buf::u32(p, end, in.guardianSequence) || !Buf::u8(p, end, in.guardianRelic)) return false;
+    if (in.guardianSequence && in.guardianRelic >= 16) return false;
     return true;
 }
 
@@ -648,6 +654,13 @@ struct ClueTargetNet {
     float x = 0, y = 0, z = 0;
 };
 
+// Shared guardian pool for clients that have the token's chunk. Relic indexes the match-world site.
+struct GuardianNet {
+    uint8_t relic = 0;
+    uint16_t hp = 0;
+    uint16_t maxHp = 1;
+};
+
 struct PlayDeltaNet {
     BodyStateNet body; // recipient's authoritative body, fixed-size wire layout
     uint32_t serverTick = 0;
@@ -669,6 +682,7 @@ struct PlayDeltaNet {
     std::vector<CombatEventNet> combat;
     std::vector<ArcaneProjectileNet> projectiles;
     std::vector<ArcaneEventNet> arcane;
+    std::vector<GuardianNet> guardians;
     ClueTargetNet clue;
 };
 
@@ -876,6 +890,14 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
         const auto& event = d.arcane[i];
         b.u32(event.serial); b.u8((uint8_t)event.kind);
         b.f32(event.x); b.f32(event.y); b.f32(event.z);
+    }
+    uint8_t nguardians = (uint8_t)std::min<size_t>(d.guardians.size(), 16);
+    b.u8(nguardians);
+    for (uint8_t i = 0; i < nguardians; ++i) {
+        const GuardianNet& g = d.guardians[i];
+        b.u8(g.relic);
+        b.u16(g.hp);
+        b.u16(g.maxHp);
     }
     b.u8(d.clue.active ? 1 : 0);
     if (d.clue.active) {
@@ -1166,6 +1188,13 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
             std::fabs(event.x) > 100000 || std::fabs(event.y) > 100000 ||
             std::fabs(event.z) > 100000) return false;
         event.kind = (ArcaneEventKind)kind;
+    }
+    uint8_t nguardians = 0;
+    if (!Buf::u8(p, end, nguardians) || nguardians > 16) return false;
+    d.guardians.resize(nguardians);
+    for (auto& g : d.guardians) {
+        if (!Buf::u8(p, end, g.relic) || g.relic >= 16 ||
+            !Buf::u16(p, end, g.hp) || !Buf::u16(p, end, g.maxHp) || !g.maxHp) return false;
     }
     uint8_t clueActive = 0;
     if (!Buf::u8(p, end, clueActive) || clueActive > 1) return false;
