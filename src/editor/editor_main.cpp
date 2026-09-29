@@ -29,34 +29,6 @@
 #include <string>
 #include <vector>
 
-// .model files under assets/entities, except registered appearances and clothes/.
-// rel is a slash-separated stem such as "guardians/elem_source".
-static void collectEntityModels(const std::filesystem::path& dir, const std::string& prefix,
-                                const std::vector<std::string>& skipRootStems,
-                                std::vector<std::string>& out) {
-    std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec)) return;
-    for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
-        if (ent.is_directory()) {
-            std::string folder = ent.path().filename().string();
-            if (folder == "clothes" || folder == "anims") continue;
-            std::string next = prefix.empty() ? folder : prefix + "/" + folder;
-            collectEntityModels(ent.path(), next, skipRootStems, out);
-            continue;
-        }
-        if (!ent.is_regular_file()) continue;
-        if (ent.path().extension() != ".model") continue;
-        std::string stem = ent.path().stem().string();
-        if (prefix.empty()) {
-            bool skip = false;
-            for (const std::string& s : skipRootStems)
-                if (s == stem) skip = true;
-            if (skip) continue;
-        }
-        out.push_back(prefix.empty() ? stem : prefix + "/" + stem);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Minimal Win32 + WGL 3.3 core context (compact version of the game's setup).
 // ---------------------------------------------------------------------------
@@ -961,10 +933,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     std::string entityPath = pack::entityModel("player");
     std::string entitySkinPath = pack::entityPng("player");
     std::vector<std::string> entNames;
-    std::vector<std::string> looseNames; // relative stems, e.g. guardians/elem_source
     std::vector<std::string> garmentNames;
     bool entIsCloth = false;
-    bool entIsLoose = false; // a .model discovered on disk, not a registered entity
     int entSheetW = 0, entSheetH = 0;
     std::map<std::string, unsigned> clothSheetGL;
     std::vector<std::string> entMouthNames = pm::defaultMouthTex();
@@ -1275,12 +1245,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             entNames.push_back(m.id);
         if (entNames.empty()) entNames.push_back("player");
         std::sort(entNames.begin(), entNames.end());
-        looseNames.clear();
-        std::vector<std::string> skipRoot;
-        for (const plugin::EntityModule& m : plugin::entities())
-            skipRoot.push_back(m.appearance.empty() ? m.id : m.appearance);
-        collectEntityModels(std::filesystem::path(pack::entitiesDir()), "", skipRoot, looseNames);
-        std::sort(looseNames.begin(), looseNames.end());
         garmentNames.clear();
         std::filesystem::path clothDir = std::filesystem::path(pack::entitiesDir()) / "clothes";
         std::error_code ec;
@@ -1293,24 +1257,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         }
         std::sort(garmentNames.begin(), garmentNames.end());
     };
-    auto looseListEnd = [&]() {
-        return (int)entNames.size() + (int)looseNames.size();
-    };
     auto entityListCount = [&]() {
-        return looseListEnd() + (int)garmentNames.size();
+        return (int)entNames.size() + (int)garmentNames.size();
     };
     auto entityListName = [&](int i) -> const std::string* {
         if (i < 0) return nullptr;
         if (i < (int)entNames.size()) return &entNames[i];
-        if (i < looseListEnd()) return &looseNames[i - (int)entNames.size()];
-        int g = i - looseListEnd();
+        int g = i - (int)entNames.size();
         if (g >= 0 && g < (int)garmentNames.size()) return &garmentNames[g];
         return nullptr;
     };
     auto loadGarmentFile = [&](const std::string& stem) {
         if (stem.empty()) return;
         entIsCloth = true;
-        entIsLoose = false;
         ed.entityName = stem;
         entityPath = pack::join(pack::entitiesDir(), "clothes/" + stem + ".model");
         pm::EntityFile ef = pm::loadEntity(entityPath.c_str());
@@ -1347,95 +1306,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         ed.dirty = false;
         ed.entSkinView = false;
     };
-    auto loadLooseFile = [&](const std::string& rel) {
-        if (rel.empty()) return;
-        entIsCloth = false;
-        entIsLoose = true;
-        ed.entityName = rel;
-        entityPath = pack::join(pack::entitiesDir(), rel + ".model");
-        pm::EntityFile ef = pm::loadEntity(entityPath.c_str());
-        ed.entityParts = std::move(ef.parts);
-        entExtraLines = std::move(ef.extraLines);
-        entMouthNames = std::move(ef.mouthTex);
-        entFaceNames = std::move(ef.faceNames);
-        entOverlays = std::move(ef.overlays);
-        entSkin = ef.skin;
-        entitySkinPath.clear();
-        if (!entSkin.empty()) {
-            entitySkinPath = pack::entityPng(entSkin);
-            mat::Image img = mat::loadPNG(entitySkinPath.c_str());
-            if (img.ok()) {
-                skinImg = std::move(img);
-                savedSkin = skinImg;
-                if (!skinGL) skinGL = uploadImgTex(skinImg);
-                else uploadImgPixels(skinGL, skinImg);
-                clampTex(skinGL);
-            } else {
-                entSkin.clear();
-                entitySkinPath.clear();
-            }
-        }
-        savedEntity = ed.entityParts;
-        entMark.clear();
-        ensureEntMark();
-        ed.refTool = false;
-        ed.refDecalIdx = -1;
-        ed.refEdge = -1;
-        ed.refLineHover = -1;
-        ed.hairPaint = false;
-        ed.hairErase = false;
-        ed.hairSelect = false;
-        ed.hairCard = false;
-        ed.hairSelDrag = false;
-        ed.hairVoxSel.clear();
-        ed.hairCardSel.clear();
-        ed.measureOn = false;
-        ed.partMeasure = false;
-        ed.planeOn = false;
-        ed.partPlane = false;
-        ed.entSkinView = false;
-        if (!ed.entityParts.empty()) markEnt(0, false);
-        entUndo.clear();
-        skinUndo.clear();
-        ed.dirty = false;
-        ed.entPanX = 0.0f;
-        ed.entPanZ = 0.0f;
-        bool any = false;
-        float mn[3] = {}, mxv[3] = {};
-        for (const pm::Part& p : ed.entityParts) {
-            Vec3 cs[8];
-            pm::partWorldCorners(p, cs);
-            for (int k = 0; k < 8; k++) {
-                if (!any) {
-                    mn[0] = mxv[0] = cs[k].x; mn[1] = mxv[1] = cs[k].y; mn[2] = mxv[2] = cs[k].z;
-                    any = true;
-                } else {
-                    if (cs[k].x < mn[0]) mn[0] = cs[k].x;
-                    if (cs[k].x > mxv[0]) mxv[0] = cs[k].x;
-                    if (cs[k].y < mn[1]) mn[1] = cs[k].y;
-                    if (cs[k].y > mxv[1]) mxv[1] = cs[k].y;
-                    if (cs[k].z < mn[2]) mn[2] = cs[k].z;
-                    if (cs[k].z > mxv[2]) mxv[2] = cs[k].z;
-                }
-            }
-        }
-        if (any) {
-            float cy = 0.5f * (mn[1] + mxv[1]);
-            if (cy < 0.0f) cy = 0.0f;
-            if (cy > 1.80f) cy = 1.80f;
-            ed.entPivotY = cy;
-            float ext = mxv[0] - mn[0];
-            if (mxv[1] - mn[1] > ext) ext = mxv[1] - mn[1];
-            if (mxv[2] - mn[2] > ext) ext = mxv[2] - mn[2];
-            ed.ezoom = ext * 1.9f;
-            if (ed.ezoom < 1.2f) ed.ezoom = 1.2f;
-            if (ed.ezoom > 12.0f) ed.ezoom = 12.0f;
-        }
-    };
     auto loadEntityFile = [&](const std::string& name) {
         if (name.empty()) return;
         entIsCloth = false;
-        entIsLoose = false;
         const plugin::EntityModule* mod = plugin::findEntity(name.c_str());
         if (!mod) return;
         ed.entityName = mod->id;
@@ -1532,9 +1405,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     auto thumbKeyFor = [&](int i) -> std::string {
         const std::string* nm = entityListName(i);
         if (!nm) return {};
-        if (i < (int)entNames.size()) return "e:" + *nm;
-        if (i < looseListEnd()) return "m:" + *nm;
-        return "c:" + *nm;
+        return (i < (int)entNames.size() ? "e:" : "c:") + *nm;
     };
     auto fillEntThumb = [&](EntThumb& t, const std::vector<pm::Part>& parts,
                             unsigned skinTex, unsigned sheetTex, int sheetW, int sheetH) {
@@ -1611,18 +1482,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 pm::fillEntityDefaults(ef);
                 parts = std::move(ef.parts);
             }
-        } else if (nm && i < looseListEnd()) {
-            std::string path = pack::join(pack::entitiesDir(), *nm + ".model");
-            pm::EntityFile ef = pm::loadEntity(path.c_str());
-            parts = std::move(ef.parts);
-            skinTex = 0;
-            if (!ef.skin.empty()) {
-                mat::Image img = mat::loadPNG(pack::entityPng(ef.skin).c_str());
-                if (img.ok()) {
-                    skinTex = uploadImgTex(img);
-                    clampTex(skinTex);
-                }
-            }
         } else if (nm) {
             std::string path = pack::join(pack::entitiesDir(), "clothes/" + *nm + ".model");
             pm::EntityFile ef = pm::loadEntity(path.c_str());
@@ -1657,23 +1516,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         return &entThumbCache.back();
     };
     auto saveEntity = [&]() {
-        if (entIsLoose) {
-            pm::EntityFile ef;
-            ef.skin = entSkin;
-            ef.overlays = entOverlays;
-            ef.faceNames = entFaceNames;
-            ef.mouthTex = entMouthNames;
-            ef.parts = ed.entityParts;
-            ef.extraLines = entExtraLines;
-            pm::saveEntity(entityPath.c_str(), ef);
-            if (!entSkin.empty() && skinImg.ok() && !entitySkinPath.empty())
-                mat::savePNG(entitySkinPath.c_str(), skinImg.w, skinImg.h, skinImg.rgba.data());
-            savedEntity = ed.entityParts;
-            savedSkin = skinImg;
-            ed.dirty = false;
-            dropEntThumb(std::string("m:") + ed.entityName);
-            return;
-        }
         if (entIsCloth) {
             pm::EntityFile ef;
             ef.skin = "clothes/" + ed.entityName;
@@ -3133,9 +2975,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         std::vector<int> out;
         bool any = false;
         for (int i = 0; i < (int)selMark.size(); i++) if (selMark[i]) { any = true; break; }
-        // A selected solid (part / tiny / small / face / block) must stay selected.
-        // Auto-picking a quad here clears selSolid via markObject.
-        if (!any && !editModel.quads.empty() && ed.selSolid < 0) markObject(ed.selQuad, false);
+        if (!any && !editModel.quads.empty()) markObject(ed.selQuad, false);
         for (int i = 0; i < (int)selMark.size(); i++) if (selMark[i]) out.push_back(i);
         return out;
     };
@@ -3245,9 +3085,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (out.empty() && ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size())
             out.push_back(ed.selSolid);
         return out;
-    };
-    auto stretchTargetsSolid = [&]() {
-        return selectedIndices().empty() && !solidIds().empty();
     };
     auto selectOnlySolid = [&](int i) {
         ensureSelMark();
@@ -5185,8 +5022,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
             float cx, cy, cz;
             selCenter(cx, cy, cz);
-            float p[3] = { cx, cy, cz };
-            g = viewOfModel(p);
+            g = { cx - 0.5f, cy, cz };
         };
         auto gizmoSize = [&]() {
             float z = ed.entityMode ? ed.ezoom : ed.bzoom;
@@ -5610,8 +5446,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         else if (inLeft3d && ed.modelTool == 3) ed.gizmoHover = hitGizmo(false, true);
         else if (inLeft3d && ed.modelTool == 4) ed.gizmoHover = hitGizmo(true, false);
         else if (inLeft3d && (ed.modelTool == 1 || ed.modelTool == 2)) {
-            if (ed.modelTool == 1 && stretchTargetsSolid()) ed.gizmoHover = hitGizmo(true, false);
-            else if (isDeformableFace(ed.selQuad)) ed.gizmoHover = hitDeformGizmo();
+            if (isDeformableFace(ed.selQuad)) ed.gizmoHover = hitDeformGizmo();
             else if (ed.modelTool == 1 && isSolidGroup(ed.selQuad)) ed.gizmoHover = hitGizmo(true, false);
             else ed.gizmoHover = 0;
         }
@@ -6740,7 +6575,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 if (const std::string* nm = entityListName(ed.entityHover)) {
                     if (*nm != ed.entityName) {
                         if (ed.entityHover < (int)entNames.size()) loadEntityFile(*nm);
-                        else if (ed.entityHover < looseListEnd()) loadLooseFile(*nm);
                         else loadGarmentFile(*nm);
                     }
                 }
@@ -9125,25 +8959,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             };
             auto gizmoIsDeform = [](int id) { return id >= 40 && id <= 53; };
             auto solidStretchOn = [&]() {
-                return ed.modelTool == 1 && isSolidGroup(ed.selQuad) && !stretchTargetsSolid();
+                return ed.modelTool == 1 && isSolidGroup(ed.selQuad);
             };
             static std::vector<int> partGrabI;
             static std::vector<float> partGrabH, partGrabC;
             static float partGrabT0 = 0.0f;
             auto partStretchOn = [&]() {
-                return ed.modelTool == 1 && stretchTargetsSolid();
-            };
-            auto nudgePartStretch = [&](int axis, float dt, float sideSign) {
-                if (axis < 0 || axis > 2) return;
-                for (int i : solidIds()) {
-                    if (i < 0 || i >= (int)editModel.solids.size()) continue;
-                    mat::Solid& s = editModel.solids[i];
-                    float oldH = s.h[axis];
-                    float grow = sideSign * dt;
-                    s.h[axis] = std::max(mat::kSolidGrid * 0.5f, oldH + grow * 0.5f);
-                    s.c[axis] += sideSign * (s.h[axis] - oldH);
-                }
-                ed.dirty = true;
+                return ed.modelTool == 1 && selectedIndices().empty() && !solidIds().empty();
             };
             auto captureSolidGrab = [&]() {
                 ssIdx = selectedIndices();
@@ -9595,9 +9417,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                             else if (solidStretchOn()) {
                                 pushModelUndo();
                                 stretchSolidSel(axis, s * 0.0625f, true, s);
-                            } else if (partStretchOn()) {
-                                pushModelUndo();
-                                nudgePartStretch(axis, s * 0.0625f, s);
                             } else {
                                 pushModelUndo();
                                 translateSel(kAxis[axis].x * s * 0.25f, kAxis[axis].y * s * 0.25f, kAxis[axis].z * s * 0.25f);
@@ -11913,7 +11732,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 for (int qi = 0; qi < (int)editModel.quads.size(); qi++) {
                     mat::Quad& q = editModel.quads[qi];
                     bool inSel = (qi < (int)selMark.size() && selMark[qi]);
-                    bool prim = inSel && (qi == ed.selQuad);
+                    bool prim = (qi == ed.selQuad);
                     float cr = prim ? 1.0f : (inSel ? 1.0f : 0.55f);
                     float cg = prim ? 0.9f : (inSel ? 0.75f : 0.55f);
                     float cb = prim ? 0.2f : (inSel ? 0.25f : 0.55f);
@@ -12036,8 +11855,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     gzHead(sx1, sy1, sx0, sy0, hot ? 14.0f : 11.0f, r, gc, b);
                     gzHead(sx0, sy0, sx1, sy1, hot ? 14.0f : 11.0f, r, gc, b);
                 };
-                bool solidStretchDraw = (ed.modelTool == 1 && isSolidGroup(ed.selQuad) && !stretchTargetsSolid());
-                bool partStretchDraw = ed.modelTool == 1 && stretchTargetsSolid();
+                bool solidStretchDraw = (ed.modelTool == 1 && isSolidGroup(ed.selQuad));
+                bool partStretchDraw = ed.modelTool == 1 && selectedIndices().empty() &&
+                    ed.selSolid >= 0 && ed.selSolid < (int)editModel.solids.size();
                 if (ed.modelTool == 0 || ed.modelTool == 3 || ed.modelTool == 4 || solidStretchDraw || partStretchDraw) {
                 Vec3 g; gizmoCenterView(g);
                 float L = gizmoSize();
@@ -12569,8 +12389,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 if (live) {
                     if (entIsCloth) {
                         fillEntThumb(liveThumb, ed.entityParts, 0, skinGL, entSheetW, entSheetH);
-                    } else if (entIsLoose && entSkin.empty()) {
-                        fillEntThumb(liveThumb, ed.entityParts, 0, 0, 0, 0);
                     } else {
                         fillEntThumb(liveThumb, ed.entityParts, skinGL, 0, 0, 0);
                     }
@@ -12946,10 +12764,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 if (cy + entCardRect[i].h < entListTop || cy > entListBot) continue;
                 const char* label = "";
                 if (const std::string* cardName = entityListName(i)) label = cardName->c_str();
-                if (i >= (int)entNames.size() && i < looseListEnd()) {
-                    const char* slash = std::strrchr(label, '/');
-                    if (slash && slash[1]) label = slash + 1;
-                }
                 if (i < (int)entNames.size()) {
                     if (const plugin::EntityModule* m = plugin::findEntity(label))
                         if (!m->title.empty()) label = m->title.c_str();

@@ -7,7 +7,6 @@
 #include "../world/player.hpp"
 #include "../world/world.hpp"
 #include "../world/vitals.hpp"
-#include "../world/target.hpp"
 
 namespace anim { struct Clip; }
 namespace mat { struct Model; }
@@ -38,20 +37,6 @@ struct RemoteAvatar {
     uint8_t heldL = 0, heldR = 0, carried = 0;
     uint8_t wearU = 0, wearL = 0, wearS = 0;
     bool spectator = false;
-    bool dead = false;
-    bool hitFlash = false;
-    uint8_t status = 0;
-    vitals::Vitals vitals{};
-};
-
-struct ArcaneProjectileView {
-    uint32_t id = 0, owner = 0;
-    Vec3 pos{}, vel{};
-};
-
-struct ArcaneBurstView {
-    Vec3 pos{};
-    float age = 0.0f;
 };
 
 struct RoomTeamView {
@@ -94,20 +79,6 @@ struct UIState {
     int targetFace = 0;
     int targetPhys = -1;
     int targetDrop = -1;
-    const std::vector<TrainingTarget>* targets = nullptr;
-    int targetAim = -1;          // training dummy under the crosshair
-    int targetPanel = -1;        // open status panel, index into targets
-    int targetBtnHover = -1;     // 0 dismantle, 1 reset health
-    bool targetPlaceReady = false;
-    int targetGuardian = -1; // relic index while the crosshair is on its guardian
-    Vec3 guardianCenter{ 0, 0, 0 };
-    Vec3 guardianSize{ 1, 1, 1 };
-    float guardianHurt = 0.0f; // 0 intact, 1 empty
-    bool bossNear = false;
-    int bossRelic = -1;
-    std::string bossName;
-    int bossHp = 0;
-    int bossMaxHp = 1;
     float breakProgress = 0.0f; // 0 intact .. 1 more cracks (targeted block)
     bool hasBreakOverlay = false;
     bool breakSod = false; // thinning sod overlay; dirt face stays drawn underneath
@@ -142,15 +113,7 @@ struct UIState {
     float tickSpeed = 1.0f;   // game-tick multiplier (0 = pause, up to 20x)
     float tickSliderX = 0, tickSliderY = 0, tickSliderW = 0, tickSliderH = 0;
     float timeSliderX = 0, timeSliderY = 0, timeSliderW = 0, timeSliderH = 0;
-    int debugHover = -1;      // 0 back, 1 humidity, 2 mat, 3 model, 4 dummy, 5 privilege, 6 fly, 7 trial space
-    bool inTrial = false;
-    bool trialPick = false;
-    int trialHover = -1;      // trial list: -2 back, 0..14 relic
-    int trialScroll = 0;
-    bool railOpen = false;    // 权限模式右侧第二列
-    int railHover = -1;       // 0 arrow, 1 guardian space, 2 fly, 3 quick break
-    bool quickBreak = false;  // 权限模式：左键直接破坏方块
-    float quickBreakWait = 0.0f; // seconds until the next quick break
+    int debugHover = -1;      // 0 back, 1 humidity, 2 mat, 3 model, 4 dummy, 5 privilege, 6 fly
     bool humidityMode = false; // render air as red/blue humidity blocks
     bool privilegeMode = false; // 权限模式 (debug): skip survival vitals / death
     float borderFog = 0.0f;     // 0..1 screen fog in the match rim
@@ -205,11 +168,6 @@ struct UIState {
 
     const vitals::Vitals* vitals = nullptr;
     bool playerDead = false;
-    float hitMarker = 0.0f;
-    float damageFlash = 0.0f;
-    uint8_t playerStatus = 0;
-    std::vector<ArcaneProjectileView> arcaneProjectiles;
-    std::vector<ArcaneBurstView> arcaneBursts;
     int deathHover = -1;      // 0 = respawn
 
     // Humidity label for the air block under the crosshair.
@@ -391,11 +349,7 @@ private:
                          const vitals::Vitals* tint = nullptr,
                          const anim::Clip* strike = nullptr, float strikeAt = 0.0f,
                          const Sky* sun = nullptr,
-                         uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR,
-                         bool bare = false);
-    void drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun);
-    void drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
-                           const UIState& ui, bool firstPerson);
+                         uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR);
     void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);
     void drawDeploy(UIState& ui);
 
@@ -447,9 +401,7 @@ private:
     void drawCreateWorld(UIState& ui);
     void drawInventory(UIState& ui);
     void drawNote(UIState& ui);
-    void drawInventoryDoll(UIState& ui, float x, float y, float w, float h,
-                           const vitals::Vitals* health = nullptr, bool showStamina = true);
-    void drawTargetPanel(UIState& ui);
+    void drawInventoryDoll(UIState& ui, float x, float y, float w, float h);
     void drawDeath(UIState& ui);
     void drawMaterialEditor(UIState& ui);
     void paletteLayout(int& x0, int& y0, int& cell, int& cols, int& rows) const;

@@ -160,14 +160,11 @@ public:
                            float hw, float hgt, bool& onGround) const;
 
     // inPlace: sit on `pos` with no velocity. Otherwise `vel` is the initial velocity.
-    uint32_t spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace = false, Vec3 vel = { 0, 0, 0 });
+    void spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace = false, Vec3 vel = { 0, 0, 0 });
     void updateDrops(float dt);
     const std::vector<loot::Drop>& drops() const { return m_drops; }
     int raycastDrop(const Vec3& origin, const Vec3& dir, float maxDist, float& tHit) const;
     bool takeDrop(int index, uint8_t& item, uint8_t& count); // removes; returns false if gone
-    const loot::Drop* dropById(uint32_t id) const;
-    bool takeDropCountById(uint32_t id, uint8_t count);
-    void replaceNetworkDrops(const std::vector<loot::Drop>& drops);
     void setDropCount(int index, uint8_t count);
 
     // Mining durability. applyMineHit applies the break formula once; true when the block is gone.
@@ -289,11 +286,6 @@ public:
     bool matchBounds() const { return m_matchBounds; }
     void setBuildCanvas(bool on);
     bool buildCanvas() const { return m_buildCanvas; }
-    void setGuardianArena(bool on);
-    bool guardianArena() const { return m_arena; }
-    void discardGuardianArenaChunks();
-    void loadGuardianArena();
-    void clearTrialDrops();
     void ensureColumn(int cx, int cz);
     void updateAnchors(const Vec3* pos, int count, int meshBudget);
     int humidityAt(int x, int y, int z) const; // air humidity -256..255
@@ -365,7 +357,6 @@ private:
     size_t m_sodCursor = 0;   // round-robin cursor for sodTick
     std::vector<PhysicsIsland> m_phys;
     std::vector<loot::Drop> m_drops;
-    uint32_t m_nextDropId = 1;
     uint32_t m_dropRng = 0xA341316Cu;
     std::unordered_map<uint64_t, MineState> m_blockDur;
     uint32_t m_mineEpoch = 1;
@@ -381,7 +372,6 @@ private:
     bool m_tagTrees = false;
     bool m_matchBounds = false;
     bool m_buildCanvas = false;
-    bool m_arena = false;
     uint32_t m_nextTree = 1;
     std::unordered_set<int64_t> m_authBark;
     std::unordered_map<AuthCellKey, AuthCell, AuthCellKeyHash> m_authCells;

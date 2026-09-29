@@ -17,7 +17,6 @@
 #include "../world/wear.hpp"
 #include "../world/matchmap.hpp"
 #include "../world/structure.hpp"
-#include "../world/ritual.hpp"
 #include <algorithm>
 #include <cstdarg>
 #include <cstddef>
@@ -799,16 +798,13 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes);
         }
         for (const RemoteAvatar& rp : ui.remotes) {
-            if (rp.spectator || rp.dead) continue;
+            if (rp.spectator) continue;
             const anim::Clip& clip = anim::clipFromNet(rp.clip);
             const anim::Clip* overlay = anim::strikeFromNet(rp.strike);
-            Vec3 reacted = rp.pos;
-            if (rp.hitFlash) reacted.y += 0.045f;
-            drawPlayerModel(reacted, rp.bodyYaw, rp.yaw, rp.pitch, eye, vp, false, &clip, rp.frame,
-                            rp.heldR, rp.heldL, rp.carried, &rp.vitals, overlay, rp.strikeFrame, &sky,
+            drawPlayerModel(rp.pos, rp.bodyYaw, rp.yaw, rp.pitch, eye, vp, false, &clip, rp.frame,
+                            rp.heldR, rp.heldL, rp.carried, nullptr, overlay, rp.strikeFrame, &sky,
                             rp.wearU, rp.wearL, rp.wearS);
         }
-        drawArcaneEffects(eye, vp, player, ui, firstPerson);
 
         // Observation dummy: loops walk in place. Head/body yaw stay a runtime overlay.
         if (ui.dummyActive) {
@@ -825,29 +821,9 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             AIR, AIR, AIR, nullptr, nullptr, 0.0f, &sky);
         }
 
-        if (ui.targets) {
-            const anim::Clip& idle = anim::playerClips().idle;
-            for (const TrainingTarget& t : *ui.targets)
-                drawPlayerModel(t.feet, t.yaw, t.yaw, 0.0f, eye, vp, false,
-                                &idle, 0.0f, AIR, AIR, AIR, &t.vitals, nullptr, 0.0f, &sky,
-                                AIR, AIR, AIR, true);
-        }
-
-        drawGuardians(world, eye, vp, &sky);
-
         if (ui.humidityMode) drawHumidity(world, eye, vp);
 
-        if (ui.targetAim >= 0 && ui.targets && ui.targetAim < (int)ui.targets->size()) {
-            const TrainingTarget& t = (*ui.targets)[(size_t)ui.targetAim];
-            drawOutlineAt(vp, eye, { t.feet.x, t.feet.y + 0.90f, t.feet.z },
-                          { 0.84f, 1.86f, 0.84f }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 },
-                          1.0f, 1.0f, 1.0f, 0.95f);
-        } else if (ui.targetGuardian >= 0) {
-            float hurt = clampf(ui.guardianHurt, 0.0f, 1.0f);
-            drawOutlineAt(vp, eye, ui.guardianCenter, ui.guardianSize,
-                          { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 },
-                          1.0f, 1.0f - hurt, 1.0f - hurt, 0.95f);
-        } else if (ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
+        if (ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
             const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
             const dropgeom::Shape& sh = dropgeom::cached(d.item);
             Vec3 box{ sh.half.x * 2.16f, sh.half.y * 2.16f, sh.half.z * 2.16f };
@@ -1151,70 +1127,6 @@ void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center
     gl::BindVertexArray(0);
 }
 
-void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
-                                 const UIState& ui, bool firstPerson) {
-    static const Vec3 axes[12] = {
-        {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
-        {.7f,.7f,0},{-.7f,.7f,0},{.7f,0,.7f},{-.7f,0,.7f},{0,.7f,.7f},{0,.7f,-.7f}
-    };
-    const Vec3 X{1,0,0}, Y{0,1,0}, Z{0,0,1};
-    gl::Enable(GL_BLEND);
-    gl::Disable(GL_CULL_FACE);
-
-    for (const ArcaneProjectileView& projectile : ui.arcaneProjectiles) {
-        float pulse = 0.5f + 0.5f * std::sin(ui.timeOfDay * 0.09f + projectile.id * 1.7f);
-        float core = 0.18f + pulse * 0.035f;
-        drawOutlineAt(vp, eye, projectile.pos, {core,core,core}, X,Y,Z, 1.0f,.78f,.08f,1.0f);
-        drawOutlineAt(vp, eye, projectile.pos, {core*.58f,core*.58f,core*.58f}, X,Y,Z, 1.0f,.20f,.02f,1.0f);
-        Vec3 back = projectile.vel.normalized();
-        for (int i = 0; i < 7; ++i) {
-            float along = 0.12f + i * 0.105f;
-            float size = 0.12f * (1.0f - i / 9.0f);
-            float wobble = std::sin(ui.timeOfDay * .15f + projectile.id + i * 1.9f) * .035f;
-            Vec3 at = projectile.pos - back * along + Vec3{0,wobble,0};
-            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          1.0f, i < 3 ? .46f : .16f, .02f, .82f - i * .08f);
-        }
-    }
-
-    for (const ArcaneBurstView& burst : ui.arcaneBursts) {
-        float u = clampf(burst.age / .65f, 0.0f, 1.0f);
-        float alpha = 1.0f - u;
-        float shell = .22f + u * 2.4f;
-        drawOutlineAt(vp, eye, burst.pos, {shell,shell,shell}, X,Y,Z, 1.0f,.28f,.02f,alpha);
-        drawOutlineAt(vp, eye, burst.pos, {shell*.62f,shell*.62f,shell*.62f}, X,Y,Z,
-                      1.0f,.82f,.12f,alpha);
-        for (int i = 0; i < 12; ++i) {
-            Vec3 at = burst.pos + axes[i] * (u * 1.7f);
-            float size = .16f * (1.0f - u * .55f);
-            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          1.0f, (i & 1) ? .18f : .65f, .02f, alpha);
-        }
-    }
-
-    auto drawBurning = [&](Vec3 feet, uint32_t seed) {
-        for (int i = 0; i < 12; ++i) {
-            float phase = ui.timeOfDay * .055f + seed * .37f + i * .71f;
-            float rise = std::fmod(phase, 1.0f);
-            if (rise < 0.0f) rise += 1.0f;
-            float angle = seed * .21f + i * 2.39996f + ui.timeOfDay * .012f;
-            float radius = .22f + .07f * std::sin(phase * 4.0f);
-            Vec3 at = feet + Vec3{std::cos(angle)*radius, .15f + rise*1.65f,
-                                  std::sin(angle)*radius};
-            float size = .08f + (1.0f-rise)*.055f;
-            drawOutlineAt(vp, eye, at, {size,size*1.35f,size}, X,Y,Z,
-                          1.0f, i % 3 ? .18f : .72f, .01f, .9f-rise*.45f);
-        }
-    };
-    if (!firstPerson && !ui.spectating && !ui.hideAvatar && !ui.playerDead && (ui.playerStatus & 1u))
-        drawBurning(player.pos, 1);
-    for (const RemoteAvatar& remote : ui.remotes)
-        if (!remote.spectator && !remote.dead && (remote.status & 1u)) drawBurning(remote.pos, remote.id);
-
-    gl::Enable(GL_CULL_FACE);
-    gl::Disable(GL_BLEND);
-}
-
 void Renderer::drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,
                              int phys, int bx, int by, int bz, int face,
                              const float* steps, int nSteps) {
@@ -1474,7 +1386,7 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
                                const anim::Clip* clip, float frame, uint8_t heldRight,
                                uint8_t heldLeft, uint8_t carried, const vitals::Vitals* tint,
                                const anim::Clip* strike, float strikeAt, const Sky* sun,
-                               uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes, bool bare) {
+                               uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes) {
     const anim::PlayerClips& lib = anim::playerClips();
     const bool hugging = hold::isCarrying(carried);
     std::vector<anim::BoneXform> pose;
@@ -1511,24 +1423,6 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
             if (id >= 0) p.color = vitals::healthColor(tint->limb[id].health);
         }
     }
-    if (bare) {
-        const Vec3 gray{ 0.62f, 0.62f, 0.64f };
-        std::vector<pm::Part> body;
-        body.reserve(parts.size());
-        for (pm::Part& p : parts) {
-            if (pm::isHairPart(p) || pm::isHairCardPart(p)) continue;
-            if (pm::isEyePart(p) || pm::isEyelidPart(p) || pm::isMouthPart(p)) continue;
-            if (pm::isCutoutPart(p) || pm::isDecalPart(p)) continue;
-            if (p.kind == "cloth") continue;
-            int id = vitals::limbFromName(p.name);
-            if (id < 0) id = vitals::limbFromName(p.kind);
-            if (!(tint && id >= 0)) p.color = gray;
-            p.tex.clear();
-            p.kind.clear();
-            body.push_back(std::move(p));
-        }
-        parts.swap(body);
-    }
     uint8_t wornIds[3] = { wearUpper, wearLower, wearShoes };
     const float S = 1.0f; // model parts are in world units (player is ~1.8 world tall)
 
@@ -1549,8 +1443,8 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         return 0;
     };
     pdraw::Mesh mesh;
-    pdraw::build(parts, xform, [&](const std::string& n) { return !bare && namedTex(n) != 0; },
-                 !bare && skinTex != 0, hideHead, mesh, tint != nullptr);
+    pdraw::build(parts, xform, [&](const std::string& n) { return namedTex(n) != 0; },
+                 skinTex != 0, hideHead, mesh, tint != nullptr);
 
     gl::Enable(GL_DEPTH_TEST);
     gl::DepthMask(GL_TRUE);
@@ -1744,59 +1638,6 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
     drawBound(heldRight, "right", rightClip);
     drawBound(heldLeft, "left", locClip);
     if (hugging) drawBound(carried, "right", "hold_block", 0.5f);
-    gl::Enable(GL_CULL_FACE);
-}
-
-void Renderer::drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun) {
-    std::vector<structure::GuardianSpan> guards;
-    structure::collectGuardians(world, guards);
-    if (guards.empty()) return;
-
-    static std::vector<pm::Part> parts[ritual::RelicCount];
-    static bool loaded[ritual::RelicCount]{};
-
-    gl::Enable(GL_DEPTH_TEST);
-    gl::DepthMask(GL_TRUE);
-    gl::Disable(GL_CULL_FACE);
-    for (const structure::GuardianSpan& g : guards) {
-        if (g.relic < 0 || g.relic >= ritual::RelicCount) continue;
-        if (!loaded[g.relic]) {
-            loaded[g.relic] = true;
-            const char* stem = structure::guardianAppearance(g.relic);
-            if (stem && stem[0]) {
-                std::string path = pack::entityModel(std::string("guardians/") + stem);
-                parts[g.relic] = pm::loadEntity(path.c_str()).parts;
-            }
-        }
-        if (parts[g.relic].empty()) continue;
-        Vec3 feet{ g.feetX, g.feetY, g.feetZ };
-        auto xform = [&](const pm::Part& p, float lx, float ly, float lz) -> Vec3 {
-            (void)p;
-            float rx, rz;
-            pm::lookYawXZ(lx, lz, 0.0f, rx, rz);
-            return { feet.x + rx - eye.x, feet.y + ly - eye.y, feet.z + rz - eye.z };
-        };
-        pdraw::Mesh mesh;
-        pdraw::build(parts[g.relic], xform, [](const std::string&) { return false; }, false, false, mesh);
-        if (mesh.solid.empty()) continue;
-        gl::UseProgram(progHum);
-        if (sun) {
-            gl::Uniform1f(uHumLit, 1.0f);
-            gl::Uniform3f(uHumSunDir, sun->sunDir.x, sun->sunDir.y, sun->sunDir.z);
-            gl::Uniform3f(uHumSunColor, sun->sunColor.x, sun->sunColor.y, sun->sunColor.z);
-            gl::Uniform3f(uHumAmbient, sun->ambient.x, sun->ambient.y, sun->ambient.z);
-            gl::Uniform3f(uHumFogColor, sun->fogColor.x, sun->fogColor.y, sun->fogColor.z);
-            gl::Uniform1f(uHumFogDensity, cfg::FOG_DENSITY);
-        } else {
-            gl::Uniform1f(uHumLit, 0.0f);
-        }
-        gl::UniformMatrix4fv(uHumMVP, 1, GL_FALSE, vp.m);
-        gl::BindVertexArray(humVAO);
-        gl::BindBuffer(GL_ARRAY_BUFFER, humVBO);
-        gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(mesh.solid.size() * sizeof(float)), mesh.solid.data(), GL_STREAM_DRAW);
-        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(mesh.solid.size() / 7));
-        gl::BindVertexArray(0);
-    }
     gl::Enable(GL_CULL_FACE);
 }
 
@@ -2919,51 +2760,14 @@ void Renderer::drawSettings(UIState& ui) {
 
 void Renderer::drawDebugMenu(UIState& ui) {
     const float bw = 340.0f, bh = 42.0f;
-    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.6f);
-
-    if (ui.trialPick) {
-        ui.trialHover = -1;
-        ui.railHover = -1;
-        const float rowH = 34.0f;
-        const float listTop = 108.0f;
-        const float listBot = (float)scrH - 96.0f;
-        int visible = (int)((listBot - listTop) / rowH);
-        if (visible < 1) visible = 1;
-        int maxScroll = ritual::RelicCount - visible;
-        if (maxScroll < 0) maxScroll = 0;
-        if (ui.trialScroll < 0) ui.trialScroll = 0;
-        if (ui.trialScroll > maxScroll) ui.trialScroll = maxScroll;
-        const float bx = (scrW - bw) * 0.5f;
-        for (int i = 0; i < visible; i++) {
-            int idx = ui.trialScroll + i;
-            if (idx < 0 || idx >= ritual::RelicCount) break;
-            float y = listTop + i * rowH;
-            bool hover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= y && ui.mouseY < y + rowH - 4.0f;
-            if (hover) ui.trialHover = idx;
-            buttonChrome(bx, y, bw, rowH - 4.0f, hover);
-        }
-        float backY = (float)scrH - 78.0f;
-        bool backHover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= backY && ui.mouseY < backY + bh;
-        if (backHover) ui.trialHover = -2;
-        buttonChrome(bx, backY, bw, bh, backHover);
-        flushUI(progUI, whiteTex);
-        centeredText("选择守护者", scrW * 0.5f, 56.0f, 1.3f, 1, 1, 1, 1);
-        for (int i = 0; i < visible; i++) {
-            int idx = ui.trialScroll + i;
-            if (idx < 0 || idx >= ritual::RelicCount) break;
-            float y = listTop + i * rowH;
-            centeredText(ritual::relicName(idx), bx + bw * 0.5f, y + (rowH - 4.0f) * 0.5f, 1.0f, 1, 1, 1, 1);
-        }
-        centeredText("返回", bx + bw * 0.5f, backY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
-        return;
-    }
-
     const float bx = (scrW - bw) * 0.5f;
     const float titleY = scrH * 0.5f - 236.0f;
     const float sliderW = 380.0f, sliderH = 14.0f;
     const float sliderX = (scrW - sliderW) * 0.5f;
     const float ts = 1.3f;
     const float gap = 6.0f;
+
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.6f);
 
     auto slider = [&](float y, float frac, float* rx, float* ry, float* rw, float* rh) {
         float f = clampf(frac, 0.0f, 1.0f);
@@ -2983,7 +2787,8 @@ void Renderer::drawDebugMenu(UIState& ui) {
     slider(timeY, ui.timeOfDay / (float)cfg::TICKS_PER_DAY, &ui.timeSliderX, &ui.timeSliderY, &ui.timeSliderW, &ui.timeSliderH);
 
     const float permY = scrH * 0.5f + 12.0f;
-    const float humY = permY + bh + gap;
+    const float flyY = permY + bh + gap;
+    const float humY = flyY + bh + gap;
     const float matY = humY + bh + gap;
     const float modY = matY + bh + gap;
     const float dumY = modY + bh + gap;
@@ -2994,10 +2799,13 @@ void Renderer::drawDebugMenu(UIState& ui) {
     };
 
     ui.debugHover = -1;
-    ui.railHover = -1;
     bool permHover = hitBtn(permY);
     if (permHover) ui.debugHover = 5;
     buttonChrome(bx, permY, bw, bh, permHover);
+
+    bool flyHover = hitBtn(flyY);
+    if (flyHover) ui.debugHover = 6;
+    buttonChrome(bx, flyY, bw, bh, flyHover);
 
     bool humHover = hitBtn(humY);
     if (humHover) ui.debugHover = 1;
@@ -3018,37 +2826,6 @@ void Renderer::drawDebugMenu(UIState& ui) {
     bool backHover = hitBtn(backY);
     if (backHover) ui.debugHover = 0;
     buttonChrome(bx, backY, bw, bh, backHover);
-
-    const bool showRail = (ui.privilegeMode || ui.inTrial) && !ui.roomSession && !ui.structureEdit;
-    const float aw = 46.0f;
-    const float ax = bx + bw + 12.0f;
-    const float ay = permY;
-    const float colW = 280.0f;
-    const float colX = ax + aw + 12.0f;
-    const float spaceY = ay;
-    const float flyBtnY = spaceY + bh + gap;
-    const float breakBtnY = flyBtnY + bh + gap;
-    const bool showQuick = ui.privilegeMode;
-    const float railBottom = showQuick ? (breakBtnY + bh) : (flyBtnY + bh);
-    const float ah = ui.railOpen ? (railBottom - ay) : bh;
-    if (showRail) {
-        bool arrowHover = ui.mouseX >= ax && ui.mouseX < ax + aw && ui.mouseY >= ay && ui.mouseY < ay + ah;
-        if (arrowHover) ui.railHover = 0;
-        buttonChrome(ax, ay, aw, ah, arrowHover);
-        if (ui.railOpen) {
-            bool spaceHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= spaceY && ui.mouseY < spaceY + bh;
-            bool flyHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= flyBtnY && ui.mouseY < flyBtnY + bh;
-            if (spaceHover) ui.railHover = 1;
-            if (flyHover) ui.railHover = 2;
-            buttonChrome(colX, spaceY, colW, bh, spaceHover);
-            buttonChrome(colX, flyBtnY, colW, bh, flyHover);
-            if (showQuick) {
-                bool breakHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= breakBtnY && ui.mouseY < breakBtnY + bh;
-                if (breakHover) ui.railHover = 3;
-                buttonChrome(colX, breakBtnY, colW, bh, breakHover);
-            }
-        }
-    }
     flushUI(progUI, whiteTex);
 
     centeredText("调试菜单", scrW * 0.5f, titleY, ts, 1, 1, 1, 1);
@@ -3063,16 +2840,7 @@ void Renderer::drawDebugMenu(UIState& ui) {
     snprintf(val, sizeof(val), "%02d:%02d", hours, mins);
     drawString(val, sliderX + sliderW + 18.0f, timeY - 4.0f, 0.9f, 0.78f, 0.78f, 0.78f, 1.0f);
     centeredText(ui.privilegeMode ? "权限模式：开" : "权限模式：关", bx + bw * 0.5f, permY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
-    if (showRail) {
-        centeredText(ui.railOpen ? "▶" : "◀", ax + aw * 0.5f, ay + ah * 0.5f, 1.15f, 1, 1, 1, 1);
-        if (ui.railOpen) {
-            const char* spaceLabel = ui.inTrial ? "退出守护者空间" : "进入守护者空间";
-            centeredText(spaceLabel, colX + colW * 0.5f, spaceY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
-            centeredText(ui.flying ? "关闭飞行" : "开启飞行", colX + colW * 0.5f, flyBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
-            if (ui.privilegeMode)
-                centeredText(ui.quickBreak ? "快速破坏：开" : "快速破坏：关", colX + colW * 0.5f, breakBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
-        }
-    }
+    centeredText(ui.flying ? "飞行模式：开" : "飞行模式：关", bx + bw * 0.5f, flyY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
     std::string humLabel = std::string("湿度显示：") + (ui.humidityMode ? "开" : "关");
     centeredText(humLabel, bx + bw * 0.5f, humY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
     centeredText("材质编辑器", bx + bw * 0.5f, matY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
@@ -3269,23 +3037,6 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
-    auto drawCoordinates = [&]() {
-        const float invBlock = 1.0f / cfg::BLOCK_SCALE;
-        int bx = (int)std::floor(ui.playerPos.x * invBlock);
-        int by = (int)std::floor(ui.playerPos.y * invBlock);
-        int bz = (int)std::floor(ui.playerPos.z * invBlock);
-        auto floorChunk = [](int block, int span) {
-            int q = block / span;
-            if (block < 0 && block % span != 0) --q;
-            return q;
-        };
-        int cx = floorChunk(bx, cfg::CHUNK_X);
-        int cz = floorChunk(bz, cfg::CHUNK_Z);
-        quad(8, 8, 430, 28, 0, 0, 0, 0, 0.02f, 0.025f, 0.03f, 0.68f);
-        flushUI(progUI, whiteTex);
-        text(14, 12, 0.78f, 0.96f, 0.96f, 0.92f, 1.0f,
-             "坐标 X %d  Y %d  Z %d   |   区块 %d,%d", bx, by, bz, cx, cz);
-    };
     if (ui.storyOpen) {
         quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 1.0f);
         flushUI(progUI, whiteTex);
@@ -3319,11 +3070,6 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
-    if (ui.targetPanel >= 0) {
-        drawTargetPanel(ui);
-        gl::Enable(GL_DEPTH_TEST);
-        return;
-    }
     if (ui.playerDead) {
         drawDeath(ui);
         gl::Enable(GL_DEPTH_TEST);
@@ -3336,7 +3082,6 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         quad(cx - 1, cy - 9, 2, 18, 0, 0, 0, 0, 1, 1, 1, 0.9f);
         flushUI(progUI, whiteTex);
         centeredText("观战", cx, 28.0f, 1.0f, 0.9f, 0.9f, 0.95f, 1);
-        drawCoordinates();
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
@@ -3348,23 +3093,6 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
 
     const float cx = scrW * 0.5f;
     const float cy = scrH * 0.5f;
-    if (ui.bossNear && ui.bossMaxHp > 0 && !ui.bossName.empty()) {
-        const float barW = 420.0f;
-        const float barH = 16.0f;
-        const float barX = cx - barW * 0.5f;
-        const float barY = 52.0f;
-        float frac = clampf((float)ui.bossHp / (float)ui.bossMaxHp, 0.0f, 1.0f);
-        centeredText("守护者", cx, 16.0f, 0.72f, 0.86f, 0.70f, 0.36f, 1.0f);
-        centeredText(ui.bossName, cx, 36.0f, 1.05f, 0.96f, 0.93f, 0.84f, 1.0f);
-        quad(barX - 3.0f, barY - 3.0f, barW + 6.0f, barH + 6.0f, 0, 0, 0, 0, 0.04f, 0.03f, 0.03f, 0.88f);
-        quad(barX, barY, barW, barH, 0, 0, 0, 0, 0.22f, 0.08f, 0.08f, 0.95f);
-        if (frac > 0.0f)
-            quad(barX, barY, barW * frac, barH, 0, 0, 0, 0, 0.78f, 0.16f, 0.13f, 1.0f);
-        flushUI(progUI, whiteTex);
-        char hpBuf[48];
-        snprintf(hpBuf, sizeof(hpBuf), "%d / %d", ui.bossHp, ui.bossMaxHp);
-        centeredText(hpBuf, cx, barY + barH * 0.5f, 0.62f, 1.0f, 0.96f, 0.92f, 1.0f);
-    }
     const int n = cfg::HOTBAR_SLOTS;
     const float slot = 46.0f, gap = 4.0f;
     const float carryS = 56.0f;
@@ -3375,19 +3103,13 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     const float carryY = hbY + slot - carryS;
     leftX = carryX + carryS + 12.0f;
     const bool carrying = ui.carrySlot && !ui.carrySlot->empty();
-    const bool leftSealed = ui.vitals && ui.vitals->limb[vitals::HandL].health <= vitals::kDeadEps;
-    const bool rightSealed = ui.vitals && ui.vitals->limb[vitals::HandR].health <= vitals::kDeadEps;
-    const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0 || ui.targetAim >= 0);
+    const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0);
 
     CrosshairPrompt promptItems[4];
     int promptCount = 0;
-    if (fPrompt) {
-        const char* action = "拾取";
-        if (ui.targetAim >= 0) action = "状态";
-        else if (carrying) action = "放下";
-        promptItems[promptCount++] = { CrosshairKeyKind::Text, "F", action };
-    }
-    if (ui.hasPlacePreview || ui.targetPlaceReady)
+    if (fPrompt)
+        promptItems[promptCount++] = { CrosshairKeyKind::Text, "F", carrying ? "放下" : "拾取" };
+    if (ui.hasPlacePreview)
         promptItems[promptCount++] = { CrosshairKeyKind::MouseRight, "", "放置" };
     std::vector<CrosshairPromptBox> promptBoxes;
     layoutCrosshairPrompts(promptItems, promptCount, cx + 36.0f, cy, promptBoxes);
@@ -3395,19 +3117,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     // ---- solid-color pass (white texture) ----
     if (ui.borderFog > 0.001f)
         quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.78f, 0.79f, 0.80f, ui.borderFog);
-    if (ui.damageFlash > 0.0f)
-        quad(0, 0, (float)scrW, (float)scrH, 0,0,0,0, .75f,.03f,.01f,
-             .18f * clampf(ui.damageFlash / .20f, 0.0f, 1.0f));
     quad(cx - 9, cy - 1, 18, 2, 0, 0, 0, 0, 1, 1, 1, 0.9f);
     quad(cx - 1, cy - 9, 2, 18, 0, 0, 0, 0, 1, 1, 1, 0.9f);
-    if (ui.hitMarker > 0.0f) {
-        float a = clampf(ui.hitMarker / .22f, 0.0f, 1.0f);
-        const float o = 13.0f, n = 7.0f, t = 2.0f;
-        quad(cx-o-n, cy-o, n, t, 0,0,0,0, 1,.25f,.18f,a);
-        quad(cx+o, cy-o, n, t, 0,0,0,0, 1,.25f,.18f,a);
-        quad(cx-o-n, cy+o, n, t, 0,0,0,0, 1,.25f,.18f,a);
-        quad(cx+o, cy+o, n, t, 0,0,0,0, 1,.25f,.18f,a);
-    }
     drawCrosshairPromptChrome(promptBoxes);
 
     if (!ui.structureEdit) {
@@ -3424,14 +3135,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
 
         for (int i = 0; i < n; i++) {
             float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
-            bool sealed = i < cfg::HAND_SLOTS ? leftSealed : rightSealed;
-            float slotBg = sealed ? 0.08f :
-                (splitHotbarSelected(i, ui) ? (carrying ? 0.40f : 0.55f) : (carrying ? 0.18f : 0.28f));
+            float slotBg = splitHotbarSelected(i, ui) ? (carrying ? 0.40f : 0.55f) : (carrying ? 0.18f : 0.28f);
             quad(sx, hbY, slot, slot, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, slotBg);
-            if (sealed) {
-                quad(sx + 5, hbY + slot*.5f - 1, slot - 10, 2, 0,0,0,0, .65f,.08f,.06f,.9f);
-                quad(sx + slot*.5f - 1, hbY + 5, 2, slot - 10, 0,0,0,0, .65f,.08f,.06f,.9f);
-            }
         }
         for (int i = 0; i < n; i++) {
             if (!splitHotbarSelected(i, ui)) continue;
@@ -3473,9 +3178,7 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         }
     }
 
-    if (!ui.showDebug) {
-        drawCoordinates();
-    } else {
+    if (ui.showDebug) {
         int ticks = ((int)timeOfDay % cfg::TICKS_PER_DAY + cfg::TICKS_PER_DAY) % cfg::TICKS_PER_DAY;
         int hours = ticks / 1000;
         int mins = (ticks % 1000) * 60 / 1000;
@@ -3579,50 +3282,14 @@ void Renderer::drawDeath(UIState& ui) {
     centeredText("重生", bx + bw * 0.5f, by + bh * 0.5f, 1.0f, 1, 1, 1, 1);
 }
 
-void Renderer::drawTargetPanel(UIState& ui) {
-    ui.targetBtnHover = -1;
-    if (!ui.targets || ui.targetPanel < 0 || ui.targetPanel >= (int)ui.targets->size()) return;
-    const TrainingTarget& target = (*ui.targets)[(size_t)ui.targetPanel];
-
-    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.45f);
-
-    const float dollH = std::min(520.0f, (float)scrH - 96.0f);
-    const float dollW = dollH * (248.0f / 470.0f);
-    const float btnW = 220.0f;
-    const float btnH = 52.0f;
-    const float btnGap = 14.0f;
-    const float midGap = 28.0f;
-    const float groupW = dollW + midGap + btnW;
-    const float groupH = dollH;
-    const float x = ((float)scrW - groupW) * 0.5f;
-    const float y = ((float)scrH - groupH) * 0.5f;
-    drawInventoryDoll(ui, x, y, dollW, dollH, &target.vitals, false);
-
-    const float bx = x + dollW + midGap;
-    const float stackH = btnH * 2.0f + btnGap;
-    const float by0 = y + (dollH - stackH) * 0.5f;
-    const float by1 = by0 + btnH + btnGap;
-    bool dismantle = ui.mouseX >= bx && ui.mouseX < bx + btnW && ui.mouseY >= by0 && ui.mouseY < by0 + btnH;
-    bool reset = ui.mouseX >= bx && ui.mouseX < bx + btnW && ui.mouseY >= by1 && ui.mouseY < by1 + btnH;
-    if (dismantle) ui.targetBtnHover = 0;
-    if (reset) ui.targetBtnHover = 1;
-    buttonChrome(bx, by0, btnW, btnH, dismantle, 0.55f, 0.28f, 0.24f);
-    buttonChrome(bx, by1, btnW, btnH, reset, 0.28f, 0.48f, 0.24f);
-    flushUI(progUI, whiteTex);
-    centeredText("标靶", x + dollW * 0.5f, y - 18.0f, 1.05f, 0.95f, 0.95f, 0.93f, 1.0f);
-    centeredText("拆除标靶", bx + btnW * 0.5f, by0 + btnH * 0.5f, 0.95f, 1, 1, 1, 1);
-    centeredText("重置血量", bx + btnW * 0.5f, by1 + btnH * 0.5f, 0.95f, 1, 1, 1, 1);
-}
-
-void Renderer::drawInventoryDoll(UIState& ui, float x, float y, float w, float h,
-                                 const vitals::Vitals* health, bool showStamina) {
+void Renderer::drawInventoryDoll(UIState& ui, float x, float y, float w, float h) {
     if (w < 8.0f || h < 8.0f) return;
 
     quad(x - 4, y - 4, w + 8, h + 8, 0, 0, 0, 0, 0.08f, 0.08f, 0.09f, 1.0f);
     quad(x, y, w, h, 0, 0, 0, 0, 0.14f, 0.14f, 0.16f, 1.0f);
 
-    const bool survival = health ? showStamina : (!ui.privilegeMode && ui.vitals);
-    const vitals::Vitals* vp = health ? health : (survival ? ui.vitals : nullptr);
+    const bool survival = !ui.privilegeMode && ui.vitals;
+    const vitals::Vitals* vp = survival ? ui.vitals : nullptr;
     const Vec3 paper{ 0.56f, 0.55f, 0.53f };
     const Vec3 ink = vitals::outlineColor();
 

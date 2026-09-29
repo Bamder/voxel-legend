@@ -1,6 +1,5 @@
 #include "player.hpp"
 #include "player_model.hpp"
-#include "structure.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -20,14 +19,7 @@ void Player::syncBodyYaw() {
         bodyYaw = yaw;
 }
 
-void Player::update(const World& world, const InputState& requested, float dt, MovementLimits limits) {
-    InputState in = requested;
-    in.jump = in.jump && limits.jump;
-    in.sprint = in.sprint && limits.sprint;
-    if (!limits.horizontal) {
-        in.forward = in.back = in.left = in.right = false;
-        vel.x = vel.z = 0;
-    }
+void Player::update(const World& world, const InputState& in, float dt) {
     const float S = cfg::BLOCK_SCALE;
     int ex = (int)std::floor(pos.x / S);
     int ez = (int)std::floor(pos.z / S);
@@ -72,7 +64,6 @@ void Player::update(const World& world, const InputState& requested, float dt, M
     // itself yields. Water keeps its swim speed; drag still bleeds extra velocity.
     if (!flying && !inWater && dragH > 0.0f)
         speed /= (1.0f + dragH * 0.25f);
-    speed *= clampf(limits.speed, 0.0f, 1.0f);
     float accel = flying ? 60.0f : (onGround ? 80.0f : 18.0f);
     if (inWater) accel = 20.0f;
 
@@ -148,10 +139,7 @@ void Player::moveAxis(const World& world, int axis, float delta) {
     for (int bx = x0; bx <= x1 && !hit; bx++)
         for (int by = y0; by <= y1 && !hit; by++)
             for (int bz = z0; bz <= z1 && !hit; bz++)
-                if (blocksMotion(world.getBlock(bx, by, bz)) &&
-                    !structure::isGuardianToken(bx, by, bz, world.getBlock(bx, by, bz))) {
-                    hitX = bx; hitY = by; hitZ = bz; hit = true;
-                }
+                if (blocksMotion(world.getBlock(bx, by, bz))) { hitX = bx; hitY = by; hitZ = bz; hit = true; }
 
     if (!hit) {
         world.resolvePhysPlayer(pos, vel, axis, delta, HW, HGT, onGround);
@@ -172,9 +160,7 @@ void Player::moveAxis(const World& world, int axis, float delta) {
             for (int bx = x0; bx <= x1 && clear; bx++)
                 for (int by = ny0; by <= ny1 && clear; by++)
                     for (int bz = z0; bz <= z1 && clear; bz++)
-                        if (blocksMotion(world.getBlock(bx, by, bz)) &&
-                            !structure::isGuardianToken(bx, by, bz, world.getBlock(bx, by, bz)))
-                            clear = false;
+                        if (blocksMotion(world.getBlock(bx, by, bz))) clear = false;
             if (clear) {
                 onGround = true;
                 vel.y = 0.0f;

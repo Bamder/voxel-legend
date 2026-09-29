@@ -64,15 +64,6 @@ static int faceForNormal(int axis, int sign) {
     return sign > 0 ? 4 : 5;
 }
 
-bool trialColumnOverlaps(int cx, int cz) {
-    int x0 = cx * cfg::CHUNK_X;
-    int z0 = cz * cfg::CHUNK_Z;
-    int x1 = x0 + cfg::CHUNK_X;
-    int z1 = z0 + cfg::CHUNK_Z;
-    return x1 > structure::kTrialX0 && x0 < structure::kTrialX0 + structure::kTrialSpan
-        && z1 > structure::kTrialZ0 && z0 < structure::kTrialZ0 + structure::kTrialSpan;
-}
-
 } // namespace
 
 uint8_t World::getBlock(int x, int y, int z) const {
@@ -196,7 +187,7 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     removeSodAt(it->second, lx, ly, lz);
     removeBarkAt(it->second, lx, ly, lz);
 
-    if (markModified && !(m_arena && trialColumnOverlaps(cx, cz))) {
+    if (markModified) {
         it->second.modified = true;
         rememberEdited(cx, cz);
     }
@@ -266,7 +257,6 @@ void World::reset(uint32_t seed) {
     m_sodCursor = 0;
     m_phys.clear();
     m_drops.clear();
-    m_nextDropId = 1;
     m_blockDur.clear();
     m_originTrees.clear();
     m_authCells.clear();
@@ -275,7 +265,6 @@ void World::reset(uint32_t seed) {
     m_editedCols.clear();
     m_nextTree = 1;
     m_mineEpoch = 1;
-    m_arena = false;
     if (m_matchBounds) structure::roll(m_seed);
 }
 
@@ -319,74 +308,6 @@ void World::setBuildCanvas(bool on) {
 }
 
 void World::generateColumn(int cx, int cz) {
-    auto commit = [&](ColumnBuf& col) {
-        for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
-            bool any = false;
-            int base = cy * cfg::CHUNK_Y;
-            for (int ly = 0; ly < cfg::CHUNK_Y && !any; ly++) {
-                for (int lz = 0; lz < cfg::CHUNK_Z && !any; lz++) {
-                    for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
-                        if (col.get(lx, base + ly, lz) != AIR) { any = true; break; }
-                    }
-                }
-            }
-            if (!any) continue;
-            Chunk slice;
-            slice.generated = true;
-            slice.dirty = true;
-            for (int ly = 0; ly < cfg::CHUNK_Y; ly++) {
-                for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
-                    for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
-                        int src = col.idx(lx, base + ly, lz);
-                        int dst = (ly * cfg::CHUNK_Z + lz) * cfg::CHUNK_X + lx;
-                        slice.blocks[(size_t)dst] = col.blocks[(size_t)src];
-                        slice.flags[(size_t)dst] = col.flags[(size_t)src];
-                        if (col.treeId[(size_t)src] != 0) slice.setTreeId(lx, ly, lz, col.treeId[(size_t)src]);
-                        if (slice.blocks[(size_t)dst] == WATER) slice.hasWater = true;
-                    }
-                }
-            }
-            int64_t key = chunkKey(cx, cy, cz);
-            if (m_chunks.find(key) == m_chunks.end())
-                m_chunks.emplace(key, std::move(slice));
-        }
-    };
-
-    if (m_arena && trialColumnOverlaps(cx, cz)) {
-        ColumnBuf room;
-        const int ax0 = structure::kTrialX0;
-        const int az0 = structure::kTrialZ0;
-        const int ax1 = ax0 + structure::kTrialSpan;
-        const int az1 = az0 + structure::kTrialSpan;
-        const int ccx = structure::kTrialCX;
-        const int ccz = structure::kTrialCZ;
-        const uint8_t shell = (uint8_t)ARENA_SHELL;
-        for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
-            for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
-                int wx = cx * cfg::CHUNK_X + lx;
-                int wz = cz * cfg::CHUNK_Z + lz;
-                bool inside = wx >= ax0 && wx < ax1 && wz >= az0 && wz < az1;
-                int dx = wx - ccx;
-                int dz = wz - ccz;
-                int cheb = std::max(std::abs(dx), std::abs(dz));
-                bool pillar = std::abs(dx) == 8 && std::abs(dz) == 8;
-                bool ring = cheb >= 3 && cheb <= 5 && ((dx * 3 + dz * 5) & 3) != 0;
-                for (int y = 0; y < cfg::WORLD_H; y++) {
-                    uint8_t b = AIR;
-                    if (!inside) b = shell;
-                    else if (y == 0 || y == cfg::WORLD_H - 1) b = shell;
-                    else if (wx == ax0 || wx == ax1 - 1 || wz == az0 || wz == az1 - 1) b = shell;
-                    else if (pillar && y >= 1 && y <= 4) b = shell;
-                    else if (ring && y == 1) b = shell;
-                    if (wx == ccx && wz == ccz && y == 1) b = AIR;
-                    room.set(lx, y, lz, b);
-                }
-            }
-        }
-        commit(room);
-        return;
-    }
-
     const bool canvas = m_buildCanvas;
     const bool match = m_matchBounds;
     if (canvas && (cx < -1 || cx > 1 || cz < -1 || cz > 1)) {
@@ -594,7 +515,36 @@ void World::generateColumn(int cx, int cz) {
             });
     }
 
-    commit(ch);
+    for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+        bool any = false;
+        int base = cy * cfg::CHUNK_Y;
+        for (int ly = 0; ly < cfg::CHUNK_Y && !any; ly++) {
+            for (int lz = 0; lz < cfg::CHUNK_Z && !any; lz++) {
+                for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
+                    if (ch.get(lx, base + ly, lz) != AIR) { any = true; break; }
+                }
+            }
+        }
+        if (!any) continue;
+        Chunk slice;
+        slice.generated = true;
+        slice.dirty = true;
+        for (int ly = 0; ly < cfg::CHUNK_Y; ly++) {
+            for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
+                for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
+                    int src = ch.idx(lx, base + ly, lz);
+                    int dst = (ly * cfg::CHUNK_Z + lz) * cfg::CHUNK_X + lx;
+                    slice.blocks[(size_t)dst] = ch.blocks[(size_t)src];
+                    slice.flags[(size_t)dst] = ch.flags[(size_t)src];
+                    if (ch.treeId[(size_t)src] != 0) slice.setTreeId(lx, ly, lz, ch.treeId[(size_t)src]);
+                    if (slice.blocks[(size_t)dst] == WATER) slice.hasWater = true;
+                }
+            }
+        }
+        int64_t key = chunkKey(cx, cy, cz);
+        if (m_chunks.find(key) == m_chunks.end())
+            m_chunks.emplace(key, std::move(slice));
+    }
 }
 
 void World::cacheOriginTrees(int ocx, int ocz) {
@@ -748,11 +698,9 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
     for (auto it = m_chunks.begin(); it != m_chunks.end();) {
         int cx = chunkCX(it->first), cz = chunkCZ(it->first);
         bool keep = nearAny(cx, cz, cfg::UNLOAD_RADIUS);
-        if (!keep && m_arena && trialColumnOverlaps(cx, cz)) keep = true;
         if (!keep && m_keepEdited && m_editedCols.count(columnKey(cx, cz))) keep = true;
         if (!keep) {
-            bool arenaCol = m_arena && trialColumnOverlaps(cx, cz);
-            if (it->second.modified && m_saveEnabled && !arenaCol)
+            if (it->second.modified && m_saveEnabled)
                 saveChunkFile(cx, chunkCY(it->first), cz, it->second);
             it = m_chunks.erase(it);
         } else {
@@ -823,7 +771,6 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
 
                 int wx = cx * cfg::CHUNK_X + x;
                 int wz = cz * cfg::CHUNK_Z + z;
-                if (structure::isGuardianToken(wx, wy, wz, b)) continue;
                 if (plugin::blockStrategy(b)->emitMesh(ch, x, y, z, wx, wz))
                     continue;
 
@@ -842,7 +789,6 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                     const geo::FaceDef& F = geo::kFaces[f];
                     int nx = wx + F.n[0], ny = wy + F.n[1], nz = wz + F.n[2];
                     uint8_t nb = getBlock(nx, ny, nz);
-                    if (structure::isGuardianToken(nx, ny, nz, nb)) nb = AIR;
                     // Render a face when the neighbor is see-through (air, water,
                     // glass, leaves). Same-block faces are culled except for passable
                     // cutout blocks (leaves) so adjacent leaves stay visible when the
@@ -1509,7 +1455,6 @@ bool World::raycast(const Vec3& origin, const Vec3& dir, float maxDist,
         }
         if (t > maxDist) break;
         uint8_t b = getBlock(x, y, z);
-        if (structure::isGuardianToken(x, y, z, b)) b = AIR;
         if (b != AIR) {
             worldHit = true;
             bestT = t;
@@ -2390,82 +2335,16 @@ bool World::loadChunkFile(int cx, int cy, int cz, Chunk& ch) const {
 void World::saveAll() {
     if (!m_saveEnabled) return;
     for (const auto& [key, ch] : m_chunks) {
-        if (!ch.modified) continue;
-        int cx = chunkCX(key), cz = chunkCZ(key);
-        if (m_arena && trialColumnOverlaps(cx, cz)) continue;
-        saveChunkFile(cx, chunkCY(key), cz, ch);
+        if (ch.modified) saveChunkFile(chunkCX(key), chunkCY(key), chunkCZ(key), ch);
     }
 }
 
-void World::setGuardianArena(bool on) {
-    if (m_arena && !on) discardGuardianArenaChunks();
-    m_arena = on;
-}
-
-void World::discardGuardianArenaChunks() {
-    for (auto it = m_chunks.begin(); it != m_chunks.end();) {
-        int cx = chunkCX(it->first), cz = chunkCZ(it->first);
-        if (!trialColumnOverlaps(cx, cz)) { ++it; continue; }
-        m_editedCols.erase(columnKey(cx, cz));
-        it = m_chunks.erase(it);
-    }
-    std::deque<int64_t> kept;
-    while (!m_meshQueue.empty()) {
-        int64_t key = m_meshQueue.front();
-        m_meshQueue.pop_front();
-        if (!trialColumnOverlaps(chunkCX(key), chunkCZ(key))) kept.push_back(key);
-    }
-    m_meshQueue.swap(kept);
-    for (auto it = m_originTrees.begin(); it != m_originTrees.end();) {
-        if (trialColumnOverlaps(columnCX(it->first), columnCZ(it->first)))
-            it = m_originTrees.erase(it);
-        else ++it;
-    }
-}
-
-void World::loadGuardianArena() {
-    if (!m_arena) return;
-    int cx0 = floorDiv(structure::kTrialX0, cfg::CHUNK_X);
-    int cz0 = floorDiv(structure::kTrialZ0, cfg::CHUNK_Z);
-    int cx1 = floorDiv(structure::kTrialX0 + structure::kTrialSpan - 1, cfg::CHUNK_X);
-    int cz1 = floorDiv(structure::kTrialZ0 + structure::kTrialSpan - 1, cfg::CHUNK_Z);
-    for (int cz = cz0; cz <= cz1; cz++) {
-        for (int cx = cx0; cx <= cx1; cx++) {
-            if (!trialColumnOverlaps(cx, cz)) continue;
-            ensureColumn(cx, cz);
-        }
-    }
-    while (!m_meshQueue.empty()) {
-        int64_t key = m_meshQueue.front();
-        m_meshQueue.pop_front();
-        auto it = m_chunks.find(key);
-        if (it == m_chunks.end() || !it->second.dirty) continue;
-        buildMeshFor(it->second, chunkCX(key), chunkCY(key), chunkCZ(key));
-        it->second.dirty = false;
-    }
-}
-
-void World::clearTrialDrops() {
-    const float S = cfg::BLOCK_SCALE;
-    float x0 = structure::kTrialX0 * S - 2.0f;
-    float z0 = structure::kTrialZ0 * S - 2.0f;
-    float x1 = (structure::kTrialX0 + structure::kTrialSpan) * S + 2.0f;
-    float z1 = (structure::kTrialZ0 + structure::kTrialSpan) * S + 2.0f;
-    m_drops.erase(std::remove_if(m_drops.begin(), m_drops.end(), [&](const loot::Drop& d) {
-        return d.pos.x >= x0 && d.pos.x <= x1 && d.pos.z >= z0 && d.pos.z <= z1;
-    }), m_drops.end());
-}
-
-uint32_t World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Vec3 vel) {
-    if (item == AIR || count <= 0 || !validBlock(item)) return 0;
-    uint32_t firstId = 0;
+void World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Vec3 vel) {
+    if (item == AIR || count <= 0 || !validBlock(item)) return;
     int left = count;
     const int stack = (int)loot::maxStack(item);
     while (left > 0) {
         loot::Drop d;
-        d.netId = m_nextDropId++;
-        if (!m_nextDropId) m_nextDropId = 1;
-        if (!firstId) firstId = d.netId;
         d.pos = pos;
         d.item = item;
         int n = std::min(left, stack);
@@ -2485,7 +2364,6 @@ uint32_t World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace
         d.age = 0.0f;
         m_drops.push_back(d);
     }
-    return firstId;
 }
 
 int World::raycastDrop(const Vec3& origin, const Vec3& dir, float maxDist, float& tHit) const {
@@ -2534,35 +2412,6 @@ void World::setDropCount(int index, uint8_t count) {
         return;
     }
     m_drops[(size_t)index].count = count;
-}
-
-const loot::Drop* World::dropById(uint32_t id) const {
-    if (!id) return nullptr;
-    for (const auto& drop : m_drops) if (drop.netId == id) return &drop;
-    return nullptr;
-}
-
-bool World::takeDropCountById(uint32_t id, uint8_t count) {
-    if (!id || !count) return false;
-    for (size_t i = 0; i < m_drops.size(); ++i) {
-        loot::Drop& drop = m_drops[i];
-        if (drop.netId != id || drop.count < count) continue;
-        drop.count = (uint8_t)(drop.count - count);
-        if (!drop.count) {
-            m_drops[i] = std::move(m_drops.back());
-            m_drops.pop_back();
-        }
-        return true;
-    }
-    return false;
-}
-
-void World::replaceNetworkDrops(const std::vector<loot::Drop>& drops) {
-    m_drops = drops;
-    uint32_t largest = 0;
-    for (const auto& drop : m_drops) largest = std::max(largest, drop.netId);
-    m_nextDropId = largest + 1;
-    if (!m_nextDropId) m_nextDropId = 1;
 }
 
 static uint64_t makeDurKey(int phys, int x, int y, int z) {
@@ -2741,7 +2590,6 @@ void World::updateDrops(float dt) {
             int gy = (int)std::floor((d.pos.y - ey - 1e-3f) / S);
             auto solidAt = [&](int x, int y, int z) -> uint8_t {
                 uint8_t b = getBlock(x, y, z);
-                if (structure::isGuardianToken(x, y, z, b)) return (uint8_t)AIR;
                 return blocksMotion(b) ? b : (uint8_t)AIR;
             };
             int gx = (int)std::floor(d.pos.x / S);
@@ -2785,10 +2633,7 @@ void World::updateDrops(float dt) {
             for (int bx = x0; bx <= x1 && !hit; bx++)
                 for (int by = y0; by <= y1 && !hit; by++)
                     for (int bz = z0; bz <= z1 && !hit; bz++)
-                        if (blocksMotion(getBlock(bx, by, bz)) &&
-                            !structure::isGuardianToken(bx, by, bz, getBlock(bx, by, bz))) {
-                            hx = bx; hy = by; hz = bz; hit = true;
-                        }
+                        if (blocksMotion(getBlock(bx, by, bz))) { hx = bx; hy = by; hz = bz; hit = true; }
             if (!hit) {
                 if (axis == 1 && delta < 0.0f) d.grounded = false;
                 return;
