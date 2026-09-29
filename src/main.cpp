@@ -1412,6 +1412,8 @@ int main(int argc, char** argv) {
     bool roomInventoryKnown = false, roomLayoutDirty = false;
     uint32_t roomAttackNext = 0, roomAttackPending = 0;
     uint8_t roomAttackHand = 1;
+    float roomAttackVisualTime = 0.0f;
+    uint8_t roomAttackVisualItem = AIR;
     uint32_t roomCastNext = 0, roomCastPending = 0;
     uint8_t roomCastHand = 1;
     uint32_t roomPickupNext = 0, roomPickupPending = 0, roomPickupDrop = 0;
@@ -1523,6 +1525,8 @@ int main(int argc, char** argv) {
         roomInventoryRevision = roomLayoutNext = roomLayoutPending = 0;
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackNext = roomAttackPending = roomCastNext = roomCastPending = 0;
+        roomAttackVisualTime = 0.0f;
+        roomAttackVisualItem = AIR;
         roomPickupNext = roomPickupPending = roomPickupDrop = 0;
         roomGuardianNext = roomGuardianPending = 0;
         roomGuardianRelic = 255;
@@ -1941,6 +1945,8 @@ int main(int argc, char** argv) {
         roomInventoryRevision = roomLayoutPending = 0;
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackPending = roomCastPending = roomPickupPending = roomPickupDrop = 0;
+        roomAttackVisualTime = 0.0f;
+        roomAttackVisualItem = AIR;
         roomGuardianPending = 0;
         roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
@@ -3098,8 +3104,28 @@ int main(int argc, char** argv) {
         bool entityTarget = false;
         float entityDist = 1.0e9f;
         uint8_t entityAttackHand = 1;
+        uint8_t entityAttackItem = AIR;
         int dummyAim = -1;
         bool specialUseClick = false;
+        auto selectedCombatWeapon = [&](uint8_t& item, uint8_t& hand) {
+            int rightSlot = cfg::HAND_SLOTS + ui.selectedRight;
+            int leftSlot = ui.selectedLeft;
+            if (rightSlot >= cfg::HAND_SLOTS && rightSlot < cfg::HOTBAR_SLOTS &&
+                combat::slotUsable(player.vitals, rightSlot) && combat::weapon(inv[rightSlot].block)) {
+                item = inv[rightSlot].block;
+                hand = 1;
+                return true;
+            }
+            if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
+                combat::slotUsable(player.vitals, leftSlot) && combat::weapon(inv[leftSlot].block)) {
+                item = inv[leftSlot].block;
+                hand = 0;
+                return true;
+            }
+            item = AIR;
+            hand = 1;
+            return false;
+        };
         if (playing) {
             hitOk = world.raycast(player.eye(), player.lookDir(), cfg::REACH, hit, prev, nrm, &physHit, &hitT);
             dropHit = world.raycastDrop(player.eye(), player.lookDir(), cfg::REACH, dropT);
@@ -3111,16 +3137,9 @@ int main(int argc, char** argv) {
             }
             if (roomSession && !spectating && !player.dead && !inventoryOpen && !paused &&
                 !guideOpen && !clueOpen) {
-                int rightSlot = cfg::HAND_SLOTS + ui.selectedRight;
-                int leftSlot = ui.selectedLeft;
                 uint8_t weaponItem = AIR;
-                if (rightSlot >= cfg::HAND_SLOTS && rightSlot < cfg::HOTBAR_SLOTS &&
-                    combat::slotUsable(player.vitals, rightSlot) && combat::weapon(inv[rightSlot].block)) {
-                    weaponItem = inv[rightSlot].block; entityAttackHand = 1;
-                } else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
-                           combat::slotUsable(player.vitals, leftSlot) && combat::weapon(inv[leftSlot].block)) {
-                    weaponItem = inv[leftSlot].block; entityAttackHand = 0;
-                }
+                selectedCombatWeapon(weaponItem, entityAttackHand);
+                entityAttackItem = weaponItem;
                 if (auto def = combat::weapon(weaponItem)) {
                     float obstruction = std::min(def->reach + .01f, hitT);
                     if (dropHit >= 0) obstruction = std::min(obstruction, dropT);
@@ -3242,10 +3261,37 @@ int main(int argc, char** argv) {
         ui.targetPhys = hitOk ? physHit : -1;
         ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
                          playing && !spectating) ? dropHit : -1;
-        if (roomSession && entityTarget && lmb && !prevLmb && !roomAttackPending && !guideOpen && !clueOpen) {
-            if (!++roomAttackNext) ++roomAttackNext;
-            roomAttackPending = roomAttackNext;
-            roomAttackHand = entityAttackHand;
+        bool emptyMeleeSpace = !hitOk && dropHit < 0 && guardianRelic < 0 && dummyAim < 0;
+        if (roomSession && playing && !structureEdit && (entityTarget || emptyMeleeSpace) && lmb && !prevLmb &&
+            !roomAttackPending && roomAttackVisualItem == AIR && lookLocked && !paused && !inventoryOpen && !deploying &&
+            !storyOpen && !guideOpen && !clueOpen && !spectating && !player.dead && carry.empty()) {
+            uint8_t attackItem = entityAttackItem;
+            uint8_t attackHand = entityAttackHand;
+            if (attackItem == AIR) selectedCombatWeapon(attackItem, attackHand);
+            if (combat::weapon(attackItem)) {
+                if (!++roomAttackNext) ++roomAttackNext;
+                roomAttackPending = roomAttackNext;
+                roomAttackHand = attackHand;
+                roomAttackVisualItem = attackItem;
+                roomAttackVisualTime = 0.0001f;
+            }
+        }
+        if (roomSession && playing && !structureEdit && guardianRelic >= 0 && lmb && !prevLmb &&
+            !roomGuardianPending && roomAttackVisualItem == AIR && lookLocked && !paused &&
+            !inventoryOpen && !deploying && !storyOpen && !guideOpen && !clueOpen &&
+            !spectating && !player.dead && carry.empty()) {
+            uint8_t attackItem = AIR;
+            uint8_t attackHand = 1;
+            auto weapon = selectedCombatWeapon(attackItem, attackHand)
+                ? combat::weapon(attackItem) : std::nullopt;
+            if (weapon && guardianT <= weapon->reach) {
+                if (!++roomGuardianNext) ++roomGuardianNext;
+                roomGuardianPending = roomGuardianNext;
+                roomGuardianRelic = (uint8_t)guardianRelic;
+                roomAttackHand = attackHand;
+                roomAttackVisualItem = attackItem;
+                roomAttackVisualTime = 0.0001f;
+            }
         }
         if (roomSession && rmb && !prevRmb && lookLocked && !paused && !inventoryOpen &&
             !deploying && !storyOpen && !structureEdit && !spectating && !player.dead && carry.empty()) {
@@ -3987,19 +4033,20 @@ int main(int argc, char** argv) {
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
                     world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
-                if (!structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead && !spectating) {
+                if (!roomSession && !structureEdit && lmb && !prevLmb && ui.targetGuardian >= 0 &&
+                    roomAttackVisualItem == AIR && lookLocked && !player.dead && !spectating) {
                     guardianSwing = true;
-                    heldMine = inv[ui.selectedSlot].block;
+                    uint8_t hand = 1;
+                    selectedCombatWeapon(heldMine, hand);
+                    if (heldMine == AIR) guardianSwing = false;
+                    auto weapon = combat::weapon(heldMine);
+                    if (!weapon || guardianT > weapon->reach) guardianSwing = false;
+                    if (guardianSwing) roomAttackHand = hand;
                 }
-                if (!structureEdit && lmb && dummyAim >= 0 && lookLocked && !player.dead && !spectating) {
-                    int rightSlot = ui.selectedSlot;
-                    int leftSlot = ui.selectedLeft;
-                    if (rightSlot >= 0 && rightSlot < cfg::HOTBAR_SLOTS &&
-                        combat::slotUsable(player.vitals, rightSlot) && combat::weapon(inv[rightSlot].block))
-                        heldDummy = inv[rightSlot].block;
-                    else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
-                             combat::slotUsable(player.vitals, leftSlot) && combat::weapon(inv[leftSlot].block))
-                        heldDummy = inv[leftSlot].block;
+                if (!structureEdit && lmb && !prevLmb && dummyAim >= 0 && roomAttackVisualItem == AIR &&
+                    lookLocked && !player.dead && !spectating) {
+                    uint8_t hand = 1;
+                    selectedCombatWeapon(heldDummy, hand);
                     if (heldDummy != AIR) dummySwing = true;
                 }
                 if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
@@ -4053,71 +4100,31 @@ int main(int argc, char** argv) {
                 } else if (player.mineCooldown > 0.0f) {
                     // Cooling down: holding or click-spam cannot skip this.
                 } else if (guardianSwing) {
-                    bool axe = heldMine != AIR && hasItemTags(heldMine, TAG_AXE);
-                    if (player.strikeName.empty()
-                        || (axe && player.strikeName != "axe_chop")
-                        || (!axe && player.strikeName != "punch")) {
-                        player.strikeName = axe ? "axe_chop" : "punch";
-                        player.pickRaised = false;
-                        player.strikeCharge = axe ? anim::axeChopSec() : 0.50f;
-                        player.strikeCool = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
+                    roomAttackVisualItem = heldMine;
+                    roomAttackVisualTime = 0.0001f;
+                    int gx = 0, gy = 0, gz = 0;
+                    int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
+                    bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
+                    if (ui.bossRelic == ui.targetGuardian) {
+                        ui.bossHp -= dmg;
+                        if (ui.bossHp < 0) ui.bossHp = 0;
+                        if (ui.bossMaxHp > 0)
+                            ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
+                        if (slain) ui.bossNear = false;
                     }
-                    player.mineCharge += dt;
-                    float need = axe ? anim::axeChopSec() : 0.50f;
-                    float recover = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
-                    if (player.mineCharge >= need) {
-                        player.mineCharge = 0.0f;
-                        player.mineCooldown = recover;
-                        if (roomSession) {
-                            if (!roomGuardianPending) {
-                                if (!++roomGuardianNext) ++roomGuardianNext;
-                                roomGuardianPending = roomGuardianNext;
-                                roomGuardianRelic = (uint8_t)ui.targetGuardian;
-                            }
-                        } else {
-                            int gx = 0, gy = 0, gz = 0;
-                            int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
-                            bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
-                            if (ui.bossRelic == ui.targetGuardian) {
-                                ui.bossHp -= dmg;
-                                if (ui.bossHp < 0) ui.bossHp = 0;
-                                if (ui.bossMaxHp > 0)
-                                    ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
-                                if (slain) ui.bossNear = false;
-                            }
-                            if (slain) {
-                                uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
-                                world.setBlock(gx, gy, gz, AIR, true);
-                                const dropgeom::Shape& sh = dropgeom::cached(item);
-                                const float S = cfg::BLOCK_SCALE;
-                                Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
-                                world.spawnDrop(dropPos, item, 1, true);
-                            }
-                        }
+                    if (slain) {
+                        uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
+                        world.setBlock(gx, gy, gz, AIR, true);
+                        const dropgeom::Shape& sh = dropgeom::cached(item);
+                        const float S = cfg::BLOCK_SCALE;
+                        Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                        world.spawnDrop(dropPos, item, 1, true);
                     }
                 } else if (dummySwing) {
                     auto def = combat::weapon(heldDummy);
-                    bool axe = hasItemTags(heldDummy, TAG_AXE);
-                    bool pick = hasItemTags(heldDummy, TAG_PICK);
-                    if (player.strikeName.empty()
-                        || (axe && player.strikeName != "axe_chop")
-                        || (pick && player.strikeName != "pick_mine")) {
-                        player.strikeName = axe ? "axe_chop" : "pick_mine";
-                        if (!pick) player.pickRaised = false;
-                        player.strikeCharge = axe ? anim::axeChopSec()
-                            : (player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec());
-                        player.strikeCool = axe ? loot::mineCooldownSec(heldDummy) : anim::pickUpSec();
-                    }
-                    player.mineCharge += dt;
-                    float need = axe ? anim::axeChopSec()
-                                     : (player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec());
-                    float recover = axe ? loot::mineCooldownSec(heldDummy) : anim::pickUpSec();
-                    player.strikeCharge = need;
-                    player.strikeCool = recover;
-                    if (player.mineCharge >= need && def) {
-                        player.mineCharge = 0.0f;
-                        player.mineCooldown = recover;
-                        if (pick) player.pickRaised = true;
+                    if (def) {
+                        roomAttackVisualItem = heldDummy;
+                        roomAttackVisualTime = 0.0001f;
                         float obstruction = def->reach + 0.01f;
                         IVec3 blockHit{}, prevHit{};
                         Vec3 hitNormal{};
@@ -4402,6 +4409,35 @@ int main(int argc, char** argv) {
                     appScreen != AppScreen::RoomLoading) {
                     player.yaw += dt * 0.08f;
                     player.pitch = -0.12f;
+                }
+            }
+        }
+
+        // First-person feedback starts immediately, while damage remains tied to
+        // the server's authoritative windup/raycast and resulting CombatEvent.
+        if (roomAttackVisualItem != AIR) {
+            auto weapon = combat::weapon(roomAttackVisualItem);
+            if (!weapon || !playing || player.dead) {
+                roomAttackVisualTime = 0.0f;
+                roomAttackVisualItem = AIR;
+            } else {
+                roomAttackVisualTime += dt;
+                bool axe = roomAttackVisualItem == HAND_AXE;
+                player.strikeName = axe ? "axe_chop" : "pick_mine";
+                player.strikeCharge = weapon->windup;
+                player.strikeCool = weapon->recovery;
+                player.pickRaised = false;
+                if (roomAttackVisualTime < weapon->windup) {
+                    player.mineCharge = roomAttackVisualTime;
+                    player.mineCooldown = 0.0f;
+                } else if (roomAttackVisualTime < weapon->windup + weapon->recovery) {
+                    player.mineCharge = 0.0f;
+                    player.mineCooldown = weapon->windup + weapon->recovery - roomAttackVisualTime;
+                } else {
+                    player.mineCharge = player.mineCooldown = 0.0f;
+                    player.strikeName.clear();
+                    roomAttackVisualTime = 0.0f;
+                    roomAttackVisualItem = AIR;
                 }
             }
         }

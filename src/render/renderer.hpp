@@ -341,7 +341,8 @@ private:
         unsigned int vao = 0, vbo = 0;
     };
 
-    unsigned int progWorld = 0, progSky = 0, progFlat = 0, progUI = 0, progUIText = 0, progHum = 0, progHumTex = 0;
+    unsigned int progWorld = 0, progSky = 0, progFlat = 0, progParticle = 0;
+    unsigned int progUI = 0, progUIText = 0, progHum = 0, progHumTex = 0;
     int uMVP = 0, uChunkOffset = 0, uAtlas = 0, uSunDir = 0, uSunColor = 0, uAmbient = 0;
     int uFogColor = 0, uFogDensity = 0, uBlockScale = 0;
     int uBorderXZ = 0, uRimHalf = 0, uCameraPos = 0;
@@ -354,6 +355,7 @@ private:
     int uInvVP = 0, uSkySunDir = 0, uSkyMoonDir = 0, uZenith = 0, uHorizon = 0, uBelow = 0;
     int uSkySunColor = 0, uSkyMoonColor = 0, uSunDisc = 0, uMoonDisc = 0, uStarAmount = 0;
     int uFlatMVP = 0, uFlatColor = 0;
+    int uParticleMVP = 0, uParticleColor = 0, uParticleSoftness = 0, uParticleRing = 0;
     int uHumMVP = 0, uHumTexMVP = 0, uHumTexAtlas = 0;
     int uHumLit = 0, uHumSunDir = 0, uHumSunColor = 0, uHumAmbient = 0, uHumFogColor = 0, uHumFogDensity = 0;
     int uHumTexLit = 0, uHumTexSunDir = 0, uHumTexSunColor = 0, uHumTexAmbient = 0, uHumTexFogColor = 0, uHumTexFogDensity = 0;
@@ -367,6 +369,7 @@ private:
     std::unordered_map<std::string, unsigned int> extraMatTex;
     unsigned int skyVAO = 0, skyVBO = 0;
     unsigned int outlineVAO = 0, outlineVBO = 0;
+    unsigned int particleVAO = 0, particleVBO = 0;
     unsigned int fallVAO = 0, fallVBO = 0;
     unsigned int humVAO = 0, humVBO = 0;
     unsigned int humTexVAO = 0, humTexVBO = 0;
@@ -398,6 +401,9 @@ private:
     void drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center, const Vec3& size,
                        const Vec3& ax, const Vec3& ay, const Vec3& az,
                        float r, float g, float b, float a);
+    void drawParticle(const Mat4& vp, const Vec3& eye, const Vec3& center,
+                      float width, float height, float r, float g, float b, float a,
+                      float softness = 0.3f, float ring = 0.0f);
     void drawBreakOverlay(const Mat4& vp, const Vec3& eye, const UIState& ui, const World& world);
     void drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,
                        int phys, int bx, int by, int bz, int face,

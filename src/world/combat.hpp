@@ -80,6 +80,11 @@ struct LimbHit { int limb = -1; float distance = 0.0f; };
 // Directions are normalized internally; obstructionDistance is world-units.
 std::optional<LimbHit> rayPlayer(const Vec3& origin, const Vec3& direction,
     const Vec3& feet, float bodyYaw, float reach, float obstructionDistance);
+// Sweeps a sphere along the same authoritative ray. Projectile visuals have
+// real width, so their hit volume must not collapse to an infinitely thin line.
+std::optional<LimbHit> sweepPlayer(const Vec3& origin, const Vec3& direction,
+    const Vec3& feet, float bodyYaw, float reach, float obstructionDistance,
+    float radius);
 
 struct MeleeState {
     uint32_t lastSequence = 0;

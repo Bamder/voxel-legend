@@ -4,6 +4,7 @@
 #include "../src/world/building_loot.hpp"
 #include "../src/world/guide.hpp"
 #include "../src/world/ritual.hpp"
+#include "../src/world/structure.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -202,6 +203,12 @@ int main() {
     check(lootSpawner.spawnItemAt({8,1,8}, {ITEM_ARCANE_FREEZE, 2}) &&
           lootSpawner.spawnItemAt({8,1,8}, {ITEM_ARCANE_HEAL, 2}),
           "building point accepts both new stackable arcane items");
+    check(structure::guardianArcaneHurt(ITEM_ARCANE_FIREBALL, 0, 0.0f) == 38 &&
+          structure::guardianArcaneHurt(ITEM_ARCANE_FIREBALL, 0, 3.0f) == 15,
+          "fireball converts radial percentage damage to guardian HP");
+    check(structure::guardianArcaneHurt(ITEM_ARCANE_FREEZE, 0) == 26 &&
+          structure::guardianArcaneHurt(AIR, 0) == 0,
+          "freeze direct hit damages guardians while invalid spells do not");
     check(!lootSpawner.spawnItemAt({8,1,8}, {AIR, 1}), "air is not loot");
     check(!lootSpawner.spawnItemAt({nan,1,8}, {HAND_PICK, 1}), "invalid building point rejected");
     check(!lootSpawner.spawnItemAt({8,.1f,8}, {HAND_PICK, 1}), "loot cannot spawn inside solid floor");

@@ -22,6 +22,7 @@ int main() {
     check(near(damageFor(pick.damage, EntityCategory::Player), .14f), "pick player damage");
     check(near(damageFor(pick.damage, EntityCategory::Boss), .049f), "pick boss adapter");
     check(near(damageFor(axe.damage, EntityCategory::Boss), .25f), "axe boss adapter");
+    check(near(pick.reach, 4.5f) && near(axe.reach, 4.5f), "melee weapons use expanded reach");
     for (int part = 0; part < vitals::Count; ++part) {
         vitals::Vitals body;
         auto result = damagePlayer(body, source, pick.damage, part);
@@ -109,6 +110,14 @@ int main() {
     check(!rayPlayer({0,1.6f,-2}, {0,0,1}, feet, 0, 1, 4), "reach limit enforced");
     check(!rayPlayer({0,1.6f,-2}, {}, feet, 0, 3, 4), "zero direction rejected");
     check(!rayPlayer({nan,1.6f,-2}, {0,0,1}, feet, 0, 3, 4), "invalid ray rejected");
+    check(!rayPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4),
+          "thin interaction ray can miss beside the body");
+    auto swept = sweepPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4,
+                             arcane::kFireballHitRadius);
+    check(swept && swept->distance < 2.0f, "fireball volume catches a visible grazing hit");
+    check(!sweepPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4, -0.1f) &&
+          !sweepPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4, nan),
+          "invalid projectile radii rejected");
 
     arcane::CastState cast;
     body = {};

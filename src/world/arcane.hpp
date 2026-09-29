@@ -8,6 +8,7 @@ namespace arcane {
 
 inline constexpr float kFireballSpeed = 14.0f;
 inline constexpr float kFireballTtlSeconds = 5.0f;
+inline constexpr float kFireballHitRadius = 0.42f;
 inline constexpr float kFireballExplosionRadius = 3.0f;
 inline constexpr float kFireballCenterDamage = 0.12f;
 inline constexpr float kFireballEdgeScale = 0.40f;
@@ -16,6 +17,7 @@ inline constexpr float kBurnDamage = 0.03f;
 inline constexpr float kBurnSeconds = 4.0f;
 inline constexpr float kFreezeSpeed = 18.0f;
 inline constexpr float kFreezeTtlSeconds = 5.0f;
+inline constexpr float kFreezeHitRadius = 0.30f;
 inline constexpr float kFreezeDamage = 0.08f;
 inline constexpr float kFreezeSeconds = 5.0f;
 inline constexpr float kFreezeCooldownSeconds = 10.0f;

@@ -84,6 +84,7 @@ struct SClient {
     room_body::State body;
     room_inventory::State inventory;
     combat::MeleeState melee;
+    combat::MeleeState guardianMelee;
     arcane::CastState fireball;
     arcane::CastState freezeCast;
     arcane::CastState healCast;
@@ -117,8 +118,7 @@ struct SClient {
     uint32_t attackStartedAt = 0;
     uint32_t combatAck = 0;
     uint32_t arcaneAck = 0;
-    uint32_t lastGuardianSeq = 0;
-    uint32_t guardianReadyAt = 0;
+    uint8_t guardianRelic = 255;
     uint32_t hitFlashUntil = 0;
     uint32_t healFlashUntil = 0;
     std::string animName = "idle";
@@ -894,7 +894,10 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     c.wearS = in.wearS;
                     c.combatAck = in.combatAck;
                     c.arcaneAck = in.arcaneAck;
-                    bool combatBusy = c.melee.pending || uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
+                    bool guardianBusy = c.guardianMelee.pending ||
+                        uint32_t(c.guardianMelee.readyAt - serverTick) < 0x80000000u;
+                    bool combatBusy = guardianBusy || c.melee.pending ||
+                        uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
                     if (!combatBusy) {
                         c.strikeKind = in.strikeKind;
                         c.strikeCharge = in.strikeCharge;
@@ -912,7 +915,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
                             combat::EntityCategory::Player};
                         if (combat::beginMelee(c.melee, in.attackSequence, serverTick, actor,
-                                               c.body.player.vitals, hand, owned, false)) {
+                                               c.body.player.vitals, hand, owned, guardianBusy)) {
                             attackAccepted = true;
                             c.attackStartedAt = serverTick;
                             c.strikeKind = owned == HAND_AXE ? kStrikeAxe : kStrikePick;
@@ -1002,37 +1005,35 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                                            cfg::HAND_SLOTS + c.selectedRight);
                         }
                     }
-                    if (in.guardianSequence && in.guardianSequence != c.lastGuardianSeq &&
-                        uint32_t(in.guardianSequence - c.lastGuardianSeq) < 0x80000000u) {
-                        c.lastGuardianSeq = in.guardianSequence;
-                        bool ready = uint32_t(serverTick - c.guardianReadyAt) < 0x80000000u;
-                        bool active = c.landed && c.fade <= 0.0f && !c.spectator && !c.body.player.dead;
-                        int gx = 0, gy = 0, gz = 0;
-                        if (ready && active &&
-                            structure::roomGuardianHit(world, c.body.player.eye(), in.guardianRelic,
-                                                       cfg::REACH, gx, gy, gz)) {
-                            int slot = cfg::HAND_SLOTS + c.selectedRight;
-                            uint8_t held = AIR;
-                            if (slot >= 0 && slot < cfg::INVENTORY_SLOTS) {
-                                const ItemSlot& item = c.inventory.slots[(size_t)slot];
-                                if (item.block != AIR && item.count > 0) held = item.block;
-                            }
-                            int dmg = structure::guardianStrikeHurt(held, in.guardianRelic);
-                            if (structure::damageGuardian(world, in.guardianRelic, dmg, gx, gy, gz)) {
-                                world.setBlock(gx, gy, gz, AIR, false, false);
-                                uint8_t drop = (uint8_t)ritual::blockId(in.guardianRelic);
-                                const float Sdrop = cfg::BLOCK_SCALE;
-                                world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop, (gz + 0.5f) * Sdrop },
-                                                drop, 1, true);
-                            }
-                            float recover = (held != AIR && hasItemTags(held, TAG_AXE))
-                                ? loot::mineCooldownSec(held) : 0.40f;
-                            c.guardianReadyAt = serverTick + (uint32_t)std::ceil(recover * cfg::TICKS_PER_SECOND);
+                    bool guardianAccepted = false;
+                    if (in.guardianSequence) {
+                        combat::Hand hand = in.attackHand ? combat::Hand::Right : combat::Hand::Left;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft
+                                                             : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t held = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        auto weapon = combat::weapon(held);
+                        combat::Actor actor{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        float guardianT = weapon ? weapon->reach + .01f : 0.0f;
+                        structure::GuardianSpan guardian;
+                        bool aimed = weapon && structure::raycastGuardian(world, c.body.player.eye(),
+                            c.body.player.lookDir(), weapon->reach, guardianT, guardian) &&
+                            guardian.relic == in.guardianRelic;
+                        bool blocked = combatBusy || attackAccepted || castAccepted || !aimed || in.carried != AIR;
+                        if (combat::beginMelee(c.guardianMelee, in.guardianSequence, serverTick, actor,
+                                              c.body.player.vitals, hand, held, blocked)) {
+                            guardianAccepted = true;
+                            c.guardianRelic = in.guardianRelic;
+                            c.attackStartedAt = serverTick;
+                            c.strikeKind = held == HAND_AXE ? kStrikeAxe : kStrikePick;
+                            c.pickRaised = false;
                         }
                     }
                     c.hasInput = true;
                     if (!c.spectator && c.landed && !c.body.player.dead &&
-                        !attackAccepted && !castAccepted && !combatBusy && !c.melee.pending) {
+                        !attackAccepted && !castAccepted && !guardianAccepted && !combatBusy &&
+                        !c.melee.pending && !c.guardianMelee.pending) {
                         for (const PlayInputNet::MineEdit& e : in.mines)
                             if (e.tool == c.heldR) applyMine(world, e);
                         for (const BlockEditNet& e : in.edits) applyEdit(world, e);
@@ -1166,7 +1167,10 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         c.vx = p.vel.x; c.vz = p.vel.z;
                         c.bodyYaw = p.bodyYaw; c.flying = false; c.sprinting = p.sprinting;
                     }
-                    if (c.body.player.dead) combat::cancelMelee(c.melee);
+                    if (c.body.player.dead) {
+                        combat::cancelMelee(c.melee);
+                        combat::cancelMelee(c.guardianMelee);
+                    }
                     if (combat::takeMeleeHit(c.melee, serverTick)) {
                         combat::Hand hand = c.melee.hand;
                         int slot = hand == combat::Hand::Left ? c.selectedLeft : cfg::HAND_SLOTS + c.selectedRight;
@@ -1218,6 +1222,36 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             }
                         }
                     }
+                    if (combat::takeMeleeHit(c.guardianMelee, serverTick)) {
+                        combat::Hand hand = c.guardianMelee.hand;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft
+                                                             : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t equipped = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        auto def = combat::weapon(c.guardianMelee.item);
+                        combat::Actor attacker{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (def && equipped == c.guardianMelee.item && attacker.active &&
+                            c.guardianRelic < ritual::RelicCount) {
+                            float guardianT = def->reach + .01f;
+                            structure::GuardianSpan guardian;
+                            int gx = 0, gy = 0, gz = 0;
+                            bool aimed = structure::raycastGuardian(world, c.body.player.eye(),
+                                c.body.player.lookDir(), def->reach, guardianT, guardian) &&
+                                guardian.relic == c.guardianRelic;
+                            if (aimed && structure::roomGuardianHit(world, c.body.player.eye(),
+                                    c.guardianRelic, def->reach, gx, gy, gz)) {
+                                int dmg = structure::guardianStrikeHurt(equipped, c.guardianRelic);
+                                if (structure::damageGuardian(world, c.guardianRelic, dmg, gx, gy, gz)) {
+                                    world.setBlock(gx, gy, gz, AIR, false, false);
+                                    uint8_t drop = (uint8_t)ritual::blockId(c.guardianRelic);
+                                    const float Sdrop = cfg::BLOCK_SCALE;
+                                    world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
+                                                      (gz + 0.5f) * Sdrop }, drop, 1, true);
+                                }
+                            }
+                        }
+                    }
                     if (auto def = combat::weapon(c.melee.item)) {
                         bool recovering = uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
                         if (c.melee.pending) {
@@ -1231,6 +1265,26 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         } else if (c.melee.action) {
                             c.strikeKind = kStrikeNone; c.mineCharge = c.mineCooldown = 0;
                             c.melee.item = AIR; c.melee.action = 0;
+                        }
+                    }
+                    if (auto def = combat::weapon(c.guardianMelee.item)) {
+                        bool recovering = uint32_t(c.guardianMelee.readyAt - serverTick) < 0x80000000u;
+                        if (c.guardianMelee.pending) {
+                            c.strikeCharge = def->windup;
+                            c.strikeCool = def->recovery;
+                            c.mineCharge = (float)uint32_t(serverTick - c.attackStartedAt) /
+                                           cfg::TICKS_PER_SECOND;
+                            c.mineCooldown = 0;
+                        } else if (recovering) {
+                            c.mineCharge = 0;
+                            c.mineCooldown = (float)uint32_t(c.guardianMelee.readyAt - serverTick) /
+                                             cfg::TICKS_PER_SECOND;
+                        } else if (c.guardianMelee.action) {
+                            c.strikeKind = kStrikeNone;
+                            c.mineCharge = c.mineCooldown = 0;
+                            c.guardianMelee.item = AIR;
+                            c.guardianMelee.action = 0;
+                            c.guardianRelic = 255;
                         }
                     }
                     stepAvatar(c);
@@ -1253,20 +1307,32 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     float hitDistance = obstruction;
                     combat::Actor attacker{projectile.owner, projectile.team, true,
                                             combat::EntityCategory::Player};
+                    float hitRadius = projectile.kind == arcane::ProjectileKind::Freeze
+                        ? arcane::kFreezeHitRadius : arcane::kFireballHitRadius;
+                    structure::GuardianSpan directGuardian;
+                    float guardianDistance = distance + 0.01f;
+                    bool hitGuardian = distance > 0.0f && structure::raycastGuardian(
+                        world, old, direction, distance, guardianDistance, directGuardian, hitRadius) &&
+                        guardianDistance < obstruction;
                     for (SClient& target : clients) {
                         combat::Actor victim{target.id, target.team,
                             target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,
                             combat::EntityCategory::Player};
                         if (!combat::hostile(attacker, victim)) continue;
-                        auto hit = combat::rayPlayer(old, direction, target.body.player.pos,
-                            target.body.player.bodyYaw, distance, obstruction);
+                        auto hit = combat::sweepPlayer(old, direction, target.body.player.pos,
+                            target.body.player.bodyYaw, distance, obstruction, hitRadius);
                         if (hit && hit->distance < hitDistance) {
                             hitDistance = hit->distance;
                             hitPlayer = &target;
                         }
                     }
-                    if (hitWorld || hitPlayer) {
-                        float impactDistance = hitPlayer ? hitDistance : obstruction;
+                    if (hitPlayer && hitGuardian) {
+                        if (guardianDistance < hitDistance) hitPlayer = nullptr;
+                        else hitGuardian = false;
+                    }
+                    if (hitWorld || hitPlayer || hitGuardian) {
+                        float impactDistance = hitPlayer ? hitDistance
+                            : (hitGuardian ? guardianDistance : obstruction);
                         Vec3 impact = old + direction * std::min(distance, impactDistance);
                         ArcaneEventNet burst;
                         burst.serial = nextArcaneSerial++;
@@ -1276,8 +1342,34 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         burst.x = impact.x; burst.y = impact.y; burst.z = impact.z;
                         arcaneEvents.push_back({serverTick, burst});
 
+                        auto hurtGuardian = [&](const structure::GuardianSpan& guardian, int amount) {
+                            if (amount <= 0 || guardian.hp <= 0) return;
+                            int gx = 0, gy = 0, gz = 0;
+                            int dealt = std::min(amount, guardian.hp);
+                            bool killed = structure::damageGuardian(world, guardian.relic, amount, gx, gy, gz);
+                            if (killed) {
+                                world.setBlock(gx, gy, gz, AIR, false, false);
+                                uint8_t drop = (uint8_t)ritual::blockId(guardian.relic);
+                                const float Sdrop = cfg::BLOCK_SCALE;
+                                world.spawnDrop({(gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
+                                                 (gz + 0.5f) * Sdrop}, drop, 1, true);
+                            }
+                            CombatEventNet event;
+                            event.serial = nextCombatSerial++;
+                            if (!nextCombatSerial) nextCombatSerial = 1;
+                            event.kind = killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                            event.attacker = projectile.owner;
+                            event.target = 0; // guardian: no player network id
+                            event.limb = -1;
+                            event.amount = (uint16_t)std::min(65535, dealt);
+                            combatEvents.push_back({serverTick, event});
+                        };
+
                         if (projectile.kind == arcane::ProjectileKind::Freeze) {
-                            if (hitPlayer) {
+                            if (hitGuardian) {
+                                hurtGuardian(directGuardian, structure::guardianArcaneHurt(
+                                    ITEM_ARCANE_FREEZE, directGuardian.relic));
+                            } else if (hitPlayer) {
                                 combat::DamageSource source{projectile.owner, projectile.action,
                                     ITEM_ARCANE_FREEZE, combat::DamageCategory::Frost};
                                 auto result = combat::damagePlayer(hitPlayer->body.player.vitals, source,
@@ -1307,6 +1399,16 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 }
                             }
                         } else {
+                            std::vector<structure::GuardianSpan> guardians;
+                            structure::collectGuardians(world, guardians);
+                            for (const structure::GuardianSpan& guardian : guardians) {
+                                float cx = std::max(guardian.minX, std::min(impact.x, guardian.maxX));
+                                float cy = std::max(guardian.minY, std::min(impact.y, guardian.maxY));
+                                float cz = std::max(guardian.minZ, std::min(impact.z, guardian.maxZ));
+                                float blastDistance = (Vec3{cx, cy, cz} - impact).length();
+                                hurtGuardian(guardian, structure::guardianArcaneHurt(
+                                    ITEM_ARCANE_FIREBALL, guardian.relic, blastDistance));
+                            }
                             for (SClient& target : clients) {
                                 combat::Actor victim{target.id, target.team,
                                     target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,

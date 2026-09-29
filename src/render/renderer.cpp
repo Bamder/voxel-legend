@@ -160,11 +160,12 @@ bool Renderer::init(int w, int h) {
     progWorld = linkProgram(shaders::WORLD_VERT, shaders::WORLD_FRAG);
     progSky = linkProgram(shaders::SKY_VERT, shaders::SKY_FRAG);
     progFlat = linkProgram(shaders::FLAT_VERT, shaders::FLAT_FRAG);
+    progParticle = linkProgram(shaders::PARTICLE_VERT, shaders::PARTICLE_FRAG);
     progUI = linkProgram(shaders::UI_VERT, shaders::UI_TEX_FRAG);
     progUIText = linkProgram(shaders::UI_VERT, shaders::UI_TEXT_FRAG);
     progHum = linkProgram(shaders::HUM_VERT, shaders::HUM_FRAG);
     progHumTex = linkProgram(shaders::HUM_TEX_VERT, shaders::HUM_TEX_FRAG);
-    if (!progWorld || !progSky || !progFlat || !progUI || !progUIText || !progHum || !progHumTex) return false;
+    if (!progWorld || !progSky || !progFlat || !progParticle || !progUI || !progUIText || !progHum || !progHumTex) return false;
 
     gl::UseProgram(progWorld);
     uMVP = gl::GetUniformLocation(progWorld, "uMVP");
@@ -238,6 +239,12 @@ bool Renderer::init(int w, int h) {
     gl::UseProgram(progFlat);
     uFlatMVP = gl::GetUniformLocation(progFlat, "uMVP");
     uFlatColor = gl::GetUniformLocation(progFlat, "uColor");
+
+    gl::UseProgram(progParticle);
+    uParticleMVP = gl::GetUniformLocation(progParticle, "uMVP");
+    uParticleColor = gl::GetUniformLocation(progParticle, "uColor");
+    uParticleSoftness = gl::GetUniformLocation(progParticle, "uSoftness");
+    uParticleRing = gl::GetUniformLocation(progParticle, "uRing");
 
     gl::UseProgram(progHum);
     uHumMVP = gl::GetUniformLocation(progHum, "uMVP");
@@ -383,6 +390,22 @@ bool Renderer::init(int w, int h) {
     gl::VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
     gl::EnableVertexAttribArray(0);
 
+    // Camera-facing particle quad. The radial shader turns this into a soft
+    // glow, spark or ring without requiring a texture atlas entry.
+    const float particleVerts[6][5] = {
+        {-.5f,-.5f,0, 0,0}, {.5f,-.5f,0, 1,0}, {.5f,.5f,0, 1,1},
+        {-.5f,-.5f,0, 0,0}, {.5f,.5f,0, 1,1}, {-.5f,.5f,0, 0,1},
+    };
+    gl::GenVertexArrays(1, &particleVAO);
+    gl::GenBuffers(1, &particleVBO);
+    gl::BindVertexArray(particleVAO);
+    gl::BindBuffer(GL_ARRAY_BUFFER, particleVBO);
+    gl::BufferData(GL_ARRAY_BUFFER, sizeof(particleVerts), particleVerts, GL_STATIC_DRAW);
+    gl::VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    gl::VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    gl::EnableVertexAttribArray(0);
+    gl::EnableVertexAttribArray(1);
+
     gl::GenVertexArrays(1, &fallVAO);
     gl::GenBuffers(1, &fallVBO);
     gl::BindVertexArray(fallVAO);
@@ -508,6 +531,8 @@ void Renderer::shutdown() {
     if (skyVBO) gl::DeleteBuffers(1, &skyVBO);
     if (outlineVAO) gl::DeleteVertexArrays(1, &outlineVAO);
     if (outlineVBO) gl::DeleteBuffers(1, &outlineVBO);
+    if (particleVAO) gl::DeleteVertexArrays(1, &particleVAO);
+    if (particleVBO) gl::DeleteBuffers(1, &particleVBO);
     if (fallVAO) gl::DeleteVertexArrays(1, &fallVAO);
     if (fallVBO) gl::DeleteBuffers(1, &fallVBO);
     if (humVAO) gl::DeleteVertexArrays(1, &humVAO);
@@ -519,6 +544,7 @@ void Renderer::shutdown() {
     if (progWorld) gl::DeleteProgram(progWorld);
     if (progSky) gl::DeleteProgram(progSky);
     if (progFlat) gl::DeleteProgram(progFlat);
+    if (progParticle) gl::DeleteProgram(progParticle);
     if (progUI) gl::DeleteProgram(progUI);
     if (progUIText) gl::DeleteProgram(progUIText);
     if (progHum) gl::DeleteProgram(progHum);
@@ -1151,109 +1177,209 @@ void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center
     gl::BindVertexArray(0);
 }
 
+void Renderer::drawParticle(const Mat4& vp, const Vec3& eye, const Vec3& center,
+                            float width, float height, float r, float g, float b, float a,
+                            float softness, float ring) {
+    if (!particleVAO || width <= 0.0f || height <= 0.0f || a <= 0.0f) return;
+    Vec3 facing = (eye - center).normalized();
+    if (facing.lengthSq() < 1e-8f) facing = {0,0,1};
+    Vec3 right = Vec3{0,1,0}.cross(facing).normalized();
+    if (right.lengthSq() < 1e-8f) right = Vec3{1,0,0};
+    Vec3 up = facing.cross(right).normalized();
+    Mat4 model = Mat4::translate(center - eye) * Mat4::fromBasis(right, up, facing) *
+                 Mat4::scale({width, height, 1.0f});
+    Mat4 mvp = vp * model;
+    gl::UseProgram(progParticle);
+    gl::UniformMatrix4fv(uParticleMVP, 1, GL_FALSE, mvp.m);
+    gl::Uniform4f(uParticleColor, r, g, b, a);
+    gl::Uniform1f(uParticleSoftness, softness);
+    gl::Uniform1f(uParticleRing, ring);
+    gl::BindVertexArray(particleVAO);
+    gl::DrawArrays(GL_TRIANGLES, 0, 6);
+    gl::BindVertexArray(0);
+}
+
 void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
                                  const UIState& ui, bool firstPerson) {
-    static const Vec3 axes[12] = {
-        {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
-        {.7f,.7f,0},{-.7f,.7f,0},{.7f,0,.7f},{-.7f,0,.7f},{0,.7f,.7f},{0,.7f,-.7f}
-    };
     const Vec3 X{1,0,0}, Y{0,1,0}, Z{0,0,1};
+    static float clock = 0.0f;
+    clock += clampf(ui.fps > 1.0f ? 1.0f / ui.fps : 1.0f / 60.0f, 0.0f, 0.05f);
+    auto hash01 = [](uint32_t n) {
+        n ^= n >> 16; n *= 0x7feb352du; n ^= n >> 15; n *= 0x846ca68bu; n ^= n >> 16;
+        return float(n & 0x00ffffffu) / float(0x01000000u);
+    };
+    auto burstSeed = [&](const ArcaneBurstView& burst) {
+        uint32_t x = (uint32_t)std::lround(std::fabs(burst.pos.x) * 97.0f);
+        uint32_t y = (uint32_t)std::lround(std::fabs(burst.pos.y) * 193.0f);
+        uint32_t z = (uint32_t)std::lround(std::fabs(burst.pos.z) * 389.0f);
+        return x ^ (y << 7) ^ (z << 13) ^ ((uint32_t)burst.kind * 0x9e3779b9u);
+    };
+
     gl::Enable(GL_BLEND);
     gl::Disable(GL_CULL_FACE);
+    gl::DepthMask(GL_FALSE);
+    gl::BlendFunc(GL_SRC_ALPHA, GL_ONE);
 
     for (const ArcaneProjectileView& projectile : ui.arcaneProjectiles) {
-        float pulse = 0.5f + 0.5f * std::sin(ui.timeOfDay * 0.09f + projectile.id * 1.7f);
-        float core = 0.18f + pulse * 0.035f;
+        float pulse = 0.5f + 0.5f * std::sin(clock * 13.0f + projectile.id * 1.7f);
         bool ice = projectile.kind == 2;
-        drawOutlineAt(vp, eye, projectile.pos, {core,core,core}, X,Y,Z,
-                      ice ? .62f : 1.0f, ice ? .91f : .78f, ice ? 1.0f : .08f, 1.0f);
-        drawOutlineAt(vp, eye, projectile.pos, {core*.58f,core*.58f,core*.58f}, X,Y,Z,
-                      ice ? .94f : 1.0f, ice ? 1.0f : .20f, ice ? 1.0f : .02f, 1.0f);
-        Vec3 back = projectile.vel.normalized();
-        for (int i = 0; i < 7; ++i) {
-            float along = 0.12f + i * 0.105f;
-            float size = 0.12f * (1.0f - i / 9.0f);
-            float wobble = std::sin(ui.timeOfDay * .15f + projectile.id + i * 1.9f) * .035f;
-            Vec3 at = projectile.pos - back * along + Vec3{0,wobble,0};
-            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          ice ? .48f : 1.0f, ice ? .82f : (i < 3 ? .46f : .16f),
-                          ice ? 1.0f : .02f, .82f - i * .08f);
+        float outer = ice ? .48f : .68f;
+        drawParticle(vp, eye, projectile.pos, outer + pulse*.10f, outer + pulse*.10f,
+                     ice ? .18f : 1.0f, ice ? .68f : .10f, 1.0f, .58f, .42f);
+        drawParticle(vp, eye, projectile.pos, outer*.62f, outer*.62f,
+                     ice ? .40f : 1.0f, ice ? .90f : .55f, ice ? 1.0f : .03f, .88f, .24f);
+        drawParticle(vp, eye, projectile.pos, outer*.28f, outer*.28f,
+                     1.0f, ice ? 1.0f : .92f, ice ? 1.0f : .45f, 1.0f, .18f);
+
+        Vec3 dir = projectile.vel.normalized();
+        if (dir.lengthSq() < 1e-8f) dir = {0,0,1};
+        Vec3 side = dir.cross(Y).normalized();
+        if (side.lengthSq() < 1e-8f) side = X;
+        Vec3 lift = side.cross(dir).normalized();
+        for (int i = 0; i < 23; ++i) {
+            float t = (i + 1) / 23.0f;
+            float phase = clock * (ice ? 7.0f : 11.0f) + projectile.id*.71f + i*.93f;
+            float spread = .025f + t * (ice ? .12f : .22f);
+            Vec3 at = projectile.pos - dir * (.08f + i * .072f) +
+                      side * (std::cos(phase) * spread) + lift * (std::sin(phase) * spread);
+            float size = (ice ? .16f : .22f) * (1.0f - t*.68f);
+            float alpha = .92f * (1.0f - t*.78f);
+            drawParticle(vp, eye, at, size, size * (ice ? 1.65f : 1.0f),
+                         ice ? .30f : 1.0f, ice ? .82f : (.68f - t*.42f),
+                         ice ? 1.0f : .03f, alpha, .32f);
+        }
+        for (int i = 0; i < 12; ++i) {
+            float phase = clock * 4.0f + projectile.id + i * 2.39996f;
+            float drift = .20f + hash01(projectile.id * 31u + (uint32_t)i) * .38f;
+            Vec3 at = projectile.pos - dir * (hash01(projectile.id + (uint32_t)i*17u) * .90f) +
+                      side * (std::cos(phase) * drift) + lift * (std::sin(phase) * drift);
+            float size = .045f + hash01(projectile.id + (uint32_t)i*53u) * .065f;
+            drawParticle(vp, eye, at, size, size*(ice ? 2.2f : 1.35f),
+                         ice ? .55f : 1.0f, ice ? .92f : .42f, ice ? 1.0f : .02f, .72f, .28f);
         }
     }
 
     for (const ArcaneBurstView& burst : ui.arcaneBursts) {
         float u = clampf(burst.age / .65f, 0.0f, 1.0f);
-        float alpha = 1.0f - u;
+        float alpha = (1.0f - u) * (1.0f - u);
+        float ease = 1.0f - (1.0f-u)*(1.0f-u);
+        uint32_t seed = burstSeed(burst);
         if (burst.kind == 3) {
-            float shell = .25f + u * 1.15f;
-            drawOutlineAt(vp, eye, burst.pos + Vec3{0,u*.7f,0}, {shell,.08f,shell}, X,Y,Z,
-                          .30f,1.0f,.38f,alpha);
-            for (int i = 0; i < 12; ++i) {
-                float angle = i * .523599f + u * .7f;
-                float radius = .18f + u * (.45f + (i % 3) * .10f);
-                Vec3 at = burst.pos + Vec3{std::cos(angle)*radius,
-                    .1f + u*(.8f + (i % 4)*.23f), std::sin(angle)*radius};
-                float size = .07f + (i % 2) * .025f;
-                drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                              (i & 1) ? 1.0f : .28f, 1.0f, (i & 1) ? .18f : .42f, alpha);
+            drawParticle(vp, eye, burst.pos, .45f + ease*.75f, .45f + ease*.75f,
+                         .18f, 1.0f, .30f, alpha*.42f, .42f, .60f);
+            for (int ring = 0; ring < 2; ++ring) {
+                float radius = .28f + ease * (1.15f + ring*.34f);
+                drawParticle(vp, eye, burst.pos + Vec3{0,.05f + ring*.18f,0}, radius, radius,
+                             ring ? 1.0f : .22f, 1.0f, ring ? .22f : .38f,
+                             alpha*(ring ? .70f : .48f), .11f, .73f);
+            }
+            for (int i = 0; i < 24; ++i) {
+                float lane = (float)(i & 1);
+                float phase = i * 1.618034f + lane * 3.14159f + u * 4.5f;
+                float radius = .20f + ease * (.30f + (i % 4)*.035f);
+                Vec3 at = burst.pos + Vec3{std::cos(phase)*radius,
+                    -.35f + u*(1.85f + (i%5)*.10f), std::sin(phase)*radius};
+                float size = .055f + (i%3)*.015f;
+                drawParticle(vp, eye, at, size, size*1.45f,
+                             (i&1) ? 1.0f : .18f, 1.0f, (i&1) ? .20f : .38f,
+                             alpha*.95f, .28f);
             }
             continue;
         }
-        float shell = .22f + u * 2.4f;
         bool ice = burst.kind == 2;
-        if (ice) shell = .16f + u * 1.25f;
-        drawOutlineAt(vp, eye, burst.pos, {shell,shell,shell}, X,Y,Z,
-                      ice ? .48f : 1.0f, ice ? .86f : .28f, ice ? 1.0f : .02f, alpha);
-        drawOutlineAt(vp, eye, burst.pos, {shell*.62f,shell*.62f,shell*.62f}, X,Y,Z,
-                      ice ? .92f : 1.0f, ice ? 1.0f : .82f, ice ? 1.0f : .12f,alpha);
-        for (int i = 0; i < 12; ++i) {
-            Vec3 at = burst.pos + axes[i] * (u * (ice ? 1.05f : 1.7f));
-            float size = .16f * (1.0f - u * .55f);
-            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          ice ? .55f : 1.0f, ice ? ((i & 1) ? .82f : 1.0f) : ((i & 1) ? .18f : .65f),
-                          ice ? 1.0f : .02f, alpha);
+        float flash = clampf(1.0f - u*3.0f, 0.0f, 1.0f);
+        drawParticle(vp, eye, burst.pos, (ice ? .82f : 1.55f) + ease*(ice ? .90f : 2.35f),
+                     (ice ? .82f : 1.55f) + ease*(ice ? .90f : 2.35f),
+                     ice ? .52f : 1.0f, ice ? .88f : .46f, ice ? 1.0f : .04f,
+                     alpha*.72f + flash*.80f, .44f);
+        float ringSize = .40f + ease * (ice ? 3.2f : 6.2f);
+        drawParticle(vp, eye, burst.pos, ringSize, ringSize,
+                     ice ? .38f : 1.0f, ice ? .83f : .28f, ice ? 1.0f : .02f,
+                     alpha, .085f, .80f);
+        if (!ice) {
+            float second = clampf((u - .08f) / .92f, 0.0f, 1.0f);
+            float secondAlpha = (1.0f-second)*(1.0f-second);
+            float secondRing = .25f + second * 5.25f;
+            drawParticle(vp, eye, burst.pos + Vec3{0,.10f,0}, secondRing, secondRing,
+                         1.0f,.72f,.10f,secondAlpha*.84f,.075f,.88f);
+            drawParticle(vp, eye, burst.pos, 1.10f + ease*2.4f, 1.10f + ease*2.4f,
+                         1.0f,.92f,.48f,flash*.92f + alpha*.24f,.48f);
+        }
+        int particles = ice ? 42 : 72;
+        for (int i = 0; i < particles; ++i) {
+            float a = hash01(seed + (uint32_t)i*13u) * 6.2831853f;
+            float y = hash01(seed + (uint32_t)i*31u) * 1.6f - .45f;
+            Vec3 ray{std::cos(a), y, std::sin(a)};
+            ray = ray.normalized();
+            float speed = (ice ? .70f : 1.10f) + hash01(seed + (uint32_t)i*47u) * (ice ? 1.25f : 2.05f);
+            Vec3 at = burst.pos + ray * (ease * speed) + Vec3{0, ice ? 0.0f : -.36f*u*u, 0};
+            float size = (ice ? .065f : .060f) + hash01(seed + (uint32_t)i*71u) * .12f;
+            drawParticle(vp, eye, at, size, size*(ice ? 2.8f : 1.55f),
+                         ice ? .50f : 1.0f, ice ? .90f : (.24f + hash01(seed+i)*.48f),
+                         ice ? 1.0f : .02f, alpha, .24f);
+        }
+        if (!ice) {
+            for (int i = 0; i < 24; ++i) {
+                float a = hash01(seed + (uint32_t)i*101u) * 6.2831853f;
+                float radius = ease * (.35f + hash01(seed + (uint32_t)i*131u)*2.35f);
+                Vec3 at = burst.pos + Vec3{std::cos(a)*radius, .12f + u*(.65f + (i%5)*.16f), std::sin(a)*radius};
+                float size = .20f + u*.28f;
+                drawParticle(vp, eye, at, size, size, .25f, .18f, .15f, alpha*.30f, .48f);
+            }
+            for (int i = 0; i < 20; ++i) {
+                float a = hash01(seed + (uint32_t)i*163u) * 6.2831853f;
+                float radius = ease * (.18f + hash01(seed + (uint32_t)i*181u)*2.2f);
+                Vec3 at = burst.pos + Vec3{std::cos(a)*radius,
+                    (hash01(seed + (uint32_t)i*197u)-.25f)*1.7f*ease,
+                    std::sin(a)*radius};
+                float size = .11f + hash01(seed + (uint32_t)i*211u)*.19f;
+                drawParticle(vp, eye, at, size, size*1.25f, 1.0f,
+                             .30f + hash01(seed+i)*.56f, .015f, alpha*.95f, .26f);
+            }
         }
     }
 
+    gl::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     auto drawBurning = [&](Vec3 feet, uint32_t seed) {
-        for (int i = 0; i < 12; ++i) {
-            float phase = ui.timeOfDay * .055f + seed * .37f + i * .71f;
-            float rise = std::fmod(phase, 1.0f);
+        for (int i = 0; i < 20; ++i) {
+            float rise = std::fmod(clock*(.72f + (i%4)*.08f) + seed*.037f + i*.173f, 1.0f);
             if (rise < 0.0f) rise += 1.0f;
-            float angle = seed * .21f + i * 2.39996f + ui.timeOfDay * .012f;
-            float radius = .22f + .07f * std::sin(phase * 4.0f);
-            Vec3 at = feet + Vec3{std::cos(angle)*radius, .15f + rise*1.65f,
+            float angle = seed*.21f + i*2.39996f + clock*.55f;
+            float radius = .16f + (i%5)*.035f;
+            Vec3 at = feet + Vec3{std::cos(angle)*radius, .10f + rise*1.70f,
                                   std::sin(angle)*radius};
-            float size = .08f + (1.0f-rise)*.055f;
-            drawOutlineAt(vp, eye, at, {size,size*1.35f,size}, X,Y,Z,
-                          1.0f, i % 3 ? .18f : .72f, .01f, .9f-rise*.45f);
+            float size = .09f + (1.0f-rise)*.09f;
+            drawParticle(vp, eye, at, size, size*1.75f, 1.0f,
+                         .10f + (1.0f-rise)*.62f, .01f, .88f-rise*.55f, .34f);
         }
     };
     auto drawFrozen = [&](Vec3 feet, uint32_t seed) {
-        float pulse = .72f + .18f * std::sin(ui.timeOfDay * .055f + seed);
+        float pulse = .45f + .10f * std::sin(clock*3.5f + seed);
         drawOutlineAt(vp, eye, feet + Vec3{0,.9f,0}, {.72f,1.85f,.72f}, X,Y,Z,
                       .42f,.78f,1.0f,pulse);
-        for (int i = 0; i < 10; ++i) {
-            float angle = seed * .17f + i * .628319f;
-            float height = .12f + (i % 4) * .38f;
-            float radius = .28f + (i % 2) * .11f;
+        for (int i = 0; i < 16; ++i) {
+            float angle = seed*.17f + i*.618034f + std::sin(clock*.7f+i)*.08f;
+            float height = .08f + (i % 6) * .29f;
+            float radius = .24f + (i % 3) * .065f;
             Vec3 at = feet + Vec3{std::cos(angle)*radius,height,std::sin(angle)*radius};
-            float width = .055f + (i % 3) * .015f;
-            drawOutlineAt(vp, eye, at, {width,.25f + (i%3)*.08f,width}, X,Y,Z,
-                          .66f,.92f,1.0f,.95f);
+            float width = .045f + (i % 3) * .014f;
+            drawParticle(vp, eye, at, width, .20f + (i%4)*.055f,
+                         .58f,.91f,1.0f,.90f,.18f);
         }
     };
     auto drawHealing = [&](Vec3 feet, uint32_t seed) {
-        drawOutlineAt(vp, eye, feet + Vec3{0,.9f,0}, {.67f,1.8f,.67f}, X,Y,Z,
-                      .35f,1.0f,.42f,.78f);
-        for (int i = 0; i < 10; ++i) {
-            float phase = std::fmod(ui.timeOfDay * .035f + seed * .13f + i * .19f, 1.0f);
+        drawParticle(vp, eye, feet + Vec3{0,.85f,0}, 1.05f, 1.85f,
+                     .22f,1.0f,.36f,.18f,.48f);
+        for (int i = 0; i < 18; ++i) {
+            float phase = std::fmod(clock*.72f + seed*.13f + i*.113f, 1.0f);
             if (phase < 0.0f) phase += 1.0f;
-            float angle = seed * .11f + i * .628319f + phase;
-            Vec3 at = feet + Vec3{std::cos(angle)*.34f,.12f + phase*1.95f,std::sin(angle)*.34f};
-            float size = .065f + (1.0f-phase)*.035f;
-            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          (i&1) ? 1.0f : .25f,1.0f,(i&1) ? .20f : .38f,.9f-phase*.3f);
+            float angle = seed*.11f + i*.698132f + phase*4.2f;
+            float radius = .24f + (i%3)*.055f;
+            Vec3 at = feet + Vec3{std::cos(angle)*radius,.05f + phase*1.95f,std::sin(angle)*radius};
+            float size = .055f + (1.0f-phase)*.045f;
+            drawParticle(vp, eye, at, size, size*1.35f,
+                         (i&1) ? 1.0f : .20f,1.0f,(i&1) ? .18f : .34f,
+                         .88f-phase*.36f,.27f);
         }
     };
     auto drawStatuses = [&](Vec3 feet, uint32_t seed, uint8_t status) {
@@ -1266,6 +1392,7 @@ void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& 
     for (const RemoteAvatar& remote : ui.remotes)
         if (!remote.spectator && !remote.dead) drawStatuses(remote.pos, remote.id, remote.status);
 
+    gl::DepthMask(GL_TRUE);
     gl::Enable(GL_CULL_FACE);
     gl::Disable(GL_BLEND);
 }
