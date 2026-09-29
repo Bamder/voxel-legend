@@ -1,0 +1,15 @@
+# VOXEL LEGEND data pack entry
+id stone
+display Stone
+kind block
+max_stack 1
+hardness 4
+durability 36
+efficiency 0
+weight 18
+friction 0.75
+tags 
+harvest_need pick
+harvest_drop cobble 1
+crack_folds 3
+crack_color 22 22 24

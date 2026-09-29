@@ -1,0 +1,11 @@
+# VOXEL LEGEND data pack entry
+id bedrock
+display Bedrock
+kind block
+max_stack 1
+hardness 100
+durability 10000
+efficiency 0
+weight 40
+friction 0.85
+tags 

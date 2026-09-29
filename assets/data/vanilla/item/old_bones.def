@@ -1,0 +1,14 @@
+# VOXEL LEGEND data pack entry
+id old_bones
+display 旧神骸骨
+kind item
+max_stack 1
+hardness 0.4
+durability 2
+efficiency 0
+weight 0.35
+friction 0.30
+wrong_tool_resist 1
+tags 
+harvest_need none
+harvest_drop old_bones 1

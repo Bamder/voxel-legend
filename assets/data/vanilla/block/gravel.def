@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id gravel
+display Gravel
+kind block
+max_stack 1
+hardness 1.7
+durability 8.8
+efficiency 0
+weight 14
+friction 0.52
+tags 
+harvest_need shovel
+harvest_drop gravel 1

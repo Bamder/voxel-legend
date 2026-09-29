@@ -1,0 +1,59 @@
+# animation clip: bones are named channels; keys are local TRS from rest.
+# unknown records are ignored by the parser and written back as-is.
+name walk
+fps 20.000
+length 20
+loop 1
+rig player
+bone hip parent - pivot 0.0000 0.8800 0.0000
+bone abs parent hip pivot 0.0000 1.0600 0.0000
+bone chest parent abs pivot 0.0000 1.2900 0.0000
+bone neck parent chest pivot 0.0000 1.4100 0.0000
+bone head parent neck pivot 0.0000 1.4400 0.0000
+bone arm_l_shoulder parent chest pivot -0.2800 1.4200 0.0000
+bone arm_l_upper parent arm_l_shoulder pivot -0.2800 1.3000 0.0000
+bone arm_l_fore parent arm_l_upper pivot -0.2800 1.0600 0.0000
+bone arm_l_hand parent arm_l_fore pivot -0.2800 0.8600 0.0000
+bone arm_r_shoulder parent chest pivot 0.2800 1.4200 0.0000
+bone arm_r_upper parent arm_r_shoulder pivot 0.2800 1.3000 0.0000
+bone arm_r_fore parent arm_r_upper pivot 0.2800 1.0600 0.0000
+bone arm_r_hand parent arm_r_fore pivot 0.2800 0.8600 0.0000
+bone leg_l_thigh parent hip pivot -0.1200 0.8000 0.0000
+bone leg_l_shin parent leg_l_thigh pivot -0.1200 0.4000 0.0000
+bone leg_l_foot parent leg_l_shin pivot -0.1200 0.0800 0.0400
+bone leg_r_thigh parent hip pivot 0.1200 0.8000 0.0000
+bone leg_r_shin parent leg_r_thigh pivot 0.1200 0.4000 0.0000
+bone leg_r_foot parent leg_r_shin pivot 0.1200 0.0800 0.0400
+key 0 arm_l_upper 0.00000 0.00000 0.00000 -0.02869 -0.00000 0.00000
+key 10 arm_l_upper 0.00000 0.00000 0.00000 -0.45000 0.00000 0.00000
+key 19 arm_l_upper 0.00000 0.00000 0.00000 0.07353 -0.00000 0.00000
+key 0 arm_r_upper 0.00000 0.00000 0.00000 -0.45000 0.00000 0.00000
+key 10 arm_r_upper 0.00000 0.00000 0.00000 0.06913 0.04894 0.04325
+key 19 arm_r_upper 0.00000 0.00000 0.00000 -0.45000 0.00000 0.00000
+key 0 arm_l_fore 0.00000 0.00000 0.00000 -0.11180 -0.00000 0.00000
+key 10 arm_l_fore 0.00000 0.00000 0.00000 -0.27937 -0.00000 0.00000
+key 19 arm_l_fore 0.00000 0.00000 0.00000 -0.18929 -0.00000 0.00000
+key 0 arm_r_fore 0.00000 0.00000 0.00000 -0.20000 0.00000 0.00000
+key 10 arm_r_fore 0.00000 0.00000 0.00000 -0.15153 0.01353 -0.01724
+key 19 arm_r_fore 0.00000 0.00000 0.00000 -0.22586 -0.00000 0.00000
+key 0 leg_l_thigh 0.00000 0.00000 0.00000 -0.56505 -0.00000 0.00000
+key 10 leg_l_thigh 0.00000 0.00000 0.00000 0.48700 -0.00000 0.00000
+key 19 leg_l_thigh 0.00000 0.00000 0.00000 -0.56466 -0.00000 0.00000
+key 0 leg_r_thigh 0.00000 0.00000 0.00000 0.40000 0.00000 0.00000
+key 10 leg_r_thigh 0.00000 0.00000 0.00000 -0.56474 -0.00000 0.00000
+key 19 leg_r_thigh 0.00000 0.00000 0.00000 0.46093 -0.00000 0.00000
+key 0 arm_r_shoulder 0.00000 0.00000 0.00000 -0.23823 -0.00000 0.00000
+key 10 arm_r_shoulder 0.00000 0.00000 0.00000 0.48538 -0.00000 0.00000
+key 19 arm_r_shoulder 0.00000 0.00000 0.00000 -0.26278 -0.00000 0.00000
+key 0 arm_l_shoulder 0.00000 0.00000 0.00000 0.49462 -0.00000 0.00000
+key 10 arm_l_shoulder 0.00000 0.00000 0.00000 -0.11136 -0.00000 0.00000
+key 19 arm_l_shoulder 0.00000 0.00000 0.00000 0.51402 -0.00000 0.00000
+key 0 arm_l_hand 0.00000 0.00000 0.00000 -0.06539 0.01101 0.00314
+key 19 arm_l_hand 0.00000 0.00000 0.00000 -0.08843 0.01107 0.00289
+key 0 leg_l_shin 0.00000 0.00000 0.00000 0.17618 -0.00303 -0.00192
+key 10 leg_l_shin 0.00000 0.00000 0.00000 0.23616 -0.00291 -0.00210
+key 19 leg_l_shin 0.00000 0.00000 0.00000 0.24732 -0.00289 -0.00213
+key 0 leg_r_shin 0.00000 0.00000 0.00000 0.29147 -0.00000 0.00000
+key 10 leg_r_shin 0.00000 0.00000 0.00000 0.27287 -0.00000 0.00000
+key 19 leg_r_shin 0.00000 0.00000 0.00000 0.31657 -0.00000 0.00000
+key 10 arm_r_hand 0.00000 0.00000 0.00000 -0.09516 0.00278 -0.00596

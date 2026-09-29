@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id gold_ore
+display Gold Ore
+kind block
+max_stack 1
+hardness 5
+durability 36
+efficiency 0
+weight 24
+friction 0.70
+tags 
+harvest_need pick
+harvest_drop gold_ore 1

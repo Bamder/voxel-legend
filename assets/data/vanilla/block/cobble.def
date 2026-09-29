@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id cobble
+display Cobblestone
+kind block
+max_stack 1
+hardness 3.5
+durability 42
+efficiency 0
+weight 16
+friction 0.80
+tags 
+harvest_need pick
+harvest_drop cobble 1

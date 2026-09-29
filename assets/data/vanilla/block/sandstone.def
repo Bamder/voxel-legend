@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id sandstone
+display Sandstone
+kind block
+max_stack 1
+hardness 3.8
+durability 36
+efficiency 0
+weight 14
+friction 0.58
+tags 
+harvest_need pick
+harvest_drop sandstone 1

@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id grass
+display Grass
+kind block
+max_stack 1
+hardness 1.6
+durability 9
+efficiency 0
+weight 9
+friction 0.55
+tags 
+harvest_need shovel
+harvest_drop dirt 1

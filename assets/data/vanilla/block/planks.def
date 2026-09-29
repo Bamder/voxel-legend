@@ -1,0 +1,13 @@
+# VOXEL LEGEND data pack entry
+id planks
+display Planks
+kind block
+max_stack 1
+hardness 2.4
+durability 4
+efficiency 0
+weight 6
+friction 0.42
+tags 
+harvest_need axe
+harvest_drop planks 1
