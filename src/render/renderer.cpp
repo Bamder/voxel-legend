@@ -2989,13 +2989,17 @@ void Renderer::drawDebugMenu(UIState& ui) {
     buttonChrome(bx, backY, bw, bh, backHover);
 
     const bool showRail = (ui.privilegeMode || ui.inTrial) && !ui.roomSession && !ui.structureEdit;
-    const float aw = 46.0f, ah = 72.0f;
+    const float aw = 46.0f;
     const float ax = bx + bw + 12.0f;
     const float ay = permY;
     const float colW = 280.0f;
     const float colX = ax + aw + 12.0f;
     const float spaceY = ay;
     const float flyBtnY = spaceY + bh + gap;
+    const float breakBtnY = flyBtnY + bh + gap;
+    const bool showQuick = ui.privilegeMode;
+    const float railBottom = showQuick ? (breakBtnY + bh) : (flyBtnY + bh);
+    const float ah = ui.railOpen ? (railBottom - ay) : bh;
     if (showRail) {
         bool arrowHover = ui.mouseX >= ax && ui.mouseX < ax + aw && ui.mouseY >= ay && ui.mouseY < ay + ah;
         if (arrowHover) ui.railHover = 0;
@@ -3007,6 +3011,11 @@ void Renderer::drawDebugMenu(UIState& ui) {
             if (flyHover) ui.railHover = 2;
             buttonChrome(colX, spaceY, colW, bh, spaceHover);
             buttonChrome(colX, flyBtnY, colW, bh, flyHover);
+            if (showQuick) {
+                bool breakHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= breakBtnY && ui.mouseY < breakBtnY + bh;
+                if (breakHover) ui.railHover = 3;
+                buttonChrome(colX, breakBtnY, colW, bh, breakHover);
+            }
         }
     }
     flushUI(progUI, whiteTex);
@@ -3029,6 +3038,8 @@ void Renderer::drawDebugMenu(UIState& ui) {
             const char* spaceLabel = ui.inTrial ? "退出守护者空间" : "进入守护者空间";
             centeredText(spaceLabel, colX + colW * 0.5f, spaceY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
             centeredText(ui.flying ? "关闭飞行" : "开启飞行", colX + colW * 0.5f, flyBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
+            if (ui.privilegeMode)
+                centeredText(ui.quickBreak ? "快速破坏：开" : "快速破坏：关", colX + colW * 0.5f, breakBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
         }
     }
     std::string humLabel = std::string("湿度显示：") + (ui.humidityMode ? "开" : "关");

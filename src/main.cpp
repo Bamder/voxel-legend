@@ -2701,6 +2701,7 @@ int main(int argc, char** argv) {
             player.flying = true;
             player.dead = false;
         }
+        if (!player.privilegeMode || roomSession || structureEdit) ui.quickBreak = false;
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
                         && !(structureEdit && structurePicker));
         bool lookLocked = (canMove && !inventoryOpen && !(structureEdit && blockBarOpen));
@@ -3670,6 +3671,7 @@ int main(int argc, char** argv) {
                     if (lmb && !prevLmb && ui.debugHover == 5) {
                         player.privilegeMode = !player.privilegeMode;
                         if (!player.privilegeMode && !trialAnchor.active) ui.railOpen = false;
+                        if (!player.privilegeMode) ui.quickBreak = false;
                     }
                     if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 0)
                         ui.railOpen = !ui.railOpen;
@@ -3684,6 +3686,8 @@ int main(int argc, char** argv) {
                         player.flying = !player.flying;
                         if (!player.flying) player.vel.y = 0.0f;
                     }
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 3 && player.privilegeMode)
+                        ui.quickBreak = !ui.quickBreak;
                     if (!ui.trialPick && lmb && ui.tickSliderW > 1.0f &&
                         ui.mouseX >= ui.tickSliderX - 12.0f && ui.mouseX <= ui.tickSliderX + ui.tickSliderW + 12.0f &&
                         ui.mouseY >= ui.tickSliderY - 12.0f && ui.mouseY <= ui.tickSliderY + ui.tickSliderH + 12.0f) {
@@ -3847,6 +3851,21 @@ int main(int argc, char** argv) {
                                 ? world.getBlock(hit.x, hit.y, hit.z)
                                 : world.getPhysBlock(physHit, hit.x, hit.y, hit.z), heldMine);
                         if (dmg <= 0.0f) canMine = false;
+                    }
+                }
+                if (ui.quickBreak && player.privilegeMode && !roomSession && !structureEdit
+                    && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
+                    uint8_t b = physHit < 0
+                        ? world.getBlock(hit.x, hit.y, hit.z)
+                        : world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
+                    if (b != AIR && plugin::blockStrategy(b)->canBreak(b)) {
+                        player.mineCharge = 0.0f;
+                        player.mineCooldown = 0.0f;
+                        player.strikeName.clear();
+                        player.pickRaised = false;
+                        finishMinedBlock(world, inv[ui.selectedSlot].block, physHit, hit);
+                        canMine = false;
+                        guardianSwing = false;
                     }
                 }
                 if (!canMine && !guardianSwing) {
