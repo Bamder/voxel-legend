@@ -1,6 +1,7 @@
 #include "../src/world/combat.hpp"
 #include "../src/world/arcane.hpp"
 #include "../src/world/guardian_ai.hpp"
+#include "../src/world/guardian_fight.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -13,6 +14,28 @@ void check(bool ok, const char* message) {
     if (!ok) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
 }
 bool near(float a, float b) { return std::fabs(a-b) < 0.00001f; }
+
+float g_lip = 0.0f;
+float lipStand(void*, float x, float y, float) {
+    float top = (x >= 0.25f) ? g_lip : 0.0f;
+    if (std::fabs(y - top) <= 1e-3f) return top;
+    return std::numeric_limits<float>::quiet_NaN();
+}
+bool lipBlocked(void*, float x, float y, float) {
+    float top = (x >= 0.25f) ? g_lip : 0.0f;
+    return y + 1e-3f < top;
+}
+
+float gateStand(void*, float x, float y, float z) {
+    bool wall = x >= 1.0f && x < 1.5f && std::fabs(z) < 1.5f;
+    float top = wall ? 2.0f : 0.0f;
+    if (std::fabs(y - top) <= 1e-3f) return top;
+    return std::numeric_limits<float>::quiet_NaN();
+}
+bool gateBlocked(void*, float x, float y, float z) {
+    bool wall = x >= 1.0f && x < 1.5f && std::fabs(z) < 1.5f;
+    return y + 1e-3f < (wall ? 2.0f : 0.0f);
+}
 }
 
 int main() {
@@ -351,6 +374,68 @@ int main() {
     live.hp = 0.0f;
     order = think(brain, live, &melee, 1, 0.05f);
     check(order.state == State::Idle && order.target == 0, "a dead guardian drops the fight");
+
+    guardian_fight::reset();
+    guardian_fight::Home home;
+    home.relic = 0;
+    home.feet = {};
+    home.hp = 320.0f;
+    home.maxHp = 320.0f;
+    guardian_fight::Rival rival;
+    rival.id = 7;
+    rival.feet = { 12.0f, 0.0f, 0.0f };
+    rival.alive = true;
+    rival.active = true;
+    guardian_fight::noteDamage(0, 7, 400);
+    guardian_fight::Blow blows[4];
+    int blowCount = guardian_fight::tick(&home, 1, &rival, 1, 0.5f, {}, blows, 4);
+    guardian_fight::Pose pose;
+    int poseCount = guardian_fight::poses(&pose, 1);
+    check(blowCount == 0 && poseCount == 1 && pose.feet.x > 1.0f, "a far threat is charged toward");
+    guardian_fight::reset();
+    rival.feet = { 3.0f, 0.0f, 0.0f };
+    guardian_fight::noteDamage(0, 7, 400);
+    blowCount = guardian_fight::tick(&home, 1, &rival, 1, 0.05f, {}, blows, 4);
+    check(blowCount >= 1 && blows[0].target == 7 && blows[0].amount > 0.03f && blows[0].relic == 0,
+          "melee range connects a blow");
+    guardian_fight::reset();
+    home.hp = 64.0f;
+    blowCount = guardian_fight::tick(&home, 1, &rival, 1, 0.05f, {}, blows, 4);
+    check(blowCount == 0 && !guardian_fight::vulnerable(0), "low health dodges with an invulnerable window");
+    check(guardian_fight::vulnerable(3), "an untouched guardian can still be hit");
+
+    guardian_fight::Ground climb{ nullptr, lipStand, lipBlocked };
+    guardian_fight::reset();
+    home.hp = home.maxHp = 320.0f;
+    home.feet = {};
+    rival.feet = { 12.0f, 0.0f, 0.0f };
+    rival.alive = rival.active = true;
+    g_lip = 1.0f;
+    guardian_fight::noteDamage(0, 7, 400);
+    guardian_fight::tick(&home, 1, &rival, 1, 0.05f, climb, blows, 4);
+    poseCount = guardian_fight::poses(&pose, 1);
+    check(poseCount == 1 && pose.feet.x > 0.25f && std::fabs(pose.feet.y - 1.0f) < 1e-3f,
+          "a two-block lip is stepped onto");
+    guardian_fight::reset();
+    g_lip = 1.5f;
+    guardian_fight::noteDamage(0, 7, 400);
+    guardian_fight::tick(&home, 1, &rival, 1, 0.05f, climb, blows, 4);
+    poseCount = guardian_fight::poses(&pose, 1);
+    check(poseCount == 1 && std::fabs(pose.feet.x) < 1e-3f && std::fabs(pose.feet.y) < 1e-3f,
+          "a three-block wall is not climbed");
+
+    guardian_fight::Ground gate{ nullptr, gateStand, gateBlocked };
+    guardian_fight::reset();
+    home.hp = home.maxHp = 320.0f;
+    home.feet = {};
+    rival.feet = { 12.0f, 0.0f, 0.0f };
+    rival.alive = rival.active = true;
+    guardian_fight::noteDamage(0, 7, 400);
+    for (int step = 0; step < 30; ++step)
+        guardian_fight::tick(&home, 1, &rival, 1, 0.05f, gate, blows, 4);
+    poseCount = guardian_fight::poses(&pose, 1);
+    check(poseCount == 1 && pose.feet.x > 1.6f && std::fabs(pose.feet.y) < 0.2f,
+          "chase routes around a wall with A*");
 
     std::cout << "combat: " << checks << " checks passed\n";
 }

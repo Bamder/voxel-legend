@@ -368,17 +368,15 @@ void World::generateColumn(int cx, int cz) {
                 bool inside = wx >= ax0 && wx < ax1 && wz >= az0 && wz < az1;
                 int dx = wx - ccx;
                 int dz = wz - ccz;
-                int cheb = std::max(std::abs(dx), std::abs(dz));
                 bool pillar = std::abs(dx) == 8 && std::abs(dz) == 8;
-                bool ring = cheb >= 3 && cheb <= 5 && ((dx * 3 + dz * 5) & 3) != 0;
+                bool core = wx == ccx && wz == ccz;
                 for (int y = 0; y < cfg::WORLD_H; y++) {
                     uint8_t b = AIR;
                     if (!inside) b = shell;
                     else if (y == 0 || y == cfg::WORLD_H - 1) b = shell;
                     else if (wx == ax0 || wx == ax1 - 1 || wz == az0 || wz == az1 - 1) b = shell;
                     else if (pillar && y >= 1 && y <= 4) b = shell;
-                    else if (ring && y == 1) b = shell;
-                    if (wx == ccx && wz == ccz && y == 1) b = AIR;
+                    if (core && y == 0) b = (uint8_t)GUARDIAN_CORE;
                     room.set(lx, y, lz, b);
                 }
             }

@@ -12,6 +12,8 @@
 #include "../world/animation.hpp"
 #include "../world/arcane.hpp"
 #include "../world/combat.hpp"
+#include "../world/guardian_fight.hpp"
+#include "../world/guardian_fight_world.hpp"
 #include "../world/ritual.hpp"
 #include "../world/structure.hpp"
 #include "../world/world.hpp"
@@ -927,6 +929,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         bool active = c.landed && c.fade <= 0.0f && !c.spectator && !c.body.player.dead;
                         int gx = 0, gy = 0, gz = 0;
                         if (ready && active &&
+                            guardian_fight::vulnerable(in.guardianRelic) &&
                             structure::roomGuardianHit(world, c.body.player.eye(), in.guardianRelic,
                                                        cfg::REACH, gx, gy, gz)) {
                             int slot = cfg::HAND_SLOTS + c.selectedRight;
@@ -936,11 +939,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 if (item.block != AIR && item.count > 0) held = item.block;
                             }
                             int dmg = structure::guardianStrikeHurt(held, in.guardianRelic);
+                            guardian_fight::noteDamage(in.guardianRelic, c.id, dmg);
                             if (structure::damageGuardian(world, in.guardianRelic, dmg, gx, gy, gz)) {
-                                world.setBlock(gx, gy, gz, AIR, false, false);
                                 uint8_t drop = (uint8_t)ritual::blockId(in.guardianRelic);
                                 const float Sdrop = cfg::BLOCK_SCALE;
-                                world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop, (gz + 0.5f) * Sdrop },
+                                world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 1) * Sdrop + 0.2f, (gz + 0.5f) * Sdrop },
                                                 drop, 1, true);
                             }
                             float recover = (held != AIR && hasItemTags(held, TAG_AXE))
@@ -1269,6 +1272,74 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         [&](const arcane::Burning& value) { return !arcane::burning(value, serverTick); }),
                         target.burning.end());
                 }
+                {
+                    guardian_fight::Home homes[guardian_fight::kSlots];
+                    int homeCount = 0;
+                    std::vector<structure::GuardianSync> live;
+                    structure::collectRoomGuardians(live);
+                    const float block = cfg::BLOCK_SCALE;
+                    for (const structure::GuardianSync& g : live) {
+                        if (homeCount >= guardian_fight::kSlots) break;
+                        guardian_fight::Home& home = homes[homeCount++];
+                        home.relic = g.relic;
+                        home.hp = (float)g.hp;
+                        home.maxHp = (float)(g.maxHp > 0 ? g.maxHp : 1);
+                        home.feet = { (g.x + 0.5f) * block, g.y * block, (g.z + 0.5f) * block };
+                    }
+                    guardian_fight::Rival rivals[32];
+                    int rivalCount = 0;
+                    for (SClient& c : clients) {
+                        if (!c.sentWelcome || c.spectator || rivalCount >= 32) continue;
+                        guardian_fight::Rival& rival = rivals[rivalCount++];
+                        rival.id = c.id;
+                        rival.feet = c.body.player.pos;
+                        rival.alive = !c.body.player.dead;
+                        rival.active = c.landed && c.fade <= 0.0f && !c.body.player.dead;
+                        if (c.melee.pending && !arcane::reached(serverTick, c.melee.hitAt))
+                            rival.windup = (float)(c.melee.hitAt - serverTick) / (float)cfg::TICKS_PER_SECOND;
+                    }
+                    guardian_fight::Blow blows[32];
+                    int blowCount = guardian_fight::tick(homes, homeCount, rivals, rivalCount,
+                        1.0f / (float)cfg::TICKS_PER_SECOND, guardianGround(world), blows, 32);
+                    for (int i = 0; i < blowCount; ++i) {
+                        const guardian_fight::Blow& blow = blows[i];
+                        SClient* target = nullptr;
+                        for (SClient& c : clients)
+                            if (c.id == blow.target) { target = &c; break; }
+                        if (!target || target->spectator || target->body.player.dead || !target->landed) continue;
+                        combat::DamageSource source{guardian_fight::attackerId(blow.relic), 1, AIR,
+                                                    combat::DamageCategory::Physical};
+                        combat::DamageSpec spec{blow.amount, 1.0f, blow.wholeBody};
+                        auto result = combat::damagePlayer(target->body.player.vitals, source, spec, blow.limb);
+                        if (!result.applied) continue;
+                        target->hitFlashUntil = serverTick + 4;
+                        if (result.killed) {
+                            target->body.player.dead = true;
+                            target->body.player.vel = {};
+                        }
+                        CombatEventNet event;
+                        event.serial = nextCombatSerial++;
+                        if (!nextCombatSerial) nextCombatSerial = 1;
+                        event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                        event.attacker = source.attacker;
+                        event.target = target->id;
+                        event.limb = (int8_t)result.limb;
+                        event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
+                        combatEvents.push_back({serverTick, event});
+                    }
+                    guardian_fight::Pose posed[guardian_fight::kSlots];
+                    int poseCount = guardian_fight::poses(posed, guardian_fight::kSlots);
+                    bool posedRelic[guardian_fight::kSlots]{};
+                    for (int i = 0; i < poseCount; ++i) {
+                        const guardian_fight::Pose& pose = posed[i];
+                        if (pose.relic < 0 || pose.relic >= guardian_fight::kSlots) continue;
+                        posedRelic[pose.relic] = true;
+                        structure::setGuardianPose(pose.relic, pose.feet.x, pose.feet.y, pose.feet.z,
+                                                   pose.yaw, pose.swing);
+                    }
+                    for (int relic = 0; relic < guardian_fight::kSlots; ++relic)
+                        if (!posedRelic[relic]) structure::clearGuardianPose(relic);
+                }
                 while (!combatEvents.empty() && uint32_t(serverTick - combatEvents.front().first) > 200)
                     combatEvents.pop_front();
                 while (!arcaneEvents.empty() && uint32_t(serverTick - arcaneEvents.front().first) > 200)
@@ -1288,7 +1359,14 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         int cz = floorDiv(g.z, cfg::CHUNK_Z);
                         auto seen = c.seen.find(chunkKey(cx, cy, cz));
                         if (seen == c.seen.end() || !seen->second.base) continue;
-                        d.guardians.push_back(GuardianNet{ (uint8_t)g.relic, (uint16_t)g.hp, (uint16_t)g.maxHp });
+                        float px = (g.x + 0.5f) * cfg::BLOCK_SCALE;
+                        float py = g.y * cfg::BLOCK_SCALE;
+                        float pz = (g.z + 0.5f) * cfg::BLOCK_SCALE;
+                        float yaw = 0.0f;
+                        uint8_t swing = 0;
+                        structure::guardianPose(g.relic, px, py, pz, yaw, swing);
+                        d.guardians.push_back(GuardianNet{ (uint8_t)g.relic, (uint16_t)g.hp, (uint16_t)g.maxHp,
+                                                          px, py, pz, yaw, swing });
                     }
                     fillTrees(world, c, d, serverTick);
                     fillMines(world, c, d);

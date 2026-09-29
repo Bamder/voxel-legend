@@ -1756,24 +1756,25 @@ void Renderer::drawGuardians(const World& world, const Player& player, const UIS
     static bool loaded[ritual::RelicCount]{};
     static anim::Clip attack;
     static bool attackReady = false;
-    struct Swing { bool playing = false; bool inRange = false; float clock = 0.0f; };
+    struct Swing { bool playing = false; bool armed = false; uint8_t seen = 0; float clock = 0.0f; };
     static Swing swing[ritual::RelicCount];
     if (!attackReady) {
         attackReady = true;
         attack = anim::load(pack::animationFile("guardian_attack").c_str());
     }
 
-    const float reach2 = 3.6f * 3.6f;
     float rdt = (ui.fps > 1.0f) ? (1.0f / ui.fps) : (1.0f / 60.0f);
     bool seen[ritual::RelicCount]{};
     if (guards.empty()) {
         for (int i = 0; i < ritual::RelicCount; ++i) {
-            swing[i].inRange = false;
+            swing[i].armed = false;
             swing[i].playing = false;
             swing[i].clock = 0.0f;
+            swing[i].seen = 0;
         }
         return;
     }
+    (void)player;
 
     gl::Enable(GL_DEPTH_TEST);
     gl::DepthMask(GL_TRUE);
@@ -1790,26 +1791,23 @@ void Renderer::drawGuardians(const World& world, const Player& player, const UIS
             }
         }
         if (parts[g.relic].empty()) continue;
-        auto closeTo = [&](const Vec3& feet) {
-            float dx = feet.x - g.feetX;
-            float dy = feet.y - (g.feetY + 1.1f);
-            float dz = feet.z - g.feetZ;
-            return dx * dx + dy * dy + dz * dz < reach2;
-        };
-        bool now = false;
-        if (!ui.menuWorld && !ui.playerDead && !player.noclip) now = closeTo(player.pos);
-        if (!now) {
-            for (const RemoteAvatar& rp : ui.remotes) {
-                if (rp.spectator || rp.dead) continue;
-                if (closeTo(rp.pos)) { now = true; break; }
+        float yaw = 0.0f;
+        uint8_t swingId = 0;
+        float poseX = 0.0f, poseY = 0.0f, poseZ = 0.0f;
+        bool hasPose = structure::guardianPose(g.relic, poseX, poseY, poseZ, yaw, swingId);
+        Swing& sw = swing[g.relic];
+        if (!hasPose) {
+            sw.armed = false;
+        } else if (!sw.armed) {
+            sw.armed = true;
+            sw.seen = swingId;
+        } else if (swingId != sw.seen) {
+            sw.seen = swingId;
+            if (swingId && !attack.bones.empty()) {
+                sw.playing = true;
+                sw.clock = 0.0f;
             }
         }
-        Swing& sw = swing[g.relic];
-        if (now && !sw.inRange && !attack.bones.empty()) {
-            sw.playing = true;
-            sw.clock = 0.0f;
-        }
-        sw.inRange = now;
         if (sw.playing) {
             float fps = (attack.fps > 0.1f) ? attack.fps : 20.0f;
             sw.clock += rdt * fps;
@@ -1831,7 +1829,7 @@ void Renderer::drawGuardians(const World& world, const Player& player, const UIS
         auto xform = [&](const pm::Part& p, float lx, float ly, float lz) -> Vec3 {
             (void)p;
             float rx, rz;
-            pm::lookYawXZ(lx, lz, 0.0f, rx, rz);
+            pm::lookYawXZ(lx, lz, yaw, rx, rz);
             return { feet.x + rx - eye.x, feet.y + ly - eye.y, feet.z + rz - eye.z };
         };
         pdraw::Mesh mesh;
@@ -1857,9 +1855,10 @@ void Renderer::drawGuardians(const World& world, const Player& player, const UIS
     }
     for (int i = 0; i < ritual::RelicCount; ++i) {
         if (seen[i]) continue;
-        swing[i].inRange = false;
+        swing[i].armed = false;
         swing[i].playing = false;
         swing[i].clock = 0.0f;
+        swing[i].seen = 0;
     }
     gl::Enable(GL_CULL_FACE);
 }

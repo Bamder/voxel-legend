@@ -138,6 +138,7 @@ Order publish(const Brain& brain, float threatValue, bool group) {
         break;
     case State::Attack:
         order.move = Move::Approach;
+        order.strafe = brain.strafe;
         order.preferDistance = 2.0f;
         break;
     case State::Evade:
@@ -145,6 +146,11 @@ Order publish(const Brain& brain, float threatValue, bool group) {
         order.preferDistance = kOrbit;
         break;
     case State::Wander:
+        order.move = Move::Orbit;
+        order.strafe = brain.strafe;
+        order.preferDistance = kOrbit;
+        break;
+    case State::Empower:
         order.move = Move::Orbit;
         order.strafe = brain.strafe;
         order.preferDistance = kOrbit;

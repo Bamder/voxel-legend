@@ -8,7 +8,8 @@ $testExe = Join-Path $testDir "combat-test.exe"
     (Join-Path $PSScriptRoot "combat_test.cpp") `
     (Join-Path $repoDir "src/world/combat.cpp") `
     (Join-Path $repoDir "src/world/arcane.cpp") `
-    (Join-Path $repoDir "src/world/guardian_ai.cpp") -o $testExe
+    (Join-Path $repoDir "src/world/guardian_ai.cpp") `
+    (Join-Path $repoDir "src/world/guardian_fight.cpp") -o $testExe
 if ($LASTEXITCODE -ne 0) { throw "Combat test compilation failed ($LASTEXITCODE)." }
 & $testExe
 if ($LASTEXITCODE -ne 0) { throw "Combat tests failed ($LASTEXITCODE)." }

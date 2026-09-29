@@ -32,10 +32,13 @@ static const char* kTileNames[TEX_COUNT] = {
     "shrub_stem", "shrub_leaf", "grass_tuft", "leaf_x", "shrub_leaf_x",
     "bark", "hand_axe", "wood_side",
     "shears", "hand_pick", "hand_shovel",
-    "crack",
+    "crack", "core",
 };
 
-const char* tileName(int tile) { return (tile >= 0 && tile < TEX_COUNT) ? kTileNames[tile] : "?"; }
+const char* tileName(int tile) {
+    if (tile < 0 || tile >= TEX_COUNT || !kTileNames[tile]) return "?";
+    return kTileNames[tile];
+}
 const char* blockName(int block) {
     const char* id = plugin::blockId((uint8_t)block);
     return (id && id[0]) ? id : "?";
@@ -43,7 +46,7 @@ const char* blockName(int block) {
 int tileIndex(const char* name) {
     if (!name || !name[0]) return -1;
     for (int t = 0; t < TEX_COUNT; t++) {
-        if (std::strcmp(kTileNames[t], name) == 0) return t;
+        if (kTileNames[t] && std::strcmp(kTileNames[t], name) == 0) return t;
     }
     return -1;
 }

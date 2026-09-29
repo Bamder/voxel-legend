@@ -63,7 +63,11 @@ struct GuardianSync {
     int maxHp = 1;
 };
 void collectRoomGuardians(std::vector<GuardianSync>& out);
-void applyRoomGuardian(int relic, int hp);
+void applyRoomGuardian(int relic, int hp, float x, float y, float z, float yaw, uint8_t swing);
+// Combat pose. When set, the hit volume and the drawn model leave the token.
+void setGuardianPose(int relic, float x, float y, float z, float yaw, uint8_t swing);
+void clearGuardianPose(int relic);
+bool guardianPose(int relic, float& x, float& y, float& z, float& yaw, uint8_t& swing);
 // Living guardian whose model is within reach of eye, and no foreign block stops the path.
 bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach,
                      int& x, int& y, int& z);
@@ -84,8 +88,8 @@ inline constexpr int kTrialFloor = 0;
 void openTrial(int relic);
 void closeTrial();
 bool trialActive();
-// Places the hidden token once the player is within radius (world units) of the ruin.
-void approachTrial(World& world, const Vec3& pos, float radius);
+// Writes the trial core if generation left the anchor cell empty.
+void ensureTrialCore(World& world);
 
 bool inVolume(int x, int y, int z);
 bool paintFile(World& world, const std::string& path);

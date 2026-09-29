@@ -1,4 +1,5 @@
 #include "structure.hpp"
+#include "guardian_fight.hpp"
 #include "ritual.hpp"
 #include "matchmap.hpp"
 #include "world.hpp"
@@ -61,6 +62,8 @@ const char* kGuardianStem[ritual::RelicCount] = {
 Vec3 g_boxMin[ritual::RelicCount]{};
 Vec3 g_boxMax[ritual::RelicCount]{};
 bool g_boxReady[ritual::RelicCount]{};
+struct PoseSlot { bool on = false; float x = 0, y = 0, z = 0, yaw = 0; uint8_t swing = 0; };
+PoseSlot g_pose[ritual::RelicCount]{};
 
 std::vector<Site> g_sites;
 bool g_trial = false;
@@ -170,6 +173,8 @@ void ensureLibrary() {
 
 void roll(uint32_t seed) {
     ritual::roll(seed);
+    guardian_fight::reset();
+    for (PoseSlot& pose : g_pose) pose = {};
     g_sites.clear();
     for (int i = 0; i < ritual::RelicCount; i++) g_hp[i] = kGuardianHp[i];
     int c0 = matchmap::playMin() + 8;
@@ -259,7 +264,7 @@ void stampColumn(int cx, int cz,
             if (s.cx >= x0 && s.cx <= x1 && s.cz >= z0 && s.cz <= z1) {
                 s.ground = ground;
                 if (!s.looted && ritual::relicSpawned(s.id))
-                    cell(s.cx, s.cz, ground, 1, (uint8_t)ritual::blockId(s.id));
+                    cell(s.cx, s.cz, ground, 0, (uint8_t)GUARDIAN_CORE);
             }
         } else {
             for (int dz = -10; dz <= 10; dz++) {
@@ -483,28 +488,54 @@ static void ensureBox(int relic) {
     g_boxMax[relic] = mx;
 }
 
+bool poseOf(int relic, float& x, float& y, float& z, float& yaw, uint8_t& swing) {
+    if (relic < 0 || relic >= ritual::RelicCount || !g_pose[relic].on) return false;
+    const PoseSlot& pose = g_pose[relic];
+    x = pose.x;
+    y = pose.y;
+    z = pose.z;
+    yaw = pose.yaw;
+    swing = pose.swing;
+    return true;
+}
+
 static bool spanOf(const World& world, const Site& s, GuardianSpan& g) {
     if (s.kind != 0 || s.looted || s.ground < 0) return false;
     if (s.id < 0 || s.id >= ritual::RelicCount) return false;
-    int x = s.cx, y = s.ground + 1, z = s.cz;
-    if (world.getBlock(x, y, z) != (uint8_t)ritual::blockId(s.id)) return false;
+    int x = s.cx, y = s.ground, z = s.cz;
+    if (world.getBlock(x, y, z) != (uint8_t)GUARDIAN_CORE) return false;
     ensureBox(s.id);
     const float S = cfg::BLOCK_SCALE;
     const float pad = 0.04f;
+    float yaw = 0.0f;
+    uint8_t swing = 0;
     float fx = (s.cx + 0.5f) * S;
-    float fy = (y) * S;
+    float fy = (y + 1) * S;
     float fz = (s.cz + 0.5f) * S;
+    poseOf(s.id, fx, fy, fz, yaw, swing);
     g.relic = s.id;
     g.feetX = fx;
     g.feetY = fy;
     g.feetZ = fz;
-    g.minX = fx + g_boxMin[s.id].x - pad;
-    g.maxX = fx + g_boxMax[s.id].x + pad;
+    float minX = 1.0e9f, maxX = -1.0e9f, minZ = 1.0e9f, maxZ = -1.0e9f;
+    const float lx[2] = { g_boxMin[s.id].x, g_boxMax[s.id].x };
+    const float lz[2] = { g_boxMin[s.id].z, g_boxMax[s.id].z };
+    for (float xCorner : lx) {
+        for (float zCorner : lz) {
+            float ox = 0.0f, oz = 0.0f;
+            pm::lookYawXZ(xCorner, zCorner, yaw, ox, oz);
+            minX = std::min(minX, ox);
+            maxX = std::max(maxX, ox);
+            minZ = std::min(minZ, oz);
+            maxZ = std::max(maxZ, oz);
+        }
+    }
+    g.minX = fx + minX - pad;
+    g.maxX = fx + maxX + pad;
     g.minY = fy + std::max(0.0f, g_boxMin[s.id].y) - pad;
     g.maxY = fy + g_boxMax[s.id].y + pad;
-    g.minZ = fz - g_boxMax[s.id].z - pad;
-    g.maxZ = fz - g_boxMin[s.id].z + pad;
-    if (g.minZ > g.maxZ) std::swap(g.minZ, g.maxZ);
+    g.minZ = fz + minZ - pad;
+    g.maxZ = fz + maxZ + pad;
     g.hp = g_hp[s.id];
     g.maxHp = kGuardianHp[s.id];
     return true;
@@ -559,9 +590,9 @@ bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, i
         if (s.kind != 0 || s.id != relic) continue;
         if (s.looted || s.ground < 0) return false;
         x = s.cx;
-        y = s.ground + 1;
+        y = s.ground;
         z = s.cz;
-        if (world.getBlock(x, y, z) != (uint8_t)ritual::blockId(relic)) {
+        if (world.getBlock(x, y, z) != (uint8_t)GUARDIAN_CORE) {
             s.looted = true;
             return false;
         }
@@ -623,7 +654,22 @@ void collectRoomGuardians(std::vector<GuardianSync>& out) {
     }
 }
 
-void applyRoomGuardian(int relic, int hp) {
+void setGuardianPose(int relic, float x, float y, float z, float yaw, uint8_t swing) {
+    if (relic < 0 || relic >= ritual::RelicCount) return;
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(yaw)) return;
+    g_pose[relic] = { true, x, y, z, yaw, swing };
+}
+
+void clearGuardianPose(int relic) {
+    if (relic < 0 || relic >= ritual::RelicCount) return;
+    g_pose[relic] = {};
+}
+
+bool guardianPose(int relic, float& x, float& y, float& z, float& yaw, uint8_t& swing) {
+    return poseOf(relic, x, y, z, yaw, swing);
+}
+
+void applyRoomGuardian(int relic, int hp, float x, float y, float z, float yaw, uint8_t swing) {
     if (relic < 0 || relic >= ritual::RelicCount) return;
     if (hp < 0) hp = 0;
     g_hp[relic] = hp;
@@ -631,6 +677,8 @@ void applyRoomGuardian(int relic, int hp) {
         if (s.kind != 0 || s.id != relic) continue;
         s.looted = hp <= 0;
     }
+    if (hp <= 0) clearGuardianPose(relic);
+    else setGuardianPose(relic, x, y, z, yaw, swing);
 }
 
 bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach,
@@ -679,31 +727,32 @@ void openTrial(int relic) {
     g_sites.push_back(s);
     g_hp[relic] = kGuardianHp[relic];
     g_trial = true;
+    guardian_fight::reset();
+    for (PoseSlot& pose : g_pose) pose = {};
 }
 
 void closeTrial() {
     if (!g_trial) return;
     g_sites.clear();
     g_trial = false;
+    guardian_fight::reset();
+    for (PoseSlot& pose : g_pose) pose = {};
 }
 
 bool trialActive() { return g_trial; }
 
-void approachTrial(World& world, const Vec3& pos, float radius) {
+void ensureTrialCore(World& world) {
     if (!g_trial || g_sites.empty()) return;
     Site& s = g_sites[0];
     if (s.kind != 0 || s.looted || s.ground < 0) return;
     if (s.id < 0 || s.id >= ritual::RelicCount) return;
     int x = s.cx;
-    int y = s.ground + 1;
+    int y = s.ground;
     int z = s.cz;
-    uint8_t id = (uint8_t)ritual::blockId(s.id);
-    if (world.getBlock(x, y, z) == id) return;
-    const float S = cfg::BLOCK_SCALE;
-    float dx = pos.x - (x + 0.5f) * S;
-    float dz = pos.z - (z + 0.5f) * S;
-    if (dx * dx + dz * dz > radius * radius) return;
-    world.setBlock(x, y, z, id, true);
+    if (world.getBlock(x, y, z) == (uint8_t)GUARDIAN_CORE) return;
+    world.setBlock(x, y, z, (uint8_t)GUARDIAN_CORE, true);
+    if (world.getBlock(x, y + 1, z) != AIR)
+        world.setBlock(x, y + 1, z, AIR, true);
 }
 
 bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, GuardianSpan& out) {

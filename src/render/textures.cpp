@@ -515,6 +515,16 @@ static void pixelColor(int tile, int px, int py, uint8_t& r, uint8_t& g, uint8_t
             }
             break;
         }
+        case TEX_CORE: {
+            float v = 0.35f + 0.25f * n;
+            c = { 28.0f * v, 36.0f * v, 48.0f * v };
+            float cx = (float)px / (float)(TILE - 1) - 0.5f;
+            float cy = (float)py / (float)(TILE - 1) - 0.5f;
+            float d = std::sqrt(cx * cx + cy * cy);
+            if (d < 0.16f) c = { 120.0f, 230.0f, 255.0f };
+            else if (d < 0.28f) c = { 40.0f + 80.0f * (0.28f - d), 90.0f, 140.0f };
+            break;
+        }
         default: {
             c = { 255.0f, 0.0f, 255.0f }; // magenta = error
             break;

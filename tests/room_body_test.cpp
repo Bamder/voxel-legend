@@ -99,7 +99,7 @@ int main() {
     delta.players.push_back(burningPose);
     delta.projectiles.push_back({31,1,2,3,4,5,6,7});
     delta.arcane.push_back({17,ArcaneEventKind::FireballExplode,8,9,10});
-    delta.guardians.push_back({3, 120, 320});
+    delta.guardians.push_back({3, 120, 320, 4.0f, 5.0f, 6.0f, 0.25f, 2});
     bytes = encodePlayDelta(delta);
     PlayDeltaNet output;
     check(decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output) &&
@@ -117,7 +117,9 @@ int main() {
           output.projectiles.size() == 1 && output.projectiles[0].id == 31 && output.projectiles[0].vz == 7 &&
           output.arcane.size() == 1 && output.arcane[0].serial == 17 && output.arcane[0].z == 10 &&
           output.guardians.size() == 1 && output.guardians[0].relic == 3 &&
-          output.guardians[0].hp == 120 && output.guardians[0].maxHp == 320,
+          output.guardians[0].hp == 120 && output.guardians[0].maxHp == 320 &&
+          output.guardians[0].x == 4.0f && output.guardians[0].z == 6.0f &&
+          output.guardians[0].yaw == 0.25f && output.guardians[0].swing == 2,
           "inventory combat status and arcane snapshot roundtrip");
     for (size_t n = 0; n < bytes.size(); ++n)
         check(!decodePlayDelta(bytes.data(), bytes.data()+n, output), "all truncated authority snapshots rejected");
@@ -147,6 +149,10 @@ int main() {
     bytes = encodePlayDelta(delta);
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "unknown status bits rejected");
     delta.players.clear();
+    delta.guardians.push_back({1, 10, 20, nan, 0, 0, 0, 0});
+    bytes = encodePlayDelta(delta);
+    check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "NaN guardian pose rejected");
+    delta.guardians.clear();
 
     // A deterministic flat test arena; never spawned in the actual game world.
     plugin::init();

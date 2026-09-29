@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609290102u;
+constexpr uint32_t kRoomProto = 2609290103u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -645,6 +645,8 @@ struct GuardianNet {
     uint8_t relic = 0;
     uint16_t hp = 0;
     uint16_t maxHp = 1;
+    float x = 0, y = 0, z = 0, yaw = 0;
+    uint8_t swing = 0; // changes when the guardian starts a swing
 };
 
 struct PlayDeltaNet {
@@ -882,6 +884,8 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
         b.u8(g.relic);
         b.u16(g.hp);
         b.u16(g.maxHp);
+        b.f32(g.x); b.f32(g.y); b.f32(g.z); b.f32(g.yaw);
+        b.u8(g.swing);
     }
     return b.data();
 }
@@ -1166,7 +1170,9 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
     d.guardians.resize(nguardians);
     for (auto& g : d.guardians) {
         if (!Buf::u8(p, end, g.relic) || g.relic >= 16 ||
-            !Buf::u16(p, end, g.hp) || !Buf::u16(p, end, g.maxHp) || !g.maxHp) return false;
+            !Buf::u16(p, end, g.hp) || !Buf::u16(p, end, g.maxHp) || !g.maxHp ||
+            !finiteFloat(g.x) || !finiteFloat(g.y) || !finiteFloat(g.z) || !finiteFloat(g.yaw) ||
+            !Buf::u8(p, end, g.swing)) return false;
     }
     return true;
 }

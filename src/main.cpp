@@ -11,6 +11,8 @@
 #include "world/hold_bind.hpp"
 #include "world/vitals.hpp"
 #include "world/combat.hpp"
+#include "world/guardian_fight.hpp"
+#include "world/guardian_fight_world.hpp"
 #include "world/wear.hpp"
 #include "world/matchmap.hpp"
 #include "world/ritual.hpp"
@@ -1240,6 +1242,58 @@ bool paintDeployColumns(World& world, int ox, int oz, int span, uint32_t& painte
     return any;
 }
 
+static bool stepLocalGuardians(World& world, Player& player, float dt) {
+    guardian_fight::Home homes[guardian_fight::kSlots];
+    int homeCount = 0;
+    std::vector<structure::GuardianSync> live;
+    structure::collectRoomGuardians(live);
+    const float block = cfg::BLOCK_SCALE;
+    for (const structure::GuardianSync& g : live) {
+        if (homeCount >= guardian_fight::kSlots) break;
+        guardian_fight::Home& home = homes[homeCount++];
+        home.relic = g.relic;
+        home.hp = (float)g.hp;
+        home.maxHp = (float)(g.maxHp > 0 ? g.maxHp : 1);
+        home.feet = { (g.x + 0.5f) * block, (float)g.y * block, (g.z + 0.5f) * block };
+    }
+    guardian_fight::Rival rival;
+    rival.id = 1;
+    rival.feet = player.pos;
+    rival.alive = !player.dead && !vitals::isDead(player.vitals);
+    rival.active = rival.alive && !player.noclip;
+    if (player.strikeCharge > guardian_ai::kWindup && player.mineCharge < player.strikeCharge)
+        rival.windup = player.strikeCharge - player.mineCharge;
+    guardian_fight::Blow blows[8];
+    int blowCount = guardian_fight::tick(homes, homeCount, &rival, 1, dt, guardianGround(world), blows, 8);
+    bool struck = false;
+    for (int i = 0; i < blowCount; ++i) {
+        const guardian_fight::Blow& blow = blows[i];
+        if (blow.target != rival.id || player.dead) continue;
+        combat::DamageSource source{guardian_fight::attackerId(blow.relic), 1, AIR,
+                                    combat::DamageCategory::Physical};
+        auto result = combat::damagePlayer(player.vitals, source,
+                                            {blow.amount, 1.0f, blow.wholeBody}, blow.limb);
+        if (!result.applied) continue;
+        struck = true;
+        if (result.killed) {
+            player.dead = true;
+            player.vel = {};
+        }
+    }
+    guardian_fight::Pose posed[guardian_fight::kSlots];
+    int poseCount = guardian_fight::poses(posed, guardian_fight::kSlots);
+    bool posedRelic[guardian_fight::kSlots]{};
+    for (int i = 0; i < poseCount; ++i) {
+        const guardian_fight::Pose& pose = posed[i];
+        if (pose.relic < 0 || pose.relic >= guardian_fight::kSlots) continue;
+        posedRelic[pose.relic] = true;
+        structure::setGuardianPose(pose.relic, pose.feet.x, pose.feet.y, pose.feet.z, pose.yaw, pose.swing);
+    }
+    for (int relic = 0; relic < guardian_fight::kSlots; ++relic)
+        if (!posedRelic[relic]) structure::clearGuardianPose(relic);
+    return struck;
+}
+
 int main(int argc, char** argv) {
     plugin::init();
     data::init();
@@ -1641,6 +1695,18 @@ int main(int argc, char** argv) {
         paused = false;
     };
 
+    auto placeTrialSpawn = [&]() {
+        const float S = cfg::BLOCK_SCALE;
+        int sx = structure::kTrialCX;
+        int sz = structure::kTrialCZ + 48;
+        player.pos = { (sx + 0.5f) * S, (structure::kTrialFloor + 1) * S + 0.05f, (sz + 0.5f) * S };
+        player.vel = { 0, 0, 0 };
+        player.yaw = 0.0f;
+        player.pitch = 0.0f;
+        player.flying = false;
+        player.syncBodyYaw();
+    };
+
     auto enterTrial = [&](int relic) {
         if (roomSession || structureEdit || !player.privilegeMode) return;
         if (relic < 0 || relic >= ritual::RelicCount) return;
@@ -1655,15 +1721,9 @@ int main(int argc, char** argv) {
         world.discardGuardianArenaChunks();
         structure::openTrial(relic);
         world.clearTrialDrops();
-        const float S = cfg::BLOCK_SCALE;
-        int sx = structure::kTrialCX;
-        int sz = structure::kTrialCZ + 48;
-        player.pos = { (sx + 0.5f) * S, (structure::kTrialFloor + 1) * S + 0.05f, (sz + 0.5f) * S };
-        player.vel = { 0, 0, 0 };
-        player.yaw = 0.0f;
-        player.pitch = 0.0f;
-        player.syncBodyYaw();
+        placeTrialSpawn();
         world.loadGuardianArena();
+        structure::ensureTrialCore(world);
         ui.trialPick = false;
         ui.inTrial = true;
         debugMenuOpen = false;
@@ -2153,7 +2213,8 @@ int main(int argc, char** argv) {
                     if (event.target == gameClient.selfId()) damageFlash = .20f;
                 }
                 for (const GuardianNet& guardian : d.guardians)
-                    structure::applyRoomGuardian(guardian.relic, guardian.hp);
+                    structure::applyRoomGuardian(guardian.relic, guardian.hp,
+                                                 guardian.x, guardian.y, guardian.z, guardian.yaw, guardian.swing);
                 for (const ArcaneEventNet& event : d.arcane) {
                     if (event.serial <= roomArcaneAck) continue;
                     roomArcaneAck = event.serial;
@@ -3111,7 +3172,7 @@ int main(int argc, char** argv) {
             }
         }
         if (playing && trialAnchor.active)
-            structure::approachTrial(world, player.pos, 16.0f);
+            structure::ensureTrialCore(world);
         int guardianRelic = -1;
         structure::GuardianSpan guardianHit;
         float guardianT = cfg::REACH + 1.0f;
@@ -3864,7 +3925,8 @@ int main(int argc, char** argv) {
                     vitals::resetFatigue(player.fatigue);
                     player.dead = false;
                     player.vel = { 0, 0, 0 };
-                    spawnPlayer();
+                    if (trialAnchor.active) placeTrialSpawn();
+                    else spawnPlayer();
                 }
             } else if (!carry.empty() && !structureEdit) {
                 player.mineCharge = 0.0f;
@@ -4008,9 +4070,10 @@ int main(int argc, char** argv) {
                                 roomGuardianPending = roomGuardianNext;
                                 roomGuardianRelic = (uint8_t)ui.targetGuardian;
                             }
-                        } else {
+                        } else if (guardian_fight::vulnerable(ui.targetGuardian)) {
                             int gx = 0, gy = 0, gz = 0;
                             int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
+                            guardian_fight::noteDamage(ui.targetGuardian, 1, dmg);
                             bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
                             if (ui.bossRelic == ui.targetGuardian) {
                                 ui.bossHp -= dmg;
@@ -4021,10 +4084,9 @@ int main(int argc, char** argv) {
                             }
                             if (slain) {
                                 uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
-                                world.setBlock(gx, gy, gz, AIR, true);
                                 const dropgeom::Shape& sh = dropgeom::cached(item);
                                 const float S = cfg::BLOCK_SCALE;
-                                Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                                Vec3 dropPos{ (gx + 0.5f) * S, (gy + 1) * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
                                 world.spawnDrop(dropPos, item, 1, true);
                             }
                         }
@@ -4247,13 +4309,16 @@ int main(int argc, char** argv) {
                 if (roomSession && !structureEdit)
                     matchmap::clampOutside(player.pos, player.vel);
                 if (!roomSession) world.treeFallPhysics(cfg::FIXED_DT);
+                if (!roomSession && !spectating && !structureEdit
+                    && stepLocalGuardians(world, player, cfg::FIXED_DT))
+                    damageFlash = 0.20f;
                 world.updateDrops(cfg::FIXED_DT);
                 if (const plugin::EntityModule* em = plugin::findEntity("player")) {
                     plugin::EntityEvent ev{ &world, &player, cfg::FIXED_DT };
                     em->strategy->onTick(ev);
                     em->strategy->think(ev);
                 }
-                if (!player.privilegeMode && !spectating && !roomSession) {
+                if ((!player.privilegeMode || trialAnchor.active) && !spectating && !roomSession) {
                     vitals::TickInput vin;
                     vin.moving = in.forward || in.back || in.left || in.right;
                     vin.sprint = in.sprint && !player.flying && vitals::canSprint(player.vitals);
@@ -4295,7 +4360,7 @@ int main(int argc, char** argv) {
                 structurePainted = true;
             }
 
-            if (player.privilegeMode) {
+            if (player.privilegeMode && !trialAnchor.active) {
                 vitals::reset(player.vitals);
                 vitals::resetFatigue(player.fatigue);
                 player.dead = false;
