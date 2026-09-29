@@ -1,56 +1,104 @@
 #pragma once
 #include "blocks.hpp"
-#include "loot.hpp"
-#include <cmath>
+#include "vitals.hpp"
+#include <cstdint>
+#include <optional>
 
-// Hit resolution.
-// 受伤 = max(每击物理 - 目标装甲 - 攻击者物理抵抗, 0)
-//        * (基础攻击倍率 + 力量增幅 + 目标物理易伤)
-//      + max(每击神秘学 - 攻击者神秘学抵抗, 0)
-//        * (基础攻击倍率 + 目标物理易伤)
+// Player-versus-player rules. This module owns no parallel HP and performs no
+// network, rendering, inventory mutation or AI. The room server supplies
+// validated actors. Trial guardians keep a separate integer pool.
 namespace combat {
 
-struct Attacker {
-    float physHit = 0;      // 每击物理伤害
-    float occultHit = 0;    // 每击神秘学伤害
-    float physResist = 0;   // 物理抵抗
-    float occultResist = 0; // 神秘学抵抗
-    float baseAtk = 1;      // 基础攻击倍率
-    float strAmp = 0;       // 力量增幅
+enum class EntityCategory : uint8_t { Player, Boss };
+enum class DamageCategory : uint8_t { Physical, Fire, Frost };
+enum class Hand : uint8_t { Left, Right };
+
+struct DamageSource {
+    uint32_t attacker = 0;
+    uint32_t action = 0;
+    uint8_t item = AIR;
+    DamageCategory category = DamageCategory::Physical;
 };
 
-struct Target {
-    float armor = 0;    // 装甲值
-    float physVuln = 0; // 物理易伤倍率
+struct DamageSpec {
+    float base = 0.0f; // fraction of a limb's maximum health
+    float bossMultiplier = 1.0f;
+    bool wholeBody = false;
 };
 
-inline float hurt(const Attacker& a, const Target& t) {
-    float phys = a.physHit - t.armor - a.physResist;
-    if (phys < 0.0f) phys = 0.0f;
-    float occult = a.occultHit - a.occultResist;
-    if (occult < 0.0f) occult = 0.0f;
-    return phys * (a.baseAtk + a.strAmp + t.physVuln)
-         + occult * (a.baseAtk + t.physVuln);
-}
+struct Weapon {
+    uint8_t item = AIR;
+    DamageSpec damage;
+    float reach = 3.0f;
+    float windup = 0.5f;
+    float recovery = 0.5f;
+};
 
-inline int hurtInt(const Attacker& a, const Target& t) {
-    float h = hurt(a, t);
-    if (h <= 0.0f) return 0;
-    return (int)std::lround(h);
-}
+std::optional<Weapon> weapon(uint8_t item);
 
-// Axe 15 physical. Other tools 5 physical. Empty hand and non-tools: 2 physical, 1 occult.
-inline Attacker strikeOf(uint8_t held) {
-    Attacker a;
-    if (held != AIR && hasItemTags(held, TAG_AXE)) {
-        a.physHit = 15.0f;
-    } else if (held != AIR && loot::isTool(held)) {
-        a.physHit = 5.0f;
-    } else {
-        a.physHit = 2.0f;
-        a.occultHit = 1.0f;
-    }
-    return a;
-}
+struct Actor {
+    uint32_t id = 0;
+    int team = 0;
+    bool active = false; // alive, deployed and past opening protection
+    EntityCategory category = EntityCategory::Player;
+};
+
+bool hostile(const Actor& attacker, const Actor& target);
+bool handUsable(const vitals::Vitals& body, Hand hand);
+bool slotUsable(const vitals::Vitals& body, int slot);
+
+struct Mobility {
+    bool canMove = false;
+    bool canJump = false;
+    bool canSprint = false;
+    bool hopOnly = false;
+    float speedMultiplier = 0.0f;
+};
+
+// The server must also zero existing horizontal velocity when canMove is false.
+// One leg permits horizontal movement only while jumping/airborne, never swimming.
+Mobility mobility(const vitals::Vitals& body, bool grounded, bool jump,
+                  bool swimming, bool frozen = false);
+
+struct DamageResult {
+    bool applied = false;
+    bool killed = false;
+    int limb = -1;
+    float amount = 0.0f; // total actual normalized limb health removed
+};
+
+// EntityCategory::Boss scales a limb fraction for a future room boss.
+// It is not the trial guardian's hit-point pool.
+float damageFor(const DamageSpec& spec, EntityCategory target);
+DamageResult damagePlayer(vitals::Vitals& body, const DamageSource& source,
+                          const DamageSpec& spec, int limb);
+bool healPlayer(vitals::Vitals& body, float fraction = 0.25f);
+
+struct LimbHit { int limb = -1; float distance = 0.0f; };
+// Fixed gameplay hit volumes, independent of editable clothing/hair/model assets.
+// Directions are normalized internally; obstructionDistance is world-units.
+std::optional<LimbHit> rayPlayer(const Vec3& origin, const Vec3& direction,
+    const Vec3& feet, float bodyYaw, float reach, float obstructionDistance);
+
+struct MeleeState {
+    uint32_t lastSequence = 0;
+    uint32_t action = 0;
+    uint32_t hitAt = 0;
+    uint32_t readyAt = 0;
+    uint8_t item = AIR;
+    Hand hand = Hand::Right;
+    bool pending = false;
+};
+
+// All timestamps are server ticks (20Hz), never supplied client timestamps.
+// ownedItem must come from server inventory, not the client's held-item field.
+// At impact the caller must revalidate life, hand, equipment, target and LOS;
+// takeMeleeHit only consumes the scheduled impact, it does not authorize damage.
+// Consume each new sequence even on rejection, so it cannot be replayed later.
+bool beginMelee(MeleeState& state, uint32_t sequence, uint32_t tick,
+    const Actor& actor, const vitals::Vitals& body, Hand hand,
+    uint8_t ownedItem, bool actionBlocked = false);
+bool takeMeleeHit(MeleeState& state, uint32_t tick);
+void cancelMelee(MeleeState& state); // preserves cooldown and replay protection
 
 } // namespace combat

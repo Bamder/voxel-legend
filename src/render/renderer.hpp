@@ -37,6 +37,20 @@ struct RemoteAvatar {
     uint8_t heldL = 0, heldR = 0, carried = 0;
     uint8_t wearU = 0, wearL = 0, wearS = 0;
     bool spectator = false;
+    bool dead = false;
+    bool hitFlash = false;
+    uint8_t status = 0;
+    vitals::Vitals vitals{};
+};
+
+struct ArcaneProjectileView {
+    uint32_t id = 0, owner = 0;
+    Vec3 pos{}, vel{};
+};
+
+struct ArcaneBurstView {
+    Vec3 pos{};
+    float age = 0.0f;
 };
 
 struct RoomTeamView {
@@ -183,6 +197,11 @@ struct UIState {
 
     const vitals::Vitals* vitals = nullptr;
     bool playerDead = false;
+    float hitMarker = 0.0f;
+    float damageFlash = 0.0f;
+    uint8_t playerStatus = 0;
+    std::vector<ArcaneProjectileView> arcaneProjectiles;
+    std::vector<ArcaneBurstView> arcaneBursts;
     int deathHover = -1;      // 0 = respawn
 
     // Humidity label for the air block under the crosshair.
@@ -366,6 +385,8 @@ private:
                          const Sky* sun = nullptr,
                          uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR);
     void drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun);
+    void drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
+                           const UIState& ui, bool firstPerson);
     void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);
     void drawDeploy(UIState& ui);
 

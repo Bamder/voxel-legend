@@ -799,13 +799,16 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes);
         }
         for (const RemoteAvatar& rp : ui.remotes) {
-            if (rp.spectator) continue;
+            if (rp.spectator || rp.dead) continue;
             const anim::Clip& clip = anim::clipFromNet(rp.clip);
             const anim::Clip* overlay = anim::strikeFromNet(rp.strike);
-            drawPlayerModel(rp.pos, rp.bodyYaw, rp.yaw, rp.pitch, eye, vp, false, &clip, rp.frame,
-                            rp.heldR, rp.heldL, rp.carried, nullptr, overlay, rp.strikeFrame, &sky,
+            Vec3 reacted = rp.pos;
+            if (rp.hitFlash) reacted.y += 0.045f;
+            drawPlayerModel(reacted, rp.bodyYaw, rp.yaw, rp.pitch, eye, vp, false, &clip, rp.frame,
+                            rp.heldR, rp.heldL, rp.carried, &rp.vitals, overlay, rp.strikeFrame, &sky,
                             rp.wearU, rp.wearL, rp.wearS);
         }
+        drawArcaneEffects(eye, vp, player, ui, firstPerson);
 
         // Observation dummy: loops walk in place. Head/body yaw stay a runtime overlay.
         if (ui.dummyActive) {
@@ -1133,6 +1136,70 @@ void Renderer::drawOutlineAt(const Mat4& vp, const Vec3& eye, const Vec3& center
     gl::BindVertexArray(outlineVAO);
     gl::DrawArrays(GL_LINES, 0, 24);
     gl::BindVertexArray(0);
+}
+
+void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
+                                 const UIState& ui, bool firstPerson) {
+    static const Vec3 axes[12] = {
+        {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
+        {.7f,.7f,0},{-.7f,.7f,0},{.7f,0,.7f},{-.7f,0,.7f},{0,.7f,.7f},{0,.7f,-.7f}
+    };
+    const Vec3 X{1,0,0}, Y{0,1,0}, Z{0,0,1};
+    gl::Enable(GL_BLEND);
+    gl::Disable(GL_CULL_FACE);
+
+    for (const ArcaneProjectileView& projectile : ui.arcaneProjectiles) {
+        float pulse = 0.5f + 0.5f * std::sin(ui.timeOfDay * 0.09f + projectile.id * 1.7f);
+        float core = 0.18f + pulse * 0.035f;
+        drawOutlineAt(vp, eye, projectile.pos, {core,core,core}, X,Y,Z, 1.0f,.78f,.08f,1.0f);
+        drawOutlineAt(vp, eye, projectile.pos, {core*.58f,core*.58f,core*.58f}, X,Y,Z, 1.0f,.20f,.02f,1.0f);
+        Vec3 back = projectile.vel.normalized();
+        for (int i = 0; i < 7; ++i) {
+            float along = 0.12f + i * 0.105f;
+            float size = 0.12f * (1.0f - i / 9.0f);
+            float wobble = std::sin(ui.timeOfDay * .15f + projectile.id + i * 1.9f) * .035f;
+            Vec3 at = projectile.pos - back * along + Vec3{0,wobble,0};
+            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
+                          1.0f, i < 3 ? .46f : .16f, .02f, .82f - i * .08f);
+        }
+    }
+
+    for (const ArcaneBurstView& burst : ui.arcaneBursts) {
+        float u = clampf(burst.age / .65f, 0.0f, 1.0f);
+        float alpha = 1.0f - u;
+        float shell = .22f + u * 2.4f;
+        drawOutlineAt(vp, eye, burst.pos, {shell,shell,shell}, X,Y,Z, 1.0f,.28f,.02f,alpha);
+        drawOutlineAt(vp, eye, burst.pos, {shell*.62f,shell*.62f,shell*.62f}, X,Y,Z,
+                      1.0f,.82f,.12f,alpha);
+        for (int i = 0; i < 12; ++i) {
+            Vec3 at = burst.pos + axes[i] * (u * 1.7f);
+            float size = .16f * (1.0f - u * .55f);
+            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
+                          1.0f, (i & 1) ? .18f : .65f, .02f, alpha);
+        }
+    }
+
+    auto drawBurning = [&](Vec3 feet, uint32_t seed) {
+        for (int i = 0; i < 12; ++i) {
+            float phase = ui.timeOfDay * .055f + seed * .37f + i * .71f;
+            float rise = std::fmod(phase, 1.0f);
+            if (rise < 0.0f) rise += 1.0f;
+            float angle = seed * .21f + i * 2.39996f + ui.timeOfDay * .012f;
+            float radius = .22f + .07f * std::sin(phase * 4.0f);
+            Vec3 at = feet + Vec3{std::cos(angle)*radius, .15f + rise*1.65f,
+                                  std::sin(angle)*radius};
+            float size = .08f + (1.0f-rise)*.055f;
+            drawOutlineAt(vp, eye, at, {size,size*1.35f,size}, X,Y,Z,
+                          1.0f, i % 3 ? .18f : .72f, .01f, .9f-rise*.45f);
+        }
+    };
+    if (!firstPerson && !ui.spectating && !ui.hideAvatar && !ui.playerDead && (ui.playerStatus & 1u))
+        drawBurning(player.pos, 1);
+    for (const RemoteAvatar& remote : ui.remotes)
+        if (!remote.spectator && !remote.dead && (remote.status & 1u)) drawBurning(remote.pos, remote.id);
+
+    gl::Enable(GL_CULL_FACE);
+    gl::Disable(GL_BLEND);
 }
 
 void Renderer::drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,
@@ -3160,6 +3227,23 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
+    auto drawCoordinates = [&]() {
+        const float invBlock = 1.0f / cfg::BLOCK_SCALE;
+        int bx = (int)std::floor(ui.playerPos.x * invBlock);
+        int by = (int)std::floor(ui.playerPos.y * invBlock);
+        int bz = (int)std::floor(ui.playerPos.z * invBlock);
+        auto floorChunk = [](int block, int span) {
+            int q = block / span;
+            if (block < 0 && block % span != 0) --q;
+            return q;
+        };
+        int cx = floorChunk(bx, cfg::CHUNK_X);
+        int cz = floorChunk(bz, cfg::CHUNK_Z);
+        quad(8, 8, 430, 28, 0, 0, 0, 0, 0.02f, 0.025f, 0.03f, 0.68f);
+        flushUI(progUI, whiteTex);
+        text(14, 12, 0.78f, 0.96f, 0.96f, 0.92f, 1.0f,
+             "坐标 X %d  Y %d  Z %d   |   区块 %d,%d", bx, by, bz, cx, cz);
+    };
     if (ui.storyOpen) {
         quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 1.0f);
         flushUI(progUI, whiteTex);
@@ -3205,6 +3289,7 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         quad(cx - 1, cy - 9, 2, 18, 0, 0, 0, 0, 1, 1, 1, 0.9f);
         flushUI(progUI, whiteTex);
         centeredText("观战", cx, 28.0f, 1.0f, 0.9f, 0.9f, 0.95f, 1);
+        drawCoordinates();
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
@@ -3243,6 +3328,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     const float carryY = hbY + slot - carryS;
     leftX = carryX + carryS + 12.0f;
     const bool carrying = ui.carrySlot && !ui.carrySlot->empty();
+    const bool leftSealed = ui.vitals && ui.vitals->limb[vitals::HandL].health <= vitals::kDeadEps;
+    const bool rightSealed = ui.vitals && ui.vitals->limb[vitals::HandR].health <= vitals::kDeadEps;
     const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0);
 
     CrosshairPrompt promptItems[4];
@@ -3257,8 +3344,19 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     // ---- solid-color pass (white texture) ----
     if (ui.borderFog > 0.001f)
         quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.78f, 0.79f, 0.80f, ui.borderFog);
+    if (ui.damageFlash > 0.0f)
+        quad(0, 0, (float)scrW, (float)scrH, 0,0,0,0, .75f,.03f,.01f,
+             .18f * clampf(ui.damageFlash / .20f, 0.0f, 1.0f));
     quad(cx - 9, cy - 1, 18, 2, 0, 0, 0, 0, 1, 1, 1, 0.9f);
     quad(cx - 1, cy - 9, 2, 18, 0, 0, 0, 0, 1, 1, 1, 0.9f);
+    if (ui.hitMarker > 0.0f) {
+        float a = clampf(ui.hitMarker / .22f, 0.0f, 1.0f);
+        const float o = 13.0f, n = 7.0f, t = 2.0f;
+        quad(cx-o-n, cy-o, n, t, 0,0,0,0, 1,.25f,.18f,a);
+        quad(cx+o, cy-o, n, t, 0,0,0,0, 1,.25f,.18f,a);
+        quad(cx-o-n, cy+o, n, t, 0,0,0,0, 1,.25f,.18f,a);
+        quad(cx+o, cy+o, n, t, 0,0,0,0, 1,.25f,.18f,a);
+    }
     drawCrosshairPromptChrome(promptBoxes);
 
     if (!ui.structureEdit) {
@@ -3275,8 +3373,14 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
 
         for (int i = 0; i < n; i++) {
             float sx = splitHotbarSlotX(i, leftX, rightX, slot, gap);
-            float slotBg = splitHotbarSelected(i, ui) ? (carrying ? 0.40f : 0.55f) : (carrying ? 0.18f : 0.28f);
+            bool sealed = i < cfg::HAND_SLOTS ? leftSealed : rightSealed;
+            float slotBg = sealed ? 0.08f :
+                (splitHotbarSelected(i, ui) ? (carrying ? 0.40f : 0.55f) : (carrying ? 0.18f : 0.28f));
             quad(sx, hbY, slot, slot, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, slotBg);
+            if (sealed) {
+                quad(sx + 5, hbY + slot*.5f - 1, slot - 10, 2, 0,0,0,0, .65f,.08f,.06f,.9f);
+                quad(sx + slot*.5f - 1, hbY + 5, 2, slot - 10, 0,0,0,0, .65f,.08f,.06f,.9f);
+            }
         }
         for (int i = 0; i < n; i++) {
             if (!splitHotbarSelected(i, ui)) continue;
@@ -3318,7 +3422,9 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         }
     }
 
-    if (ui.showDebug) {
+    if (!ui.showDebug) {
+        drawCoordinates();
+    } else {
         int ticks = ((int)timeOfDay % cfg::TICKS_PER_DAY + cfg::TICKS_PER_DAY) % cfg::TICKS_PER_DAY;
         int hours = ticks / 1000;
         int mins = (ticks % 1000) * 60 / 1000;

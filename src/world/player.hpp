@@ -14,6 +14,14 @@ struct InputState {
     bool sprint = false;
 };
 
+// Optional room-combat constraints; default preserves single-player movement.
+struct MovementLimits {
+    bool horizontal = true;
+    bool jump = true;
+    bool sprint = true;
+    float speed = 1.0f;
+};
+
 class Player {
 public:
     Vec3 pos;          // feet position
@@ -58,7 +66,8 @@ public:
     void setSpawn(const Vec3& p) { pos = p; vel = { 0, 0, 0 }; }
     void syncBodyYaw();
 
-    void update(const World& world, const InputState& in, float dt);
+    void update(const World& world, const InputState& in, float dt,
+                MovementLimits limits = {});
 
 private:
     void moveAxis(const World& world, int axis, float delta);

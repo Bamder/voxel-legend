@@ -128,6 +128,7 @@ void setHarvest(uint8_t block, const HarvestRule& rule);
 void clearHarvest(uint8_t block);
 
 struct Drop {
+    uint32_t netId = 0; // server-assigned; 0 is local/unreplicated
     Vec3 pos{ 0, 0, 0 };
     Vec3 vel{ 0, 0, 0 };
     Vec3 ax{ 1, 0, 0 }; // local axes in world space; tumble updates these

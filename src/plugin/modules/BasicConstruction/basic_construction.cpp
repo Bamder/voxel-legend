@@ -63,6 +63,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "残响符石", true, false, true, false, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, 0.45f, 0.72f, false, 0.0f, 0.0f },
     { "旧神骸骨", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.35f, 0.30f, false, 0.0f, 0.0f },
     { "无目雕像", true, false, true, false, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, 0.55f, 0.58f, false, 0.0f, 0.0f },
+    { "火球术卷轴", false, false, false, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "灰白石", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 40.00f, 0.80f, false, 0.0f, 0.0f },
 };
 static_assert(sizeof(kBlocks) / sizeof(kBlocks[0]) == BLOCK_COUNT, "BasicConstruction block table size mismatch");
@@ -77,7 +78,7 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "shirt", "shorts", "shoes",
     "elem_core", "prim_fire", "still_water", "life_sprout", "root_weave",
     "judge_scale", "gold_crown", "judge_tome", "scale_glass", "cycle_mark",
-    "abyss_prism", "ancient_totem", "echo_rune", "old_bones", "eyeless",
+    "abyss_prism", "ancient_totem", "echo_rune", "old_bones", "eyeless", "arcane_fireball",
     "arena_shell",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
@@ -169,6 +170,7 @@ PlayerStrategy g_player;
 
 BlockStrategy* strategyFor(int id) {
     if (id == ARENA_SHELL) return &g_shell;
+    if (id == ITEM_ARCANE_FIREBALL) return &g_unplaceable;
     if (id >= ITEM_ELEM_CORE && id <= ITEM_EYELESS) return &g_unplaceable;
     switch (id) {
         case BEDROCK:    return &g_bedrock;

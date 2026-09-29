@@ -20,7 +20,14 @@ void Player::syncBodyYaw() {
         bodyYaw = yaw;
 }
 
-void Player::update(const World& world, const InputState& in, float dt) {
+void Player::update(const World& world, const InputState& requested, float dt, MovementLimits limits) {
+    InputState in = requested;
+    in.jump = in.jump && limits.jump;
+    in.sprint = in.sprint && limits.sprint;
+    if (!limits.horizontal) {
+        in.forward = in.back = in.left = in.right = false;
+        vel.x = vel.z = 0;
+    }
     const float S = cfg::BLOCK_SCALE;
     int ex = (int)std::floor(pos.x / S);
     int ez = (int)std::floor(pos.z / S);
@@ -65,6 +72,7 @@ void Player::update(const World& world, const InputState& in, float dt) {
     // itself yields. Water keeps its swim speed; drag still bleeds extra velocity.
     if (!flying && !inWater && dragH > 0.0f)
         speed /= (1.0f + dragH * 0.25f);
+    speed *= clampf(limits.speed, 0.0f, 1.0f);
     float accel = flying ? 60.0f : (onGround ? 80.0f : 18.0f);
     if (inWater) accel = 20.0f;
 

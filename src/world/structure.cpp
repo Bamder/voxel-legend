@@ -1,5 +1,4 @@
 #include "structure.hpp"
-#include "combat.hpp"
 #include "ritual.hpp"
 #include "matchmap.hpp"
 #include "world.hpp"
@@ -579,8 +578,33 @@ bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, i
 
 int guardianStrikeHurt(uint8_t held, int relic) {
     if (relic < 0 || relic >= ritual::RelicCount) return 0;
-    combat::Target target;
-    return combat::hurtInt(combat::strikeOf(held), target);
+    // Trial guardians only. Armor, resists and vulnerability stay at zero until a
+    // relic profile exists. Player limb damage does not feed this pool.
+    // 受伤 = max(每击物理 - 装甲 - 物理抵抗, 0) * (基础攻击倍率 + 力量增幅 + 物理易伤)
+    //      + max(每击神秘学 - 神秘学抵抗, 0) * (基础攻击倍率 + 物理易伤)
+    float physHit = 0.0f;
+    float occultHit = 0.0f;
+    const float physResist = 0.0f;
+    const float occultResist = 0.0f;
+    const float baseAtk = 1.0f;
+    const float strAmp = 0.0f;
+    const float armor = 0.0f;
+    const float physVuln = 0.0f;
+    if (held != AIR && hasItemTags(held, TAG_AXE)) {
+        physHit = 15.0f;
+    } else if (held != AIR && loot::isTool(held)) {
+        physHit = 5.0f;
+    } else {
+        physHit = 2.0f;
+        occultHit = 1.0f;
+    }
+    float phys = physHit - armor - physResist;
+    if (phys < 0.0f) phys = 0.0f;
+    float occult = occultHit - occultResist;
+    if (occult < 0.0f) occult = 0.0f;
+    float hurt = phys * (baseAtk + strAmp + physVuln) + occult * (baseAtk + physVuln);
+    if (hurt <= 0.0f) return 0;
+    return (int)std::lround(hurt);
 }
 
 void openTrial(int relic) {

@@ -10,6 +10,7 @@
 #include "world/player_model.hpp"
 #include "world/hold_bind.hpp"
 #include "world/vitals.hpp"
+#include "world/combat.hpp"
 #include "world/wear.hpp"
 #include "world/matchmap.hpp"
 #include "world/ritual.hpp"
@@ -20,6 +21,7 @@
 #include "material/registry.hpp"
 #include "plugin/plugin.hpp"
 #include "net/room_net.hpp"
+#include "net/room_body.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -1107,6 +1109,10 @@ struct NetSample {
     uint8_t heldL = 0, heldR = 0, carried = 0;
     uint8_t wearU = 0, wearL = 0, wearS = 0;
     bool spectator = false;
+    bool dead = false;
+    bool hitFlash = false;
+    uint8_t status = 0;
+    vitals::Vitals vitals{};
     std::string name;
 };
 
@@ -1149,6 +1155,10 @@ static NetSample sampleFromPose(const PlayerPoseNet& pose, uint32_t tick) {
     s.wearL = pose.wearL;
     s.wearS = pose.wearS;
     s.spectator = pose.spectator;
+    s.dead = pose.dead;
+    s.hitFlash = pose.hitFlash != 0;
+    s.status = pose.status;
+    for (int i = 0; i < vitals::Count; ++i) s.vitals.limb[i].health = pose.health[i];
     s.name = pose.name;
     return s;
 }
@@ -1392,6 +1402,22 @@ int main(int argc, char** argv) {
     float lobbyBroadcastAccum = 0.0f;
     bool lobbyDirty = false;
     float roomNetAccum = 0.0f;
+    uint8_t roomMovement = 0;
+    uint32_t roomInventoryRevision = 0, roomLayoutNext = 0, roomLayoutPending = 0;
+    ItemSlot roomInventory[cfg::INVENTORY_SLOTS]{};
+    bool roomInventoryKnown = false, roomLayoutDirty = false;
+    uint32_t roomAttackNext = 0, roomAttackPending = 0;
+    uint8_t roomAttackHand = 1;
+    uint32_t roomCastNext = 0, roomCastPending = 0;
+    uint8_t roomCastHand = 1;
+    uint32_t roomPickupNext = 0, roomPickupPending = 0, roomPickupDrop = 0;
+    uint32_t roomCombatAck = 0;
+    uint32_t roomArcaneAck = 0;
+    float hitMarker = 0.0f;
+    float damageFlash = 0.0f;
+    uint8_t roomPlayerStatus = 0;
+    std::vector<ArcaneProjectileView> arcaneProjectiles;
+    std::vector<ArcaneBurstView> arcaneBursts;
     struct ChunkNetState {
         uint32_t rev = 0;
         bool ready = false;
@@ -1483,6 +1509,13 @@ int main(int argc, char** argv) {
     };
 
     auto shutdownRoom = [&]() {
+        roomMovement = 0;
+        roomInventoryRevision = roomLayoutNext = roomLayoutPending = 0;
+        roomInventoryKnown = roomLayoutDirty = false;
+        roomAttackNext = roomAttackPending = roomCastNext = roomCastPending = 0;
+        roomPickupNext = roomPickupPending = roomPickupDrop = 0;
+        roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
+        arcaneProjectiles.clear(); arcaneBursts.clear();
         lobbyHost.close();
         lobbyGuest.close();
         gameClient.close();
@@ -1884,6 +1917,12 @@ int main(int argc, char** argv) {
         if (death) gameClient.sendDeploy(2, 0, 0);
     };
     auto enterRoomPlay = [&]() {
+        roomMovement = 0;
+        roomInventoryRevision = roomLayoutPending = 0;
+        roomInventoryKnown = roomLayoutDirty = false;
+        roomAttackPending = roomCastPending = roomPickupPending = roomPickupDrop = 0;
+        roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
+        arcaneProjectiles.clear(); arcaneBursts.clear();
         int team = gameClient.team();
         for (RoomPlayerView& rp : roomPlayers)
             if (rp.local) rp.team = team;
@@ -2056,6 +2095,67 @@ int main(int argc, char** argv) {
                 return;
             }
             for (PlayDeltaNet& d : gameClient.takeDeltas()) {
+                if (!spectating && !structureEdit) {
+                    player.vitals = d.body.vitals;
+                    player.fatigue = d.body.fatigue;
+                    player.dead = vitals::isDead(player.vitals);
+                    if (!deploying && !storyOpen && (d.body.flags & 1)) {
+                        player.pos = {d.body.x, d.body.y, d.body.z};
+                        player.vel = {d.body.vx, d.body.vy, d.body.vz};
+                        player.onGround = (d.body.flags & 2) != 0;
+                        player.inWater = (d.body.flags & 4) != 0;
+                        player.flying = player.noclip = false;
+                    }
+                    if (player.dead && !deploying) openDeploy(true);
+                }
+                std::vector<loot::Drop> netDrops;
+                netDrops.reserve(d.drops.size());
+                for (const DropNet& src : d.drops) {
+                    loot::Drop drop;
+                    drop.netId = src.id; drop.pos = {src.x, src.y, src.z};
+                    drop.vel = {src.vx, src.vy, src.vz};
+                    drop.ax = {src.axx, src.axy, src.axz};
+                    drop.ay = {src.ayx, src.ayy, src.ayz};
+                    drop.az = {src.azx, src.azy, src.azz};
+                    drop.angVel = {src.avx, src.avy, src.avz};
+                    drop.age = src.age;
+                    drop.item = src.item; drop.count = src.count; drop.grounded = src.grounded;
+                    netDrops.push_back(drop);
+                }
+                world.replaceNetworkDrops(netDrops);
+                arcaneProjectiles.clear();
+                arcaneProjectiles.reserve(d.projectiles.size());
+                for (const ArcaneProjectileNet& source : d.projectiles) {
+                    ArcaneProjectileView view;
+                    view.id = source.id; view.owner = source.owner;
+                    view.pos = {source.x, source.y, source.z};
+                    view.vel = {source.vx, source.vy, source.vz};
+                    arcaneProjectiles.push_back(view);
+                }
+                for (const CombatEventNet& event : d.combat) {
+                    if (event.serial <= roomCombatAck) continue;
+                    roomCombatAck = event.serial;
+                    if (event.attacker == gameClient.selfId()) hitMarker = .22f;
+                    if (event.target == gameClient.selfId()) damageFlash = .20f;
+                }
+                for (const ArcaneEventNet& event : d.arcane) {
+                    if (event.serial <= roomArcaneAck) continue;
+                    roomArcaneAck = event.serial;
+                    arcaneBursts.push_back({{event.x,event.y,event.z},0.0f});
+                    if (arcaneBursts.size() > 32) arcaneBursts.erase(arcaneBursts.begin());
+                }
+                bool layoutAnswered = roomLayoutPending && d.inventoryLayoutAck == roomLayoutPending;
+                bool acceptInventory = !roomInventoryKnown || layoutAnswered ||
+                    (!roomLayoutDirty && !roomLayoutPending && d.inventoryRevision >= roomInventoryRevision);
+                if (acceptInventory && !drag.active) {
+                    for (int i = 0; i < cfg::INVENTORY_SLOTS; ++i) {
+                        inv[i] = d.inventory[(size_t)i];
+                        roomInventory[i] = inv[i];
+                    }
+                    roomInventoryRevision = d.inventoryRevision;
+                    roomInventoryKnown = true;
+                    if (layoutAnswered) { roomLayoutPending = 0; roomLayoutDirty = false; }
+                }
                 if (!roomTickInit || d.serverTick > roomTick) {
                     roomTick = d.serverTick;
                     roomTickAt = std::chrono::steady_clock::now();
@@ -2064,7 +2164,10 @@ int main(int argc, char** argv) {
                 for (uint32_t id : d.removed) remoteHist.erase(id);
                 for (const PlayerPoseNet& pose : d.players) {
                     NetSample s = sampleFromPose(pose, d.serverTick);
-                    if (pose.id == gameClient.selfId()) pushNetSample(selfHist, s);
+                    if (pose.id == gameClient.selfId()) {
+                        roomPlayerStatus = pose.status;
+                        pushNetSample(selfHist, s);
+                    }
                     else pushNetSample(remoteHist[pose.id], s);
                 }
                 auto dropAsk = [&](int cx, int cy, int cz) {
@@ -2225,6 +2328,10 @@ int main(int argc, char** argv) {
                 av.yaw = at->yaw;
                 av.pitch = at->pitch;
                 av.bodyYaw = at->bodyYaw;
+                av.dead = at->dead;
+                av.hitFlash = at->hitFlash;
+                av.status = at->status;
+                av.vitals = at->vitals;
                 av.pos = at->pos;
                 if (next && next->tick > at->tick) {
                     float span = (float)(next->tick - at->tick);
@@ -2293,6 +2400,8 @@ int main(int argc, char** argv) {
                 roomNetAccum = 0.0f;
                 size_t n = g_roomEdits.size() < 32 ? g_roomEdits.size() : 32;
                 PlayInputNet netIn;
+                netIn.movement = (g_focused && !paused && !deploying && !storyOpen && !player.dead)
+                    ? roomMovement : 0;
                 netIn.x = player.pos.x;
                 netIn.y = player.pos.y;
                 netIn.z = player.pos.z;
@@ -2303,6 +2412,23 @@ int main(int argc, char** argv) {
                 netIn.vz = player.vel.z;
                 netIn.spectator = spectating;
                 netIn.ack = 0;
+                netIn.selectedLeft = (uint8_t)ui.selectedLeft;
+                netIn.selectedRight = (uint8_t)ui.selectedRight;
+                netIn.attackSequence = roomAttackPending;
+                netIn.attackHand = roomAttackHand;
+                netIn.castSequence = roomCastPending;
+                netIn.castHand = roomCastHand;
+                netIn.pickupSequence = roomPickupPending;
+                netIn.pickupDrop = roomPickupDrop;
+                netIn.combatAck = roomCombatAck;
+                netIn.arcaneAck = roomArcaneAck;
+                if (roomLayoutDirty && !roomLayoutPending && !drag.active && roomInventoryKnown) {
+                    if (!++roomLayoutNext) ++roomLayoutNext;
+                    roomLayoutPending = roomLayoutNext;
+                    netIn.layoutSequence = roomLayoutPending;
+                    netIn.layoutBaseRevision = roomInventoryRevision;
+                    for (int i = 0; i < cfg::INVENTORY_SLOTS; ++i) netIn.layout[(size_t)i] = inv[i];
+                }
                 {
                     size_t nask = resyncAsk.size() < 8 ? resyncAsk.size() : 8;
                     netIn.resync.assign(resyncAsk.begin(), resyncAsk.begin() + (std::ptrdiff_t)nask);
@@ -2338,6 +2464,9 @@ int main(int argc, char** argv) {
                 netIn.treeResync = g_treeResync;
                 g_treeResync = false;
                 gameClient.sendInput(netIn);
+                roomAttackPending = 0;
+                roomCastPending = 0;
+                roomPickupPending = roomPickupDrop = 0;
                 g_roomEdits.erase(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
                 g_roomBark.erase(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
                 g_roomMines.erase(g_roomMines.begin(), g_roomMines.begin() + (std::ptrdiff_t)nm);
@@ -2542,6 +2671,11 @@ int main(int argc, char** argv) {
         t0 = t1;
         if (dt > 0.1f) dt = 0.1f;
         if (dt <= 0.0f) dt = 1.0f / 60.0f;
+        if (hitMarker > 0.0f) { hitMarker -= dt; if (hitMarker < 0.0f) hitMarker = 0.0f; }
+        if (damageFlash > 0.0f) { damageFlash -= dt; if (damageFlash < 0.0f) damageFlash = 0.0f; }
+        for (ArcaneBurstView& burst : arcaneBursts) burst.age += dt;
+        arcaneBursts.erase(std::remove_if(arcaneBursts.begin(), arcaneBursts.end(),
+            [](const ArcaneBurstView& burst) { return burst.age >= .65f; }), arcaneBursts.end());
         fpsAccum += dt;
         fpsFrames++;
         if (fpsAccum >= 0.5f) {
@@ -2655,6 +2789,10 @@ int main(int argc, char** argv) {
             in.forward = true;
             if ((frameCounter / 150) % 2 == 0) in.jump = true;
         }
+
+        roomMovement = (in.forward ? kMoveForward : 0) | (in.back ? kMoveBack : 0) |
+            (in.left ? kMoveLeft : 0) | (in.right ? kMoveRight : 0) |
+            (in.jump ? kMoveJump : 0) | (in.sneak ? kMoveSneak : 0) | (in.sprint ? kMoveSprint : 0);
 
         bool f3 = keyDown(VK_F3);
         if (playing && !roomSession && f3 && !prevF3) showDebug = !showDebug;
@@ -2893,6 +3031,9 @@ int main(int argc, char** argv) {
         float hitT = cfg::REACH + 1.0f;
         int dropHit = -1;
         float dropT = cfg::REACH + 1.0f;
+        bool entityTarget = false;
+        uint8_t entityAttackHand = 1;
+        bool arcaneCastClick = false;
         if (playing) {
             hitOk = world.raycast(player.eye(), player.lookDir(), cfg::REACH, hit, prev, nrm, &physHit, &hitT);
             dropHit = world.raycastDrop(player.eye(), player.lookDir(), cfg::REACH, dropT);
@@ -2901,6 +3042,33 @@ int main(int argc, char** argv) {
                 physHit = -1;
             } else {
                 dropHit = -1;
+            }
+            if (roomSession && !spectating && !player.dead && !inventoryOpen && !paused) {
+                int rightSlot = cfg::HAND_SLOTS + ui.selectedRight;
+                int leftSlot = ui.selectedLeft;
+                uint8_t weaponItem = AIR;
+                if (rightSlot >= cfg::HAND_SLOTS && rightSlot < cfg::HOTBAR_SLOTS &&
+                    combat::slotUsable(player.vitals, rightSlot) && combat::weapon(inv[rightSlot].block)) {
+                    weaponItem = inv[rightSlot].block; entityAttackHand = 1;
+                } else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
+                           combat::slotUsable(player.vitals, leftSlot) && combat::weapon(inv[leftSlot].block)) {
+                    weaponItem = inv[leftSlot].block; entityAttackHand = 0;
+                }
+                if (auto def = combat::weapon(weaponItem)) {
+                    float obstruction = std::min(def->reach + .01f, hitT);
+                    if (dropHit >= 0) obstruction = std::min(obstruction, dropT);
+                    float best = obstruction;
+                    for (const RemoteAvatar& remote : remotes) {
+                        int remoteTeam = -1;
+                        for (const RoomPlayerView& rp : roomPlayers)
+                            if (rp.id == remote.id) { remoteTeam = rp.team; break; }
+                        if (remote.spectator || remote.dead || remoteTeam == gameClient.team()) continue;
+                        auto entity = combat::rayPlayer(player.eye(), player.lookDir(), remote.pos,
+                                                        remote.bodyYaw, def->reach, best);
+                        if (entity && entity->distance < best) { best = entity->distance; entityTarget = true; }
+                    }
+                    if (entityTarget) { hitOk = false; physHit = -1; dropHit = -1; }
+                }
             }
         }
         if (playing && trialAnchor.active)
@@ -2962,6 +3130,34 @@ int main(int argc, char** argv) {
         ui.targetFace = hitOk ? world.faceFromHitNormal(nrm) : 0;
         ui.targetPhys = hitOk ? physHit : -1;
         ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && playing && !spectating) ? dropHit : -1;
+        if (roomSession && entityTarget && lmb && !prevLmb && !roomAttackPending) {
+            if (!++roomAttackNext) ++roomAttackNext;
+            roomAttackPending = roomAttackNext;
+            roomAttackHand = entityAttackHand;
+        }
+        if (roomSession && rmb && !prevRmb && lookLocked && !paused && !inventoryOpen &&
+            !deploying && !storyOpen && !structureEdit && !spectating && !player.dead && carry.empty()) {
+            int rightSlot = cfg::HAND_SLOTS + ui.selectedRight;
+            int leftSlot = ui.selectedLeft;
+            int castSlot = -1;
+            uint8_t castHand = 1;
+            if (rightSlot >= cfg::HAND_SLOTS && rightSlot < cfg::HOTBAR_SLOTS &&
+                inv[rightSlot].block == ITEM_ARCANE_FIREBALL) {
+                castSlot = rightSlot;
+            } else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
+                       inv[leftSlot].block == ITEM_ARCANE_FIREBALL) {
+                castSlot = leftSlot;
+                castHand = 0;
+            }
+            if (castSlot >= 0) {
+                arcaneCastClick = true;
+                if (!roomCastPending && combat::slotUsable(player.vitals, castSlot)) {
+                    if (!++roomCastNext) ++roomCastNext;
+                    roomCastPending = roomCastNext;
+                    roomCastHand = castHand;
+                }
+            }
+        }
         ui.hasBreakOverlay = false;
         ui.breakProgress = 0.0f;
         ui.breakSod = false;
@@ -2979,31 +3175,40 @@ int main(int argc, char** argv) {
 
         if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating && !structureEdit) {
             if (!inventoryOpen && !carry.empty()) {
-                dropCarriedBlock(world, player, carry);
+                if (!roomSession) dropCarriedBlock(world, player, carry);
             } else if (!inventoryOpen && ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
                 const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
-                uint8_t item = d.item;
-                uint8_t n = d.count;
-                if (hold::isCarryBlock(item)) {
-                    if (carry.empty() && n > 0) {
-                        carry.block = item;
-                        carry.count = 1;
-                        if (n <= 1) {
+                if (roomSession) {
+                    if (d.netId && !roomPickupPending) {
+                        if (!++roomPickupNext) ++roomPickupNext;
+                        roomPickupPending = roomPickupNext;
+                        roomPickupDrop = d.netId;
+                    }
+                    ui.targetDrop = -1;
+                } else {
+                    uint8_t item = d.item;
+                    uint8_t n = d.count;
+                    if (hold::isCarryBlock(item)) {
+                        if (carry.empty() && n > 0) {
+                            carry.block = item;
+                            carry.count = 1;
+                            if (n <= 1) {
+                                uint8_t ignI = AIR, ignN = 0;
+                                world.takeDrop(ui.targetDrop, ignI, ignN);
+                                ui.targetDrop = -1;
+                            } else {
+                                world.setDropCount(ui.targetDrop, (uint8_t)(n - 1));
+                            }
+                        }
+                    } else {
+                        int left = inventoryAdd(inv, item, n);
+                        if (left <= 0) {
                             uint8_t ignI = AIR, ignN = 0;
                             world.takeDrop(ui.targetDrop, ignI, ignN);
                             ui.targetDrop = -1;
-                        } else {
-                            world.setDropCount(ui.targetDrop, (uint8_t)(n - 1));
+                        } else if (left < (int)n) {
+                            world.setDropCount(ui.targetDrop, (uint8_t)left);
                         }
-                    }
-                } else {
-                    int left = inventoryAdd(inv, item, n);
-                    if (left <= 0) {
-                        uint8_t ignI = AIR, ignN = 0;
-                        world.takeDrop(ui.targetDrop, ignI, ignN);
-                        ui.targetDrop = -1;
-                    } else if (left < (int)n) {
-                        world.setDropCount(ui.targetDrop, (uint8_t)left);
                     }
                 }
             }
@@ -3541,7 +3746,7 @@ int main(int argc, char** argv) {
                     int dropWear = ui.hoveredWear;
                     if (moving && drop >= cfg::HOTBAR_SLOTS) drop = -1;
                     if (moving) dropWear = -1;
-                    if (drop < 0 && dropWear < 0 && !ui.pointerInInventory
+                    if (!roomSession && drop < 0 && dropWear < 0 && !ui.pointerInInventory
                         && tossDrop(world, player, drag.block, drag.count))
                         clearDrag(drag);
                     else
@@ -3615,13 +3820,13 @@ int main(int argc, char** argv) {
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
                     world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
-                if (!structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead) {
+                if (!roomSession && !structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead) {
                     guardianSwing = true;
                     heldMine = inv[ui.selectedSlot].block;
                 }
                 if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
                     heldMine = inv[ui.selectedSlot].block;
-                    canMine = true;
+                    canMine = !roomSession || combat::slotUsable(player.vitals, ui.selectedSlot);
                     if (physHit < 0) {
                         uint8_t b = world.getBlock(hit.x, hit.y, hit.z);
                         if (!plugin::blockStrategy(b)->canBreak(b)) canMine = false;
@@ -3741,7 +3946,10 @@ int main(int argc, char** argv) {
                     player.strikeName.clear();
                     player.pickRaised = false;
                 }
-                if (!structureEdit && rmb && !prevRmb && hitOk) {
+                if (!structureEdit && rmb && !prevRmb && hitOk && !arcaneCastClick) {
+                    if (roomSession && !combat::slotUsable(player.vitals, ui.selectedSlot)) {
+                        // A destroyed right hand preserves the slot but cannot use it.
+                    } else
                     if (physHit >= 0) {
                         ItemSlot& sel = inv[ui.selectedSlot];
                         if (!sel.empty() && sel.block != BARK && plugin::blockStrategy(sel.block)->canPlace(sel.block)) {
@@ -3796,6 +4004,17 @@ int main(int argc, char** argv) {
         if (ui.selectedRight < 0 || ui.selectedRight >= cfg::HAND_SLOTS) ui.selectedRight = 0;
         ui.selectedSlot = cfg::HAND_SLOTS + ui.selectedRight;
 
+        if (roomSession && roomInventoryKnown && !drag.active && !roomLayoutPending) {
+            bool changed = false;
+            for (int i = 0; i < cfg::INVENTORY_SLOTS; ++i) {
+                if (inv[i].block != roomInventory[i].block || inv[i].count != roomInventory[i].count) {
+                    changed = true;
+                    break;
+                }
+            }
+            roomLayoutDirty = changed;
+        }
+
         // Fixed-step physics (paused while the menu is open or the player is dead).
         if (spectating) {
             player.flying = true;
@@ -3811,7 +4030,9 @@ int main(int argc, char** argv) {
             else accumulator += dt;
             int sub = 0;
             while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS && !deploying && !storyOpen) {
-                player.update(world, in, cfg::FIXED_DT);
+                // Local motion is prediction only; server snapshots correct it.
+                player.update(world, in, cfg::FIXED_DT,
+                    roomSession && !spectating && !structureEdit ? room_body::limits(player, in) : MovementLimits{});
                 if (roomSession && !structureEdit)
                     matchmap::clampOutside(player.pos, player.vel);
                 if (!roomSession) world.treeFallPhysics(cfg::FIXED_DT);
@@ -3821,7 +4042,7 @@ int main(int argc, char** argv) {
                     em->strategy->onTick(ev);
                     em->strategy->think(ev);
                 }
-                if (!player.privilegeMode && !spectating) {
+                if (!player.privilegeMode && !spectating && !roomSession) {
                     vitals::TickInput vin;
                     vin.moving = in.forward || in.back || in.left || in.right;
                     vin.sprint = in.sprint && !player.flying && vitals::canSprint(player.vitals);
@@ -4030,6 +4251,17 @@ int main(int argc, char** argv) {
         }
         ui.vitals = &player.vitals;
         ui.playerDead = player.dead;
+        ui.hitMarker = hitMarker;
+        ui.damageFlash = damageFlash;
+        ui.playerStatus = roomSession ? roomPlayerStatus : 0;
+        ui.arcaneProjectiles = roomSession ? arcaneProjectiles : std::vector<ArcaneProjectileView>{};
+        ui.arcaneBursts = roomSession ? arcaneBursts : std::vector<ArcaneBurstView>{};
+        if (roomSession && roomTickInit) {
+            float extrapolate = std::chrono::duration<float>(std::chrono::steady_clock::now() - roomTickAt).count();
+            extrapolate = clampf(extrapolate, 0.0f, 0.08f);
+            for (ArcaneProjectileView& projectile : ui.arcaneProjectiles)
+                projectile.pos += projectile.vel * extrapolate;
+        }
         if (drag.active) { ui.held.block = drag.block; ui.held.count = (uint8_t)drag.count; }
         else ui.held.clear();
         ui.fps = fps;
