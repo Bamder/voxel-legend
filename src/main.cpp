@@ -1411,6 +1411,8 @@ int main(int argc, char** argv) {
     uint32_t roomCastNext = 0, roomCastPending = 0;
     uint8_t roomCastHand = 1;
     uint32_t roomPickupNext = 0, roomPickupPending = 0, roomPickupDrop = 0;
+    uint32_t roomGuardianNext = 0, roomGuardianPending = 0;
+    uint8_t roomGuardianRelic = 255;
     uint32_t roomCombatAck = 0;
     uint32_t roomArcaneAck = 0;
     float hitMarker = 0.0f;
@@ -1514,6 +1516,8 @@ int main(int argc, char** argv) {
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackNext = roomAttackPending = roomCastNext = roomCastPending = 0;
         roomPickupNext = roomPickupPending = roomPickupDrop = 0;
+        roomGuardianNext = roomGuardianPending = 0;
+        roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
         arcaneProjectiles.clear(); arcaneBursts.clear();
         lobbyHost.close();
@@ -1921,6 +1925,8 @@ int main(int argc, char** argv) {
         roomInventoryRevision = roomLayoutPending = 0;
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackPending = roomCastPending = roomPickupPending = roomPickupDrop = 0;
+        roomGuardianPending = 0;
+        roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
         arcaneProjectiles.clear(); arcaneBursts.clear();
         int team = gameClient.team();
@@ -2138,6 +2144,8 @@ int main(int argc, char** argv) {
                     if (event.attacker == gameClient.selfId()) hitMarker = .22f;
                     if (event.target == gameClient.selfId()) damageFlash = .20f;
                 }
+                for (const GuardianNet& guardian : d.guardians)
+                    structure::applyRoomGuardian(guardian.relic, guardian.hp);
                 for (const ArcaneEventNet& event : d.arcane) {
                     if (event.serial <= roomArcaneAck) continue;
                     roomArcaneAck = event.serial;
@@ -2422,6 +2430,8 @@ int main(int argc, char** argv) {
                 netIn.pickupDrop = roomPickupDrop;
                 netIn.combatAck = roomCombatAck;
                 netIn.arcaneAck = roomArcaneAck;
+                netIn.guardianSequence = roomGuardianPending;
+                netIn.guardianRelic = roomGuardianRelic;
                 if (roomLayoutDirty && !roomLayoutPending && !drag.active && roomInventoryKnown) {
                     if (!++roomLayoutNext) ++roomLayoutNext;
                     roomLayoutPending = roomLayoutNext;
@@ -2467,6 +2477,8 @@ int main(int argc, char** argv) {
                 roomAttackPending = 0;
                 roomCastPending = 0;
                 roomPickupPending = roomPickupDrop = 0;
+                roomGuardianPending = 0;
+                roomGuardianRelic = 255;
                 g_roomEdits.erase(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
                 g_roomBark.erase(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
                 g_roomMines.erase(g_roomMines.begin(), g_roomMines.begin() + (std::ptrdiff_t)nm);
@@ -3828,7 +3840,7 @@ int main(int argc, char** argv) {
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
                     world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
-                if (!roomSession && !structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead) {
+                if (!structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead && !spectating) {
                     guardianSwing = true;
                     heldMine = inv[ui.selectedSlot].block;
                 }
@@ -3897,24 +3909,31 @@ int main(int argc, char** argv) {
                     if (player.mineCharge >= need) {
                         player.mineCharge = 0.0f;
                         player.mineCooldown = recover;
-                        int gx = 0, gy = 0, gz = 0;
-                        int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
-                        bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
-                        if (ui.bossRelic == ui.targetGuardian) {
-                            ui.bossHp -= dmg;
-                            if (ui.bossHp < 0) ui.bossHp = 0;
-                            if (ui.bossMaxHp > 0)
-                                ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
-                            if (slain) ui.bossNear = false;
-                        }
-                        if (slain) {
-                            uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
-                            world.setBlock(gx, gy, gz, AIR, true);
-                            noteRoomEdit(gx, gy, gz, AIR);
-                            const dropgeom::Shape& sh = dropgeom::cached(item);
-                            const float S = cfg::BLOCK_SCALE;
-                            Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
-                            world.spawnDrop(dropPos, item, 1, true);
+                        if (roomSession) {
+                            if (!roomGuardianPending) {
+                                if (!++roomGuardianNext) ++roomGuardianNext;
+                                roomGuardianPending = roomGuardianNext;
+                                roomGuardianRelic = (uint8_t)ui.targetGuardian;
+                            }
+                        } else {
+                            int gx = 0, gy = 0, gz = 0;
+                            int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
+                            bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
+                            if (ui.bossRelic == ui.targetGuardian) {
+                                ui.bossHp -= dmg;
+                                if (ui.bossHp < 0) ui.bossHp = 0;
+                                if (ui.bossMaxHp > 0)
+                                    ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
+                                if (slain) ui.bossNear = false;
+                            }
+                            if (slain) {
+                                uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
+                                world.setBlock(gx, gy, gz, AIR, true);
+                                const dropgeom::Shape& sh = dropgeom::cached(item);
+                                const float S = cfg::BLOCK_SCALE;
+                                Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                                world.spawnDrop(dropPos, item, 1, true);
+                            }
                         }
                     }
                 } else {

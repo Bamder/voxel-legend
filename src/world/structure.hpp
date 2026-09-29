@@ -54,6 +54,19 @@ bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, fl
 bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, int& z);
 // Hurt dealt by one swing, after armor, resistance, and multipliers.
 int guardianStrikeHurt(uint8_t held, int relic);
+
+// Match-world guardians. The room server owns hp; clients only display it.
+struct GuardianSync {
+    int relic = -1;
+    int x = 0, y = 0, z = 0; // token cell
+    int hp = 0;
+    int maxHp = 1;
+};
+void collectRoomGuardians(std::vector<GuardianSync>& out);
+void applyRoomGuardian(int relic, int hp);
+// Living guardian whose model is within reach of eye, and no foreign block stops the path.
+bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach,
+                     int& x, int& y, int& z);
 // Nearest living guardian within maxDist of pos (world units). 
 bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, GuardianSpan& out);
 const char* guardianAppearance(int relic);

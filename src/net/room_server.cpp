@@ -12,6 +12,8 @@
 #include "../world/animation.hpp"
 #include "../world/arcane.hpp"
 #include "../world/combat.hpp"
+#include "../world/ritual.hpp"
+#include "../world/structure.hpp"
 #include "../world/world.hpp"
 #include "../world/matchmap.hpp"
 
@@ -111,6 +113,8 @@ struct SClient {
     uint32_t attackStartedAt = 0;
     uint32_t combatAck = 0;
     uint32_t arcaneAck = 0;
+    uint32_t lastGuardianSeq = 0;
+    uint32_t guardianReadyAt = 0;
     uint32_t hitFlashUntil = 0;
     std::string animName = "idle";
     float animClock = 0;
@@ -916,6 +920,34 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                                            cfg::HAND_SLOTS + c.selectedRight);
                         }
                     }
+                    if (in.guardianSequence && in.guardianSequence != c.lastGuardianSeq &&
+                        uint32_t(in.guardianSequence - c.lastGuardianSeq) < 0x80000000u) {
+                        c.lastGuardianSeq = in.guardianSequence;
+                        bool ready = uint32_t(serverTick - c.guardianReadyAt) < 0x80000000u;
+                        bool active = c.landed && c.fade <= 0.0f && !c.spectator && !c.body.player.dead;
+                        int gx = 0, gy = 0, gz = 0;
+                        if (ready && active &&
+                            structure::roomGuardianHit(world, c.body.player.eye(), in.guardianRelic,
+                                                       cfg::REACH, gx, gy, gz)) {
+                            int slot = cfg::HAND_SLOTS + c.selectedRight;
+                            uint8_t held = AIR;
+                            if (slot >= 0 && slot < cfg::INVENTORY_SLOTS) {
+                                const ItemSlot& item = c.inventory.slots[(size_t)slot];
+                                if (item.block != AIR && item.count > 0) held = item.block;
+                            }
+                            int dmg = structure::guardianStrikeHurt(held, in.guardianRelic);
+                            if (structure::damageGuardian(world, in.guardianRelic, dmg, gx, gy, gz)) {
+                                world.setBlock(gx, gy, gz, AIR, false, false);
+                                uint8_t drop = (uint8_t)ritual::blockId(in.guardianRelic);
+                                const float Sdrop = cfg::BLOCK_SCALE;
+                                world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop, (gz + 0.5f) * Sdrop },
+                                                drop, 1, true);
+                            }
+                            float recover = (held != AIR && hasItemTags(held, TAG_AXE))
+                                ? loot::mineCooldownSec(held) : 0.40f;
+                            c.guardianReadyAt = serverTick + (uint32_t)std::ceil(recover * cfg::TICKS_PER_SECOND);
+                        }
+                    }
                     c.hasInput = true;
                     if (!c.spectator && c.landed && !c.body.player.dead &&
                         !attackAccepted && !castAccepted && !combatBusy && !c.melee.pending) {
@@ -1247,6 +1279,17 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     d.serverTick = serverTick;
                     d.body = room_body::snapshot(c.body, c.landed);
                     fillChunkSync(world, srvChunks, c, d, serverTick);
+                    std::vector<structure::GuardianSync> guards;
+                    structure::collectRoomGuardians(guards);
+                    for (const structure::GuardianSync& g : guards) {
+                        if (d.guardians.size() >= 16) break;
+                        int cx = floorDiv(g.x, cfg::CHUNK_X);
+                        int cy = floorDiv(g.y, cfg::CHUNK_Y);
+                        int cz = floorDiv(g.z, cfg::CHUNK_Z);
+                        auto seen = c.seen.find(chunkKey(cx, cy, cz));
+                        if (seen == c.seen.end() || !seen->second.base) continue;
+                        d.guardians.push_back(GuardianNet{ (uint8_t)g.relic, (uint16_t)g.hp, (uint16_t)g.maxHp });
+                    }
                     fillTrees(world, c, d, serverTick);
                     fillMines(world, c, d);
                     std::vector<uint32_t> visible;

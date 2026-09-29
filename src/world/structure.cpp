@@ -607,6 +607,65 @@ int guardianStrikeHurt(uint8_t held, int relic) {
     return (int)std::lround(hurt);
 }
 
+void collectRoomGuardians(std::vector<GuardianSync>& out) {
+    out.clear();
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.ground < 0) continue;
+        if (s.id < 0 || s.id >= ritual::RelicCount) continue;
+        GuardianSync g;
+        g.relic = s.id;
+        g.x = s.cx;
+        g.y = s.ground + 1;
+        g.z = s.cz;
+        g.maxHp = kGuardianHp[s.id];
+        g.hp = s.looted ? 0 : g_hp[s.id];
+        out.push_back(g);
+    }
+}
+
+void applyRoomGuardian(int relic, int hp) {
+    if (relic < 0 || relic >= ritual::RelicCount) return;
+    if (hp < 0) hp = 0;
+    g_hp[relic] = hp;
+    for (Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        s.looted = hp <= 0;
+    }
+}
+
+bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach,
+                     int& x, int& y, int& z) {
+    x = y = z = 0;
+    if (relic < 0 || relic >= ritual::RelicCount) return false;
+    if (!std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z)) return false;
+    if (!(reach > 0.0f) || !std::isfinite(reach)) return false;
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        GuardianSpan g;
+        if (!spanOf(world, s, g)) return false;
+        float cx = eye.x < g.minX ? g.minX : (eye.x > g.maxX ? g.maxX : eye.x);
+        float cy = eye.y < g.minY ? g.minY : (eye.y > g.maxY ? g.maxY : eye.y);
+        float cz = eye.z < g.minZ ? g.minZ : (eye.z > g.maxZ ? g.maxZ : eye.z);
+        float dx = cx - eye.x, dy = cy - eye.y, dz = cz - eye.z;
+        float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > reach) return false;
+        x = s.cx;
+        y = s.ground + 1;
+        z = s.cz;
+        if (dist < 0.05f) return true;
+        Vec3 dir{ dx / dist, dy / dist, dz / dist };
+        IVec3 hit, prev;
+        Vec3 nrm;
+        float blockT = dist + 1.0f;
+        if (world.raycast(eye, dir, dist, hit, prev, nrm, nullptr, &blockT)
+            && blockT + 0.35f < dist
+            && !(hit.x == x && hit.y == y && hit.z == z))
+            return false;
+        return true;
+    }
+    return false;
+}
+
 void openTrial(int relic) {
     if (relic < 0 || relic >= ritual::RelicCount) return;
     g_sites.clear();
