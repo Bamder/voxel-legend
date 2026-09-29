@@ -3,7 +3,10 @@
 #include "matchmap.hpp"
 #include "world.hpp"
 #include "loot.hpp"
+#include "player_model.hpp"
+#include "asset_pack.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,11 +26,44 @@ struct Blueprint {
 
 struct Site {
     int cx = 0, cz = 0;
-    int kind = 0; // 0 item platform, 1 ritual circle
+    int kind = 0; // 0 guardian platform, 1 ritual circle
     int id = 0;
+    int ground = -1; // plank height; token sits at ground + 1
+    bool looted = false;
 };
 
+// Each boss is above 250, and no two share a pool.
+const int kGuardianHp[ritual::RelicCount] = {
+    320, // 元素核心
+    280, // 原始之火
+    360, // 静滞之水
+    260, // 生命嫩枝
+    300, // 根须织毯
+    340, // 裁决天平
+    420, // 黄金冠冕
+    380, // 审判之书
+    310, // 鳞片沙漏
+    450, // 循环刻印
+    480, // 深渊棱镜
+    400, // 上古图腾
+    330, // 残响符石
+    520, // 旧神骸骨
+    560, // 无目雕像
+};
+int g_hp[ritual::RelicCount]{};
+
+const char* kGuardianStem[ritual::RelicCount] = {
+    "elem_core", "prim_fire", "still_water", "life_sprout", "root_weave",
+    "judge_scale", "gold_crown", "judge_tome", "scale_glass", "cycle_mark",
+    "abyss_prism", "ancient_totem", "echo_rune", "old_bones", "eyeless",
+};
+
+Vec3 g_boxMin[ritual::RelicCount]{};
+Vec3 g_boxMax[ritual::RelicCount]{};
+bool g_boxReady[ritual::RelicCount]{};
+
 std::vector<Site> g_sites;
+bool g_trial = false;
 
 // Equilateral-ish triangle on the altar, pointing -Z. Vertices sit inside the stone disk.
 bool insideTri(int dx, int dz) {
@@ -135,6 +171,7 @@ void ensureLibrary() {
 void roll(uint32_t seed) {
     ritual::roll(seed);
     g_sites.clear();
+    for (int i = 0; i < ritual::RelicCount; i++) g_hp[i] = kGuardianHp[i];
     int c0 = matchmap::playMin() + 8;
     int c1 = matchmap::playMax() - 8;
     int span = c1 - c0 + 1;
@@ -205,7 +242,7 @@ void stampColumn(int cx, int cz,
         if (wy < 0 || wy >= cfg::WORLD_H) return;
         put(wx, wy, wz, block);
     };
-    for (const Site& s : g_sites) {
+    for (Site& s : g_sites) {
         int rad = (s.kind == 1) ? 10 : 2;
         if (s.cx + rad < x0 || s.cx - rad > x1 || s.cz + rad < z0 || s.cz - rad > z1) continue;
         int ground = height(s.cx, s.cz);
@@ -219,8 +256,11 @@ void stampColumn(int cx, int cz,
                         cell(s.cx + dx, s.cz + dz, ground, rise, AIR);
                 }
             }
-            if (ritual::relicSpawned(s.id))
-                cell(s.cx, s.cz, ground, 1, (uint8_t)ritual::blockId(s.id));
+            if (s.cx >= x0 && s.cx <= x1 && s.cz >= z0 && s.cz <= z1) {
+                s.ground = ground;
+                if (!s.looted && ritual::relicSpawned(s.id))
+                    cell(s.cx, s.cz, ground, 1, (uint8_t)ritual::blockId(s.id));
+            }
         } else {
             for (int dz = -10; dz <= 10; dz++) {
                 for (int dx = -10; dx <= 10; dx++) {
@@ -414,6 +454,275 @@ void collectBuildBlocks(std::vector<uint8_t>& out) {
         if (loot::itemDef((uint8_t)i).kind == loot::Kind::Block)
             out.push_back((uint8_t)i);
     }
+}
+
+const char* guardianAppearance(int relic) {
+    if (relic < 0 || relic >= ritual::RelicCount) return "";
+    return kGuardianStem[relic];
+}
+
+static void ensureBox(int relic) {
+    if (relic < 0 || relic >= ritual::RelicCount || g_boxReady[relic]) return;
+    g_boxReady[relic] = true;
+    g_boxMin[relic] = { -0.28f, 0.0f, -0.18f };
+    g_boxMax[relic] = { 0.28f, 1.70f, 0.18f };
+    std::string path = pack::entityModel(std::string("guardians/") + kGuardianStem[relic]);
+    pm::EntityFile ef = pm::loadEntity(path.c_str());
+    if (ef.parts.empty()) return;
+    Vec3 mn{ 1e9f, 1e9f, 1e9f };
+    Vec3 mx{ -1e9f, -1e9f, -1e9f };
+    for (const pm::Part& p : ef.parts) {
+        Vec3 c[8];
+        pm::partWorldCorners(p, c);
+        for (int i = 0; i < 8; i++) {
+            mn.x = std::min(mn.x, c[i].x); mn.y = std::min(mn.y, c[i].y); mn.z = std::min(mn.z, c[i].z);
+            mx.x = std::max(mx.x, c[i].x); mx.y = std::max(mx.y, c[i].y); mx.z = std::max(mx.z, c[i].z);
+        }
+    }
+    g_boxMin[relic] = mn;
+    g_boxMax[relic] = mx;
+}
+
+static bool spanOf(const World& world, const Site& s, GuardianSpan& g) {
+    if (s.kind != 0 || s.looted || s.ground < 0) return false;
+    if (s.id < 0 || s.id >= ritual::RelicCount) return false;
+    int x = s.cx, y = s.ground + 1, z = s.cz;
+    if (world.getBlock(x, y, z) != (uint8_t)ritual::blockId(s.id)) return false;
+    ensureBox(s.id);
+    const float S = cfg::BLOCK_SCALE;
+    const float pad = 0.04f;
+    float fx = (s.cx + 0.5f) * S;
+    float fy = (y) * S;
+    float fz = (s.cz + 0.5f) * S;
+    g.relic = s.id;
+    g.feetX = fx;
+    g.feetY = fy;
+    g.feetZ = fz;
+    g.minX = fx + g_boxMin[s.id].x - pad;
+    g.maxX = fx + g_boxMax[s.id].x + pad;
+    g.minY = fy + std::max(0.0f, g_boxMin[s.id].y) - pad;
+    g.maxY = fy + g_boxMax[s.id].y + pad;
+    g.minZ = fz - g_boxMax[s.id].z - pad;
+    g.maxZ = fz - g_boxMin[s.id].z + pad;
+    if (g.minZ > g.maxZ) std::swap(g.minZ, g.maxZ);
+    g.hp = g_hp[s.id];
+    g.maxHp = kGuardianHp[s.id];
+    return true;
+}
+
+bool isGuardianToken(int x, int y, int z, uint8_t block) {
+    if (block < ITEM_ELEM_CORE || block > ITEM_EYELESS) return false;
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.looted || s.ground < 0) continue;
+        if (s.id < 0 || s.id >= ritual::RelicCount) continue;
+        if (s.cx != x || s.cz != z || s.ground + 1 != y) continue;
+        return block == (uint8_t)ritual::blockId(s.id);
+    }
+    return false;
+}
+
+void collectGuardians(const World& world, std::vector<GuardianSpan>& out) {
+    out.clear();
+    for (const Site& s : g_sites) {
+        GuardianSpan g;
+        if (spanOf(world, s, g)) out.push_back(g);
+    }
+}
+
+bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, float maxDist,
+                     float& tHit, GuardianSpan& hit) {
+    Vec3 nd = dir;
+    float len = nd.length();
+    if (len < 1e-8f) return false;
+    nd = nd / len;
+    tHit = maxDist + 1.0f;
+    bool any = false;
+    for (const Site& s : g_sites) {
+        GuardianSpan g;
+        if (!spanOf(world, s, g)) continue;
+        float t = 0.0f;
+        Vec3 mn{ g.minX, g.minY, g.minZ };
+        Vec3 mx{ g.maxX, g.maxY, g.maxZ };
+        if (!loot::rayAabb(origin, nd, mn, mx, t)) continue;
+        if (t < 0.0f || t > maxDist || t >= tHit) continue;
+        tHit = t;
+        hit = g;
+        any = true;
+    }
+    return any;
+}
+
+bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, int& z) {
+    if (relic < 0 || relic >= ritual::RelicCount) return false;
+    if (amount < 0) amount = 0;
+    for (Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        if (s.looted || s.ground < 0) return false;
+        x = s.cx;
+        y = s.ground + 1;
+        z = s.cz;
+        if (world.getBlock(x, y, z) != (uint8_t)ritual::blockId(relic)) {
+            s.looted = true;
+            return false;
+        }
+        if (g_hp[relic] > amount) {
+            g_hp[relic] -= amount;
+            return false;
+        }
+        g_hp[relic] = 0;
+        s.looted = true;
+        return true;
+    }
+    return false;
+}
+
+int guardianStrikeHurt(uint8_t held, int relic) {
+    if (relic < 0 || relic >= ritual::RelicCount) return 0;
+    // Trial guardians only. Armor, resists and vulnerability stay at zero until a
+    // relic profile exists. Player limb damage does not feed this pool.
+    // 受伤 = max(每击物理 - 装甲 - 物理抵抗, 0) * (基础攻击倍率 + 力量增幅 + 物理易伤)
+    //      + max(每击神秘学 - 神秘学抵抗, 0) * (基础攻击倍率 + 物理易伤)
+    float physHit = 0.0f;
+    float occultHit = 0.0f;
+    const float physResist = 0.0f;
+    const float occultResist = 0.0f;
+    const float baseAtk = 1.0f;
+    const float strAmp = 0.0f;
+    const float armor = 0.0f;
+    const float physVuln = 0.0f;
+    if (held != AIR && hasItemTags(held, TAG_AXE)) {
+        physHit = 15.0f;
+    } else if (held != AIR && loot::isTool(held)) {
+        physHit = 5.0f;
+    } else {
+        physHit = 2.0f;
+        occultHit = 1.0f;
+    }
+    float phys = physHit - armor - physResist;
+    if (phys < 0.0f) phys = 0.0f;
+    float occult = occultHit - occultResist;
+    if (occult < 0.0f) occult = 0.0f;
+    float hurt = phys * (baseAtk + strAmp + physVuln) + occult * (baseAtk + physVuln);
+    if (hurt <= 0.0f) return 0;
+    return (int)std::lround(hurt);
+}
+
+void collectRoomGuardians(std::vector<GuardianSync>& out) {
+    out.clear();
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.ground < 0) continue;
+        if (s.id < 0 || s.id >= ritual::RelicCount) continue;
+        GuardianSync g;
+        g.relic = s.id;
+        g.x = s.cx;
+        g.y = s.ground + 1;
+        g.z = s.cz;
+        g.maxHp = kGuardianHp[s.id];
+        g.hp = s.looted ? 0 : g_hp[s.id];
+        out.push_back(g);
+    }
+}
+
+void applyRoomGuardian(int relic, int hp) {
+    if (relic < 0 || relic >= ritual::RelicCount) return;
+    if (hp < 0) hp = 0;
+    g_hp[relic] = hp;
+    for (Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        s.looted = hp <= 0;
+    }
+}
+
+bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach,
+                     int& x, int& y, int& z) {
+    x = y = z = 0;
+    if (relic < 0 || relic >= ritual::RelicCount) return false;
+    if (!std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z)) return false;
+    if (!(reach > 0.0f) || !std::isfinite(reach)) return false;
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        GuardianSpan g;
+        if (!spanOf(world, s, g)) return false;
+        float cx = eye.x < g.minX ? g.minX : (eye.x > g.maxX ? g.maxX : eye.x);
+        float cy = eye.y < g.minY ? g.minY : (eye.y > g.maxY ? g.maxY : eye.y);
+        float cz = eye.z < g.minZ ? g.minZ : (eye.z > g.maxZ ? g.maxZ : eye.z);
+        float dx = cx - eye.x, dy = cy - eye.y, dz = cz - eye.z;
+        float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > reach) return false;
+        x = s.cx;
+        y = s.ground + 1;
+        z = s.cz;
+        if (dist < 0.05f) return true;
+        Vec3 dir{ dx / dist, dy / dist, dz / dist };
+        IVec3 hit, prev;
+        Vec3 nrm;
+        float blockT = dist + 1.0f;
+        if (world.raycast(eye, dir, dist, hit, prev, nrm, nullptr, &blockT)
+            && blockT + 0.35f < dist
+            && !(hit.x == x && hit.y == y && hit.z == z))
+            return false;
+        return true;
+    }
+    return false;
+}
+
+void openTrial(int relic) {
+    if (relic < 0 || relic >= ritual::RelicCount) return;
+    g_sites.clear();
+    Site s;
+    s.cx = kTrialCX;
+    s.cz = kTrialCZ;
+    s.kind = 0;
+    s.id = relic;
+    s.ground = kTrialFloor;
+    s.looted = false;
+    g_sites.push_back(s);
+    g_hp[relic] = kGuardianHp[relic];
+    g_trial = true;
+}
+
+void closeTrial() {
+    if (!g_trial) return;
+    g_sites.clear();
+    g_trial = false;
+}
+
+bool trialActive() { return g_trial; }
+
+void approachTrial(World& world, const Vec3& pos, float radius) {
+    if (!g_trial || g_sites.empty()) return;
+    Site& s = g_sites[0];
+    if (s.kind != 0 || s.looted || s.ground < 0) return;
+    if (s.id < 0 || s.id >= ritual::RelicCount) return;
+    int x = s.cx;
+    int y = s.ground + 1;
+    int z = s.cz;
+    uint8_t id = (uint8_t)ritual::blockId(s.id);
+    if (world.getBlock(x, y, z) == id) return;
+    const float S = cfg::BLOCK_SCALE;
+    float dx = pos.x - (x + 0.5f) * S;
+    float dz = pos.z - (z + 0.5f) * S;
+    if (dx * dx + dz * dz > radius * radius) return;
+    world.setBlock(x, y, z, id, true);
+}
+
+bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, GuardianSpan& out) {
+    float best = maxDist;
+    bool any = false;
+    for (const Site& s : g_sites) {
+        GuardianSpan g;
+        if (!spanOf(world, s, g)) continue;
+        float cx = (g.minX + g.maxX) * 0.5f;
+        float cy = (g.minY + g.maxY) * 0.5f;
+        float cz = (g.minZ + g.maxZ) * 0.5f;
+        float dx = pos.x - cx, dy = pos.y - cy, dz = pos.z - cz;
+        float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > best) continue;
+        best = dist;
+        out = g;
+        any = true;
+    }
+    return any;
 }
 
 } // namespace structure

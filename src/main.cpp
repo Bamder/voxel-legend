@@ -1385,6 +1385,8 @@ int main(int argc, char** argv) {
     bool paused = false;
     bool settingsOpen = false;
     bool inventoryOpen = false;
+    std::vector<TrainingTarget> targets;
+    int targetPanel = -1;
     bool showDebug = false;
     bool debugMenuOpen = false;
     bool humidityMode = false;
@@ -1413,6 +1415,8 @@ int main(int argc, char** argv) {
     uint32_t roomCastNext = 0, roomCastPending = 0;
     uint8_t roomCastHand = 1;
     uint32_t roomPickupNext = 0, roomPickupPending = 0, roomPickupDrop = 0;
+    uint32_t roomGuardianNext = 0, roomGuardianPending = 0;
+    uint8_t roomGuardianRelic = 255;
     uint32_t roomCombatAck = 0;
     uint32_t roomArcaneAck = 0;
     float hitMarker = 0.0f;
@@ -1520,6 +1524,8 @@ int main(int argc, char** argv) {
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackNext = roomAttackPending = roomCastNext = roomCastPending = 0;
         roomPickupNext = roomPickupPending = roomPickupDrop = 0;
+        roomGuardianNext = roomGuardianPending = 0;
+        roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
         roomClueTarget = {};
         arcaneProjectiles.clear(); arcaneBursts.clear();
@@ -1604,6 +1610,8 @@ int main(int argc, char** argv) {
         paused = false;
         settingsOpen = false;
         inventoryOpen = false;
+        targets.clear();
+        targetPanel = -1;
         debugMenuOpen = false;
         ui.matEditorOpen = false;
         accumulator = 0.0f;
@@ -1611,8 +1619,69 @@ int main(int argc, char** argv) {
         gameTick = 0;
     };
 
+    struct TrialAnchor {
+        bool active = false;
+        Vec3 pos{ 0, 0, 0 };
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+        bool flying = false;
+    };
+    TrialAnchor trialAnchor;
+
+    auto exitTrial = [&]() {
+        if (!trialAnchor.active && !world.guardianArena()) return;
+        world.clearTrialDrops();
+        structure::closeTrial();
+        world.setGuardianArena(false);
+        if (trialAnchor.active) {
+            player.pos = trialAnchor.pos;
+            player.vel = { 0, 0, 0 };
+            player.yaw = trialAnchor.yaw;
+            player.pitch = trialAnchor.pitch;
+            player.flying = trialAnchor.flying;
+            player.syncBodyYaw();
+            trialAnchor.active = false;
+        }
+        ui.trialPick = false;
+        ui.inTrial = false;
+        debugMenuOpen = false;
+        paused = false;
+    };
+
+    auto enterTrial = [&](int relic) {
+        if (roomSession || structureEdit || !player.privilegeMode) return;
+        if (relic < 0 || relic >= ritual::RelicCount) return;
+        if (!trialAnchor.active) {
+            trialAnchor.pos = player.pos;
+            trialAnchor.yaw = player.yaw;
+            trialAnchor.pitch = player.pitch;
+            trialAnchor.flying = player.flying;
+            trialAnchor.active = true;
+        }
+        world.setGuardianArena(true);
+        world.discardGuardianArenaChunks();
+        structure::openTrial(relic);
+        world.clearTrialDrops();
+        const float S = cfg::BLOCK_SCALE;
+        int sx = structure::kTrialCX;
+        int sz = structure::kTrialCZ + 48;
+        player.pos = { (sx + 0.5f) * S, (structure::kTrialFloor + 1) * S + 0.05f, (sz + 0.5f) * S };
+        player.vel = { 0, 0, 0 };
+        player.yaw = 0.0f;
+        player.pitch = 0.0f;
+        player.syncBodyYaw();
+        world.loadGuardianArena();
+        ui.trialPick = false;
+        ui.inTrial = true;
+        debugMenuOpen = false;
+        settingsOpen = false;
+        paused = false;
+        firstLook = true;
+    };
+
     auto leaveWorld = [&]() {
         if (appScreen == AppScreen::Playing && !roomSession) {
+            exitTrial();
             world.saveAll();
             if (!noSave && !currentWorld.empty())
                 savePlayer(world.saveDir(), player, timeOfDay, inv, carry, worn, mouseSens, invertY);
@@ -1645,6 +1714,8 @@ int main(int argc, char** argv) {
         paused = false;
         settingsOpen = false;
         inventoryOpen = false;
+        targets.clear();
+        targetPanel = -1;
         debugMenuOpen = false;
         ui.matEditorOpen = false;
         ui.dummyActive = false;
@@ -1870,6 +1941,8 @@ int main(int argc, char** argv) {
         roomInventoryRevision = roomLayoutPending = 0;
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackPending = roomCastPending = roomPickupPending = roomPickupDrop = 0;
+        roomGuardianPending = 0;
+        roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
         roomClueTarget = {};
         arcaneProjectiles.clear(); arcaneBursts.clear();
@@ -2022,6 +2095,8 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < cfg::INVENTORY_SLOTS; i++) inv[i].clear();
                 for (int i = 0; i < wear::Count; i++) worn[i].clear();
                 carry.clear();
+                targets.clear();
+                targetPanel = -1;
                 timeOfDay = 6000.0f;
                 player.setSpawn({ gameClient.spawnX(), gameClient.spawnY(), gameClient.spawnZ() });
                 player.yaw = 0.4f;
@@ -2089,6 +2164,8 @@ int main(int argc, char** argv) {
                     if (event.attacker == gameClient.selfId()) hitMarker = .22f;
                     if (event.target == gameClient.selfId()) damageFlash = .20f;
                 }
+                for (const GuardianNet& guardian : d.guardians)
+                    structure::applyRoomGuardian(guardian.relic, guardian.hp);
                 for (const ArcaneEventNet& event : d.arcane) {
                     if (event.serial <= roomArcaneAck) continue;
                     roomArcaneAck = event.serial;
@@ -2374,6 +2451,8 @@ int main(int argc, char** argv) {
                 netIn.pickupDrop = roomPickupDrop;
                 netIn.combatAck = roomCombatAck;
                 netIn.arcaneAck = roomArcaneAck;
+                netIn.guardianSequence = roomGuardianPending;
+                netIn.guardianRelic = roomGuardianRelic;
                 if (roomLayoutDirty && !roomLayoutPending && !drag.active && roomInventoryKnown) {
                     if (!++roomLayoutNext) ++roomLayoutNext;
                     roomLayoutPending = roomLayoutNext;
@@ -2419,6 +2498,8 @@ int main(int argc, char** argv) {
                 roomAttackPending = 0;
                 roomCastPending = 0;
                 roomPickupPending = roomPickupDrop = 0;
+                roomGuardianPending = 0;
+                roomGuardianRelic = 255;
                 g_roomEdits.erase(g_roomEdits.begin(), g_roomEdits.begin() + (std::ptrdiff_t)n);
                 g_roomBark.erase(g_roomBark.begin(), g_roomBark.begin() + (std::ptrdiff_t)nb);
                 g_roomMines.erase(g_roomMines.begin(), g_roomMines.begin() + (std::ptrdiff_t)nm);
@@ -2624,6 +2705,10 @@ int main(int argc, char** argv) {
         if (dt > 0.1f) dt = 0.1f;
         if (dt <= 0.0f) dt = 1.0f / 60.0f;
         if (hitMarker > 0.0f) { hitMarker -= dt; if (hitMarker < 0.0f) hitMarker = 0.0f; }
+        if (ui.quickBreakWait > 0.0f) {
+            ui.quickBreakWait -= dt;
+            if (ui.quickBreakWait < 0.0f) ui.quickBreakWait = 0.0f;
+        }
         if (damageFlash > 0.0f) { damageFlash -= dt; if (damageFlash < 0.0f) damageFlash = 0.0f; }
         for (ArcaneBurstView& burst : arcaneBursts) burst.age += dt;
         arcaneBursts.erase(std::remove_if(arcaneBursts.begin(), arcaneBursts.end(),
@@ -2653,10 +2738,12 @@ int main(int argc, char** argv) {
             player.flying = true;
             player.dead = false;
         }
+        if (!player.privilegeMode || roomSession || structureEdit) ui.quickBreak = false;
+        if (player.dead) targetPanel = -1;
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
                         && !guideOpen && !clueOpen
                         && !(structureEdit && structurePicker));
-        bool lookLocked = (canMove && !inventoryOpen && !(structureEdit && blockBarOpen));
+        bool lookLocked = (canMove && !inventoryOpen && targetPanel < 0 && !(structureEdit && blockBarOpen));
 
         auto refreshStructureList = [&]() {
             structure::listFiles(ui.structureNames);
@@ -2774,10 +2861,14 @@ int main(int argc, char** argv) {
             if (structureEdit) {
                 if (!structurePicker) blockBarOpen = !blockBarOpen;
             } else if (!paused) {
-                if (inventoryOpen && drag.active) endDrag(inv, worn, -1, -1, drag);
-                inventoryOpen = !inventoryOpen;
-                ui.noteOpen = false;
-                if (inventoryOpen) { drag.active = false; drag.block = AIR; drag.count = 0; drag.sourceSlot = -1; drag.sourceWear = -1; }
+                if (targetPanel >= 0) {
+                    targetPanel = -1;
+                } else {
+                    if (inventoryOpen && drag.active) endDrag(inv, worn, -1, -1, drag);
+                    inventoryOpen = !inventoryOpen;
+                    ui.noteOpen = false;
+                    if (inventoryOpen) { drag.active = false; drag.block = AIR; drag.count = 0; drag.sourceSlot = -1; drag.sourceWear = -1; }
+                }
             }
         }
         prevE = e;
@@ -2824,6 +2915,7 @@ int main(int argc, char** argv) {
                 }
                 ui.menuMessage.clear();
             } else if (ui.matEditorOpen) ui.matEditorOpen = false;
+            else if (debugMenuOpen && ui.trialPick) ui.trialPick = false;
             else if (debugMenuOpen) debugMenuOpen = false;
             else if (settingsOpen) settingsOpen = false;
             else if (deploying) {
@@ -2837,6 +2929,9 @@ int main(int argc, char** argv) {
             else if (clueOpen) {
                 clueOpen = false;
                 firstLook = true;
+            }
+            else if (targetPanel >= 0) {
+                targetPanel = -1;
             }
             else if (inventoryOpen) {
                 if (drag.active) endDrag(inv, worn, -1, -1, drag);
@@ -2875,6 +2970,10 @@ int main(int argc, char** argv) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
             ui.structureScroll -= steps;
+        } else if (g_wheel != 0 && debugMenuOpen && ui.trialPick) {
+            int steps = g_wheel / 120;
+            if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
+            ui.trialScroll -= steps;
         } else if (g_wheel != 0 && structureEdit && blockBarOpen) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
@@ -2997,7 +3096,9 @@ int main(int argc, char** argv) {
         int dropHit = -1;
         float dropT = cfg::REACH + 1.0f;
         bool entityTarget = false;
+        float entityDist = 1.0e9f;
         uint8_t entityAttackHand = 1;
+        int dummyAim = -1;
         bool specialUseClick = false;
         if (playing) {
             hitOk = world.raycast(player.eye(), player.lookDir(), cfg::REACH, hit, prev, nrm, &physHit, &hitT);
@@ -3031,15 +3132,103 @@ int main(int argc, char** argv) {
                         if (remote.spectator || remote.dead || remoteTeam == gameClient.team()) continue;
                         auto entity = combat::rayPlayer(player.eye(), player.lookDir(), remote.pos,
                                                         remote.bodyYaw, def->reach, best);
-                        if (entity && entity->distance < best) { best = entity->distance; entityTarget = true; }
+                        if (entity && entity->distance < best) {
+                            best = entity->distance;
+                            entityDist = entity->distance;
+                            entityTarget = true;
+                        }
                     }
                     if (entityTarget) { hitOk = false; physHit = -1; dropHit = -1; }
                 }
             }
         }
-        ui.hasTarget = hitOk && !inventoryOpen && !paused && !guideOpen && !clueOpen && playing && !spectating;
+        if (playing && trialAnchor.active)
+            structure::approachTrial(world, player.pos, 16.0f);
+        int guardianRelic = -1;
+        structure::GuardianSpan guardianHit;
+        float guardianT = cfg::REACH + 1.0f;
+        if (playing && !inventoryOpen && !paused && !spectating && !structureEdit) {
+            if (structure::raycastGuardian(world, player.eye(), player.lookDir(), cfg::REACH, guardianT, guardianHit)) {
+                bool closerThanBlock = !hitOk || guardianT <= hitT;
+                bool closerThanDrop = dropHit < 0 || guardianT <= dropT;
+                if (closerThanBlock && closerThanDrop) {
+                    hitOk = false;
+                    physHit = -1;
+                    dropHit = -1;
+                    guardianRelic = guardianHit.relic;
+                }
+            }
+        }
+        ui.targetGuardian = guardianRelic;
+        ui.guardianHurt = 0.0f;
+        ui.bossNear = false;
+        ui.bossRelic = -1;
+        if (playing && !spectating) {
+            structure::GuardianSpan nearBoss;
+            if (structure::nearestGuardian(world, player.pos, 16.0f, nearBoss)) {
+                ui.bossNear = true;
+                ui.bossRelic = nearBoss.relic;
+                ui.bossName = ritual::relicName(nearBoss.relic);
+                ui.bossHp = nearBoss.hp;
+                ui.bossMaxHp = nearBoss.maxHp > 0 ? nearBoss.maxHp : 1;
+            }
+        }
+        if (guardianRelic >= 0 && guardianHit.maxHp > 0) {
+            ui.guardianCenter = {
+                (guardianHit.minX + guardianHit.maxX) * 0.5f,
+                (guardianHit.minY + guardianHit.maxY) * 0.5f,
+                (guardianHit.minZ + guardianHit.maxZ) * 0.5f
+            };
+            ui.guardianSize = {
+                (guardianHit.maxX - guardianHit.minX) * 1.04f,
+                (guardianHit.maxY - guardianHit.minY) * 1.04f,
+                (guardianHit.maxZ - guardianHit.minZ) * 1.04f
+            };
+            ui.guardianHurt = 1.0f - (float)guardianHit.hp / (float)guardianHit.maxHp;
+        }
+        if (playing && !inventoryOpen && !paused && !spectating && !structureEdit &&
+            !player.dead && targetPanel < 0) {
+            float limit = cfg::REACH;
+            if (hitOk) limit = std::min(limit, hitT);
+            if (dropHit >= 0) limit = std::min(limit, dropT);
+            if (guardianRelic >= 0) limit = std::min(limit, guardianT);
+            if (entityTarget) limit = std::min(limit, entityDist);
+            float bestDummy = limit;
+            for (int i = 0; i < (int)targets.size(); ++i) {
+                auto hit = combat::rayPlayer(player.eye(), player.lookDir(), targets[(size_t)i].feet,
+                                             targets[(size_t)i].yaw, limit, bestDummy);
+                if (hit && hit->distance < bestDummy) {
+                    bestDummy = hit->distance;
+                    dummyAim = i;
+                }
+            }
+            if (dummyAim >= 0) {
+                hitOk = false;
+                physHit = -1;
+                dropHit = -1;
+                guardianRelic = -1;
+                entityTarget = false;
+            }
+        }
+        ui.targetGuardian = guardianRelic;
+        ui.hasTarget = hitOk && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
+                       playing && !spectating;
         ui.targetBlock = hit;
         ui.hasPlacePreview = false;
+        ui.targetPlaceReady = false;
+        if (hitOk && physHit < 0 && !player.dead && carry.empty() && lookLocked && targetPanel < 0) {
+            auto heldTarget = [&](int slot) {
+                return slot >= 0 && slot < cfg::INVENTORY_SLOTS && !inv[slot].empty()
+                    && inv[slot].block == ITEM_TARGET;
+            };
+            int slot = heldTarget(ui.selectedSlot) ? ui.selectedSlot
+                     : (heldTarget(ui.selectedLeft) ? ui.selectedLeft : -1);
+            if (slot >= 0) {
+                uint8_t beside = world.getBlock(prev.x, prev.y, prev.z);
+                if ((beside == AIR || isLiquid(beside)) && !playerOverlapsCell(prev, player.pos))
+                    ui.targetPlaceReady = true;
+            }
+        }
         if (ui.hasTarget && physHit < 0 && !player.dead && !carry.empty()
             && hold::isCarryBlock(carry.block)
             && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
@@ -3118,7 +3307,11 @@ int main(int argc, char** argv) {
 
         if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating &&
             !structureEdit && !guideOpen && !clueOpen) {
-            if (!inventoryOpen && !carry.empty()) {
+            if (targetPanel >= 0) {
+                targetPanel = -1;
+            } else if (!inventoryOpen && dummyAim >= 0) {
+                targetPanel = dummyAim;
+            } else if (!inventoryOpen && !carry.empty()) {
                 if (!roomSession) dropCarriedBlock(world, player, carry);
             } else if (!inventoryOpen && ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
                 const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
@@ -3595,7 +3788,11 @@ int main(int argc, char** argv) {
                         mouseSens = cfg::SENS_MIN + t * (cfg::SENS_MAX - cfg::SENS_MIN);
                     }
                 } else if (debugMenuOpen) {
-                    if (lmb && !prevLmb && ui.debugHover == 0) debugMenuOpen = false; // back
+                    if (ui.trialPick) {
+                        if (lmb && !prevLmb && ui.trialHover == -2) ui.trialPick = false;
+                        else if (lmb && !prevLmb && ui.trialHover >= 0 && ui.trialHover < ritual::RelicCount)
+                            enterTrial(ui.trialHover);
+                    } else if (lmb && !prevLmb && ui.debugHover == 0) debugMenuOpen = false; // back
                     if (lmb && !prevLmb && ui.debugHover == 1) humidityMode = !humidityMode;
                     if (lmb && !prevLmb && ui.debugHover == 2) { ui.matEditorOpen = true; debugMenuOpen = false; paused = false; }
                     if (lmb && !prevLmb && ui.debugHover == 3) { launchModelEditor(); } // open the model editor
@@ -3609,19 +3806,32 @@ int main(int argc, char** argv) {
                     }
                     if (lmb && !prevLmb && ui.debugHover == 5) {
                         player.privilegeMode = !player.privilegeMode;
+                        if (!player.privilegeMode && !trialAnchor.active) ui.railOpen = false;
+                        if (!player.privilegeMode) ui.quickBreak = false;
                     }
-                    if (lmb && !prevLmb && ui.debugHover == 6) {
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 0)
+                        ui.railOpen = !ui.railOpen;
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 1) {
+                        if (trialAnchor.active) exitTrial();
+                        else if (player.privilegeMode && !roomSession && !structureEdit) {
+                            ui.trialPick = true;
+                            ui.trialScroll = 0;
+                        }
+                    }
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 2) {
                         player.flying = !player.flying;
                         if (!player.flying) player.vel.y = 0.0f;
                     }
-                    if (lmb && ui.tickSliderW > 1.0f &&
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 3 && player.privilegeMode)
+                        ui.quickBreak = !ui.quickBreak;
+                    if (!ui.trialPick && lmb && ui.tickSliderW > 1.0f &&
                         ui.mouseX >= ui.tickSliderX - 12.0f && ui.mouseX <= ui.tickSliderX + ui.tickSliderW + 12.0f &&
                         ui.mouseY >= ui.tickSliderY - 12.0f && ui.mouseY <= ui.tickSliderY + ui.tickSliderH + 12.0f) {
                         float t = (ui.mouseX - ui.tickSliderX) / ui.tickSliderW;
                         t = clampf(t, 0.0f, 1.0f);
                         tickSpeed = t * 20.0f;
                     }
-                    if (lmb && ui.timeSliderW > 1.0f &&
+                    if (!ui.trialPick && lmb && ui.timeSliderW > 1.0f &&
                         ui.mouseX >= ui.timeSliderX - 12.0f && ui.mouseX <= ui.timeSliderX + ui.timeSliderW + 12.0f &&
                         ui.mouseY >= ui.timeSliderY - 12.0f && ui.mouseY <= ui.timeSliderY + ui.timeSliderH + 12.0f) {
                         float t = (ui.mouseX - ui.timeSliderX) / ui.timeSliderW;
@@ -3697,6 +3907,20 @@ int main(int argc, char** argv) {
                     if (drag.active) endDrag(inv, worn, -1, -1, drag);
                     else inventoryOpen = false;
                 }
+            } else if (targetPanel >= 0) {
+                player.mineCharge = 0.0f;
+                player.mineCooldown = 0.0f;
+                player.strikeName.clear();
+                player.pickRaised = false;
+                if (lmb && !prevLmb && targetPanel < (int)targets.size()) {
+                    if (ui.targetBtnHover == 0) {
+                        targets.erase(targets.begin() + targetPanel);
+                        targetPanel = -1;
+                        dummyAim = -1;
+                    } else if (ui.targetBtnHover == 1) {
+                        vitals::reset(targets[(size_t)targetPanel].vitals);
+                    }
+                }
             } else if (player.dead && !deploying) {
                 player.strikeName.clear();
                 player.pickRaised = false;
@@ -3744,7 +3968,10 @@ int main(int argc, char** argv) {
                     player.strikeName.clear();
 
                 bool canMine = false;
+                bool guardianSwing = false;
+                bool dummySwing = false;
                 uint8_t heldMine = AIR;
+                uint8_t heldDummy = AIR;
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 0)
                     saveCurrentStructure();
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 1)
@@ -3760,6 +3987,21 @@ int main(int argc, char** argv) {
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
                     world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
+                if (!structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead && !spectating) {
+                    guardianSwing = true;
+                    heldMine = inv[ui.selectedSlot].block;
+                }
+                if (!structureEdit && lmb && dummyAim >= 0 && lookLocked && !player.dead && !spectating) {
+                    int rightSlot = ui.selectedSlot;
+                    int leftSlot = ui.selectedLeft;
+                    if (rightSlot >= 0 && rightSlot < cfg::HOTBAR_SLOTS &&
+                        combat::slotUsable(player.vitals, rightSlot) && combat::weapon(inv[rightSlot].block))
+                        heldDummy = inv[rightSlot].block;
+                    else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
+                             combat::slotUsable(player.vitals, leftSlot) && combat::weapon(inv[leftSlot].block))
+                        heldDummy = inv[leftSlot].block;
+                    if (heldDummy != AIR) dummySwing = true;
+                }
                 if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
                     heldMine = inv[ui.selectedSlot].block;
                     canMine = !roomSession || combat::slotUsable(player.vitals, ui.selectedSlot);
@@ -3785,10 +4027,122 @@ int main(int argc, char** argv) {
                         if (dmg <= 0.0f) canMine = false;
                     }
                 }
-                if (!canMine) {
+                if (ui.quickBreak && player.privilegeMode && !roomSession && !structureEdit
+                    && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
+                    uint8_t b = physHit < 0
+                        ? world.getBlock(hit.x, hit.y, hit.z)
+                        : world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
+                    if (b != AIR && plugin::blockStrategy(b)->canBreak(b)) {
+                        player.mineCharge = 0.0f;
+                        player.mineCooldown = 0.0f;
+                        player.strikeName.clear();
+                        player.pickRaised = false;
+                        canMine = false;
+                        guardianSwing = false;
+                        dummySwing = false;
+                        // A click stays down for several frames. Space the breaks so one
+                        // click removes a single block; holding keeps breaking at this rate.
+                        if (ui.quickBreakWait <= 0.0f) {
+                            finishMinedBlock(world, inv[ui.selectedSlot].block, physHit, hit);
+                            ui.quickBreakWait = 0.28f;
+                        }
+                    }
+                }
+                if (!canMine && !guardianSwing && !dummySwing) {
                     player.mineCharge = 0.0f;
                 } else if (player.mineCooldown > 0.0f) {
                     // Cooling down: holding or click-spam cannot skip this.
+                } else if (guardianSwing) {
+                    bool axe = heldMine != AIR && hasItemTags(heldMine, TAG_AXE);
+                    if (player.strikeName.empty()
+                        || (axe && player.strikeName != "axe_chop")
+                        || (!axe && player.strikeName != "punch")) {
+                        player.strikeName = axe ? "axe_chop" : "punch";
+                        player.pickRaised = false;
+                        player.strikeCharge = axe ? anim::axeChopSec() : 0.50f;
+                        player.strikeCool = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
+                    }
+                    player.mineCharge += dt;
+                    float need = axe ? anim::axeChopSec() : 0.50f;
+                    float recover = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
+                    if (player.mineCharge >= need) {
+                        player.mineCharge = 0.0f;
+                        player.mineCooldown = recover;
+                        if (roomSession) {
+                            if (!roomGuardianPending) {
+                                if (!++roomGuardianNext) ++roomGuardianNext;
+                                roomGuardianPending = roomGuardianNext;
+                                roomGuardianRelic = (uint8_t)ui.targetGuardian;
+                            }
+                        } else {
+                            int gx = 0, gy = 0, gz = 0;
+                            int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
+                            bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
+                            if (ui.bossRelic == ui.targetGuardian) {
+                                ui.bossHp -= dmg;
+                                if (ui.bossHp < 0) ui.bossHp = 0;
+                                if (ui.bossMaxHp > 0)
+                                    ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
+                                if (slain) ui.bossNear = false;
+                            }
+                            if (slain) {
+                                uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
+                                world.setBlock(gx, gy, gz, AIR, true);
+                                const dropgeom::Shape& sh = dropgeom::cached(item);
+                                const float S = cfg::BLOCK_SCALE;
+                                Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                                world.spawnDrop(dropPos, item, 1, true);
+                            }
+                        }
+                    }
+                } else if (dummySwing) {
+                    auto def = combat::weapon(heldDummy);
+                    bool axe = hasItemTags(heldDummy, TAG_AXE);
+                    bool pick = hasItemTags(heldDummy, TAG_PICK);
+                    if (player.strikeName.empty()
+                        || (axe && player.strikeName != "axe_chop")
+                        || (pick && player.strikeName != "pick_mine")) {
+                        player.strikeName = axe ? "axe_chop" : "pick_mine";
+                        if (!pick) player.pickRaised = false;
+                        player.strikeCharge = axe ? anim::axeChopSec()
+                            : (player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec());
+                        player.strikeCool = axe ? loot::mineCooldownSec(heldDummy) : anim::pickUpSec();
+                    }
+                    player.mineCharge += dt;
+                    float need = axe ? anim::axeChopSec()
+                                     : (player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec());
+                    float recover = axe ? loot::mineCooldownSec(heldDummy) : anim::pickUpSec();
+                    player.strikeCharge = need;
+                    player.strikeCool = recover;
+                    if (player.mineCharge >= need && def) {
+                        player.mineCharge = 0.0f;
+                        player.mineCooldown = recover;
+                        if (pick) player.pickRaised = true;
+                        float obstruction = def->reach + 0.01f;
+                        IVec3 blockHit{}, prevHit{};
+                        Vec3 hitNormal{};
+                        float blockT = obstruction;
+                        if (world.raycast(player.eye(), player.lookDir(), def->reach,
+                                          blockHit, prevHit, hitNormal, nullptr, &blockT))
+                            obstruction = blockT;
+                        int best = -1;
+                        std::optional<combat::LimbHit> bestHit;
+                        for (int i = 0; i < (int)targets.size(); ++i) {
+                            auto hit = combat::rayPlayer(player.eye(), player.lookDir(),
+                                                         targets[(size_t)i].feet, targets[(size_t)i].yaw,
+                                                         def->reach, obstruction);
+                            if (hit && (!bestHit || hit->distance < bestHit->distance)) {
+                                bestHit = hit;
+                                best = i;
+                            }
+                        }
+                        if (best >= 0 && bestHit) {
+                            combat::DamageSource source{ 1, 1, def->item, combat::DamageCategory::Physical };
+                            auto result = combat::damagePlayer(targets[(size_t)best].vitals, source,
+                                                               def->damage, bestHit->limb);
+                            if (result.applied) hitMarker = 0.22f;
+                        }
+                    }
                 } else {
                     if (player.strikeName.empty()) {
                         if (heldMine == AIR) player.strikeName = "punch";
@@ -3846,7 +4200,30 @@ int main(int argc, char** argv) {
                     player.strikeName.clear();
                     player.pickRaised = false;
                 }
-                if (!structureEdit && rmb && !prevRmb && hitOk && !specialUseClick) {
+                if (!structureEdit && rmb && !prevRmb && hitOk && !specialUseClick && ui.targetPlaceReady) {
+                    int slot = (!inv[ui.selectedSlot].empty() && inv[ui.selectedSlot].block == ITEM_TARGET)
+                        ? ui.selectedSlot : ui.selectedLeft;
+                    if (slot >= 0 && slot < cfg::INVENTORY_SLOTS && !inv[slot].empty()
+                        && inv[slot].block == ITEM_TARGET) {
+                        const float S = cfg::BLOCK_SCALE;
+                        TrainingTarget placed;
+                        placed.feet = { (prev.x + 0.5f) * S, prev.y * S, (prev.z + 0.5f) * S };
+                        float dx = player.pos.x - placed.feet.x;
+                        float dz = player.pos.z - placed.feet.z;
+                        placed.yaw = std::atan2(dx, -dz);
+                        bool stacked = false;
+                        for (const TrainingTarget& old : targets) {
+                            float ox = old.feet.x - placed.feet.x;
+                            float oy = old.feet.y - placed.feet.y;
+                            float oz = old.feet.z - placed.feet.z;
+                            if (ox * ox + oy * oy + oz * oz < 0.16f) stacked = true;
+                        }
+                        if (!stacked) {
+                            targets.push_back(placed);
+                            if (--inv[slot].count == 0) inv[slot].clear();
+                        }
+                    }
+                } else if (!structureEdit && rmb && !prevRmb && hitOk && !specialUseClick) {
                     if (roomSession && !combat::slotUsable(player.vitals, ui.selectedSlot)) {
                         // A destroyed right hand preserves the slot but cannot use it.
                     } else
@@ -4038,6 +4415,9 @@ int main(int argc, char** argv) {
 
         ui.showDebug = roomSession ? false : showDebug;
         ui.inventoryOpen = inventoryOpen;
+        ui.targets = &targets;
+        ui.targetAim = targetPanel >= 0 ? -1 : dummyAim;
+        ui.targetPanel = targetPanel;
         ui.bagLocked = inventoryOpen && (in.forward || in.back || in.left || in.right
             || (player.vel.x * player.vel.x + player.vel.z * player.vel.z) > 0.16f);
         ui.appScreen = appScreen;
@@ -4049,6 +4429,8 @@ int main(int argc, char** argv) {
         ui.tickSpeed = tickSpeed;
         ui.humidityMode = roomSession ? false : humidityMode;
         ui.privilegeMode = (roomSession && !structureEdit) ? false : player.privilegeMode;
+        ui.inTrial = trialAnchor.active;
+        if (!debugMenuOpen) ui.trialPick = false;
         ui.hideAvatar = structureEdit || deploying || storyOpen || guideOpen || clueOpen;
         ui.deploying = deploying;
         ui.deployPixels = deploying ? &deployPixels : nullptr;
@@ -4226,6 +4608,7 @@ int main(int argc, char** argv) {
     }
 
     if (appScreen == AppScreen::Playing && !roomSession) {
+        exitTrial();
         world.saveAll();
         if (!noSave) savePlayer(world.saveDir(), player, timeOfDay, inv, carry, worn, mouseSens, invertY);
     }

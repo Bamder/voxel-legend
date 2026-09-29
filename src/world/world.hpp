@@ -289,6 +289,11 @@ public:
     bool matchBounds() const { return m_matchBounds; }
     void setBuildCanvas(bool on);
     bool buildCanvas() const { return m_buildCanvas; }
+    void setGuardianArena(bool on);
+    bool guardianArena() const { return m_arena; }
+    void discardGuardianArenaChunks();
+    void loadGuardianArena();
+    void clearTrialDrops();
     void ensureColumn(int cx, int cz);
     void updateAnchors(const Vec3* pos, int count, int meshBudget);
     int humidityAt(int x, int y, int z) const; // air humidity -256..255
@@ -376,6 +381,7 @@ private:
     bool m_tagTrees = false;
     bool m_matchBounds = false;
     bool m_buildCanvas = false;
+    bool m_arena = false;
     uint32_t m_nextTree = 1;
     std::unordered_set<int64_t> m_authBark;
     std::unordered_map<AuthCellKey, AuthCell, AuthCellKeyHash> m_authCells;

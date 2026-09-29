@@ -64,6 +64,8 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "旧神骸骨", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.35f, 0.30f, false, 0.0f, 0.0f },
     { "无目雕像", true, false, true, false, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, 0.55f, 0.58f, false, 0.0f, 0.0f },
     { "火球术卷轴", false, false, false, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.20f, 0.25f, false, 0.0f, 0.0f },
+    { "灰白石", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 40.00f, 0.80f, false, 0.0f, 0.0f },
+    { "标靶", false, false, false, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 1.00f, 0.50f, false, 0.0f, 0.0f },
     { "冰封术卷轴", false, false, false, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "治疗术卷轴", false, false, false, false, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "新手指南", false, false, false, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.30f, 0.42f, false, 0.0f, 0.0f },
@@ -82,12 +84,14 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "elem_core", "prim_fire", "still_water", "life_sprout", "root_weave",
     "judge_scale", "gold_crown", "judge_tome", "scale_glass", "cycle_mark",
     "abyss_prism", "ancient_totem", "echo_rune", "old_bones", "eyeless", "arcane_fireball",
+    "arena_shell", "target_dummy",
     "arcane_freeze", "arcane_heal",
     "guide_book", "clue",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
 
 bool inCreative(uint8_t id) {
+    if (id == ITEM_TARGET) return true;
     if (id >= ITEM_ELEM_CORE) return false;
     switch (id) {
         case AIR:
@@ -104,6 +108,10 @@ bool inCreative(uint8_t id) {
 
 struct BedrockStrategy : BlockStrategy {
     bool canBreak(uint8_t) const override { return false; }
+};
+struct ShellStrategy : BlockStrategy {
+    bool canBreak(uint8_t) const override { return false; }
+    bool canPlace(uint8_t) const override { return false; }
 };
 struct UnplaceableStrategy : BlockStrategy {
     bool canPlace(uint8_t) const override { return false; }
@@ -161,6 +169,7 @@ struct PlayerStrategy : EntityStrategy {
 };
 
 BedrockStrategy g_bedrock;
+ShellStrategy g_shell;
 UnplaceableStrategy g_unplaceable;
 LogStrategy g_log;
 ShrubStemStrategy g_shrubStem;
@@ -168,7 +177,10 @@ GrassTuftStrategy g_grassTuft;
 PlayerStrategy g_player;
 
 BlockStrategy* strategyFor(int id) {
-    if (id >= ITEM_ELEM_CORE) return &g_unplaceable;
+    if (id == ARENA_SHELL) return &g_shell;
+    if (id == ITEM_TARGET) return &g_unplaceable;
+    if (id == ITEM_ARCANE_FIREBALL) return &g_unplaceable;
+    if (id >= ITEM_ELEM_CORE && id <= ITEM_EYELESS) return &g_unplaceable;
     switch (id) {
         case BEDROCK:    return &g_bedrock;
         case STICK:
