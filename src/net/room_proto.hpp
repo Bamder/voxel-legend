@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609290101u;
+constexpr uint32_t kRoomProto = 2609290103u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -620,17 +620,31 @@ struct CombatEventNet {
 };
 
 inline constexpr uint8_t kStatusBurning = 1u;
+inline constexpr uint8_t kStatusFrozen = 2u;
+inline constexpr uint8_t kStatusHealing = 4u;
+
+enum class ArcaneProjectileKind : uint8_t { Fireball = 1, Freeze = 2 };
 
 struct ArcaneProjectileNet {
     uint32_t id = 0, owner = 0;
+    ArcaneProjectileKind kind = ArcaneProjectileKind::Fireball;
     float x = 0, y = 0, z = 0;
     float vx = 0, vy = 0, vz = 0;
 };
 
-enum class ArcaneEventKind : uint8_t { FireballExplode = 1 };
+enum class ArcaneEventKind : uint8_t { FireballExplode = 1, FreezeImpact = 2, HealPulse = 3 };
 struct ArcaneEventNet {
     uint32_t serial = 0;
     ArcaneEventKind kind = ArcaneEventKind::FireballExplode;
+    float x = 0, y = 0, z = 0;
+};
+
+struct ClueTargetNet {
+    bool active = false;
+    uint8_t stage = 0;
+    uint8_t destination = 0; // clue::Destination wire value: 1..3
+    uint8_t rewardItem = AIR;
+    bool bossRewardClaimed = false;
     float x = 0, y = 0, z = 0;
 };
 
@@ -655,6 +669,7 @@ struct PlayDeltaNet {
     std::vector<CombatEventNet> combat;
     std::vector<ArcaneProjectileNet> projectiles;
     std::vector<ArcaneEventNet> arcane;
+    ClueTargetNet clue;
 };
 
 inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
@@ -851,6 +866,7 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
     for (uint8_t i = 0; i < nprojectiles; ++i) {
         const auto& projectile = d.projectiles[i];
         b.u32(projectile.id); b.u32(projectile.owner);
+        b.u8((uint8_t)projectile.kind);
         b.f32(projectile.x); b.f32(projectile.y); b.f32(projectile.z);
         b.f32(projectile.vx); b.f32(projectile.vy); b.f32(projectile.vz);
     }
@@ -860,6 +876,12 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
         const auto& event = d.arcane[i];
         b.u32(event.serial); b.u8((uint8_t)event.kind);
         b.f32(event.x); b.f32(event.y); b.f32(event.z);
+    }
+    b.u8(d.clue.active ? 1 : 0);
+    if (d.clue.active) {
+        b.u8(d.clue.stage); b.u8(d.clue.destination); b.u8(d.clue.rewardItem);
+        b.u8(d.clue.bossRewardClaimed ? 1 : 0);
+        b.f32(d.clue.x); b.f32(d.clue.y); b.f32(d.clue.z);
     }
     return b.data();
 }
@@ -912,7 +934,8 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
             return false;
         for (float& health : pl.health)
             if (!Buf::f32(p, end, health) || !std::isfinite(health) || health < 0 || health > 1) return false;
-        if (!Buf::u8(p, end, pl.status) || (pl.status & ~kStatusBurning) ||
+        if (!Buf::u8(p, end, pl.status) ||
+            (pl.status & ~(kStatusBurning | kStatusFrozen | kStatusHealing)) ||
             !Buf::u8(p, end, pl.hitFlash) || pl.hitFlash > 1 ||
             !Buf::u8(p, end, dead) || dead > 1) return false;
         pl.spectator = spec != 0;
@@ -1115,8 +1138,11 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
     if (!Buf::u8(p, end, nprojectiles) || nprojectiles > 64) return false;
     d.projectiles.resize(nprojectiles);
     for (auto& projectile : d.projectiles) {
+        uint8_t kind = 0;
         if (!Buf::u32(p, end, projectile.id) || !projectile.id ||
             !Buf::u32(p, end, projectile.owner) || !projectile.owner ||
+            !Buf::u8(p, end, kind) || kind < (uint8_t)ArcaneProjectileKind::Fireball ||
+            kind > (uint8_t)ArcaneProjectileKind::Freeze ||
             !Buf::f32(p, end, projectile.x) || !Buf::f32(p, end, projectile.y) ||
             !Buf::f32(p, end, projectile.z) || !Buf::f32(p, end, projectile.vx) ||
             !Buf::f32(p, end, projectile.vy) || !Buf::f32(p, end, projectile.vz) ||
@@ -1125,6 +1151,7 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
             std::fabs(projectile.x) > 100000 || std::fabs(projectile.y) > 100000 ||
             std::fabs(projectile.z) > 100000 || std::fabs(projectile.vx) > 1000 ||
             std::fabs(projectile.vy) > 1000 || std::fabs(projectile.vz) > 1000) return false;
+        projectile.kind = (ArcaneProjectileKind)kind;
     }
     uint8_t narcane = 0;
     if (!Buf::u8(p, end, narcane) || narcane > 32) return false;
@@ -1132,12 +1159,28 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
     for (auto& event : d.arcane) {
         uint8_t kind = 0;
         if (!Buf::u32(p, end, event.serial) || !event.serial || !Buf::u8(p, end, kind) ||
-            kind != (uint8_t)ArcaneEventKind::FireballExplode ||
+            kind < (uint8_t)ArcaneEventKind::FireballExplode ||
+            kind > (uint8_t)ArcaneEventKind::HealPulse ||
             !Buf::f32(p, end, event.x) || !Buf::f32(p, end, event.y) || !Buf::f32(p, end, event.z) ||
             !std::isfinite(event.x) || !std::isfinite(event.y) || !std::isfinite(event.z) ||
             std::fabs(event.x) > 100000 || std::fabs(event.y) > 100000 ||
             std::fabs(event.z) > 100000) return false;
         event.kind = (ArcaneEventKind)kind;
+    }
+    uint8_t clueActive = 0;
+    if (!Buf::u8(p, end, clueActive) || clueActive > 1) return false;
+    d.clue.active = clueActive != 0;
+    if (d.clue.active) {
+        uint8_t claimed = 0;
+        if (!Buf::u8(p, end, d.clue.stage) || d.clue.stage < 1 || d.clue.stage > 32 ||
+            !Buf::u8(p, end, d.clue.destination) || d.clue.destination < 1 || d.clue.destination > 3 ||
+            !Buf::u8(p, end, d.clue.rewardItem) || d.clue.rewardItem >= BLOCK_COUNT ||
+            !Buf::u8(p, end, claimed) || claimed > 1 ||
+            !Buf::f32(p, end, d.clue.x) || !Buf::f32(p, end, d.clue.y) || !Buf::f32(p, end, d.clue.z) ||
+            !std::isfinite(d.clue.x) || !std::isfinite(d.clue.y) || !std::isfinite(d.clue.z) ||
+            std::fabs(d.clue.x) > 100000 || std::fabs(d.clue.y) > 100000 ||
+            std::fabs(d.clue.z) > 100000) return false;
+        d.clue.bossRewardClaimed = claimed != 0;
     }
     return true;
 }

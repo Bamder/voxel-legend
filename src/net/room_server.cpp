@@ -11,6 +11,7 @@
 #include "../core/config.hpp"
 #include "../world/animation.hpp"
 #include "../world/arcane.hpp"
+#include "../world/clue.hpp"
 #include "../world/combat.hpp"
 #include "../world/world.hpp"
 #include "../world/matchmap.hpp"
@@ -82,7 +83,10 @@ struct SClient {
     room_inventory::State inventory;
     combat::MeleeState melee;
     arcane::CastState fireball;
+    arcane::CastState freezeCast;
+    arcane::CastState healCast;
     std::vector<arcane::Burning> burning;
+    arcane::Frozen frozen;
     NetConn conn;
     uint32_t id = 0;
     std::string name;
@@ -112,6 +116,7 @@ struct SClient {
     uint32_t combatAck = 0;
     uint32_t arcaneAck = 0;
     uint32_t hitFlashUntil = 0;
+    uint32_t healFlashUntil = 0;
     std::string animName = "idle";
     float animClock = 0;
     uint8_t animClip = anim::kNetIdle;
@@ -138,6 +143,12 @@ void slog(FILE* f, const char* msg) {
     if (!f) return;
     fprintf(f, "%s\n", msg);
     fflush(f);
+}
+
+bool inventoryHas(const room_inventory::State& inventory, uint8_t item) {
+    for (const ItemSlot slot : inventory.slots)
+        if (!slot.empty() && slot.block == item) return true;
+    return false;
 }
 
 void setNonBlock(SOCKET s) {
@@ -638,6 +649,8 @@ PlayerPoseNet poseOf(const SClient& o, uint32_t serverTick) {
     for (int i = 0; i < vitals::Count; ++i) pose.health[i] = o.body.player.vitals.limb[i].health;
     for (const auto& status : o.burning)
         if (arcane::burning(status, serverTick)) { pose.status |= kStatusBurning; break; }
+    if (arcane::frozen(o.frozen, serverTick)) pose.status |= kStatusFrozen;
+    if (serverTick < o.healFlashUntil) pose.status |= kStatusHealing;
     pose.hitFlash = serverTick < o.hitFlashUntil ? 1 : 0;
     pose.dead = o.body.player.dead;
     return pose;
@@ -731,6 +744,9 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     uint32_t nextProjectileId = 1;
     std::deque<std::pair<uint32_t, ArcaneEventNet>> arcaneEvents;
     uint32_t nextArcaneSerial = 1;
+    // Building generation will bind its placed clue drops to this match-owned
+    // director. Until it does, no unbound ITEM_CLUE can advance progression.
+    clue::Director clueDirector;
 
     auto broadcastDeploy = [&]() {
         for (SClient& c : clients) {
@@ -798,6 +814,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         break;
                     }
                     c.spectator = (c.team == 0);
+                    if (!c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams) {
+                        room_inventory::add(c.inventory, ITEM_GUIDE_BOOK, 1);
+                        if (clueDirector.targetFor(c.team).active)
+                            room_inventory::add(c.inventory, ITEM_CLUE, 1);
+                    }
                     c.id = nextId++;
                     c.known = true;
                     hadClient = true;
@@ -846,9 +867,20 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     if (in.layoutSequence)
                         room_inventory::acceptLayout(c.inventory, in.layoutSequence,
                                                      in.layoutBaseRevision, in.layout);
-                    if (in.pickupSequence && !c.spectator && c.landed && !c.body.player.dead)
-                        room_inventory::pickup(c.inventory, in.pickupSequence, world, in.pickupDrop,
-                                               c.body.player.eye(), c.body.player.pos);
+                    if (in.pickupSequence && !c.spectator && c.landed && !c.body.player.dead) {
+                        const loot::Drop* pendingDrop = world.dropById(in.pickupDrop);
+                        bool clueDrop = pendingDrop && pendingDrop->item == ITEM_CLUE;
+                        bool routeAllows = !clueDrop || clueDirector.canPickup(in.pickupDrop, c.team);
+                        if (routeAllows && room_inventory::pickup(c.inventory, in.pickupSequence, world,
+                                in.pickupDrop, c.body.player.eye(), c.body.player.pos) && clueDrop &&
+                            clueDirector.claimPickup(in.pickupDrop, c.team)) {
+                            for (SClient& teammate : clients) {
+                                if (!teammate.known || teammate.team != c.team ||
+                                    inventoryHas(teammate.inventory, ITEM_CLUE)) continue;
+                                room_inventory::add(teammate.inventory, ITEM_CLUE, 1);
+                            }
+                        }
+                    }
                     c.heldL = room_inventory::held(c.inventory, c.body.player.vitals, c.selectedLeft);
                     c.heldR = room_inventory::held(c.inventory, c.body.player.vitals,
                                                    cfg::HAND_SLOTS + c.selectedRight);
@@ -893,24 +925,74 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             combat::EntityCategory::Player};
                         bool blocked = combatBusy || attackAccepted || c.melee.pending ||
                             in.mineCharge > 0.0f || in.mineCooldown > 0.0f ||
-                            in.carried != AIR || projectiles.size() >= 64;
-                        if (arcane::beginFireball(c.fireball, in.castSequence, serverTick, actor,
-                                                 c.body.player.vitals, hand, owned, blocked) &&
-                            room_inventory::consume(c.inventory, slot, ITEM_ARCANE_FIREBALL, 1)) {
+                            in.carried != AIR;
+                        auto spawnProjectile = [&](bool freezeSpell) {
                             uint32_t projectileId = nextProjectileId++;
                             if (!nextProjectileId) nextProjectileId = 1;
                             Vec3 direction = c.body.player.lookDir();
-                            auto projectile = arcane::makeFireball(projectileId, c.id, in.castSequence,
-                                c.team, c.body.player.eye() + direction * 0.45f, direction, serverTick);
+                            auto projectile = freezeSpell
+                                ? arcane::makeFreeze(projectileId, c.id, in.castSequence, c.team,
+                                    c.body.player.eye() + direction * 0.45f, direction, serverTick)
+                                : arcane::makeFireball(projectileId, c.id, in.castSequence, c.team,
+                                    c.body.player.eye() + direction * 0.45f, direction, serverTick);
                             if (projectile.id) {
                                 projectiles.push_back(projectile);
                                 castAccepted = true;
-                                c.strikeKind = kStrikePunch;
-                                c.strikeCharge = 0.18f;
-                                c.strikeCool = 0.25f;
-                                c.mineCharge = 0.18f;
-                                c.mineCooldown = 0.0f;
                             }
+                        };
+                        if (owned == ITEM_ARCANE_FIREBALL &&
+                            arcane::beginFireball(c.fireball, in.castSequence, serverTick, actor,
+                                c.body.player.vitals, hand, owned, blocked || projectiles.size() >= 64) &&
+                            room_inventory::consume(c.inventory, slot, ITEM_ARCANE_FIREBALL, 1)) {
+                            spawnProjectile(false);
+                        } else if (owned == ITEM_ARCANE_FREEZE &&
+                            arcane::beginFreeze(c.freezeCast, in.castSequence, serverTick, actor,
+                                c.body.player.vitals, hand, owned, blocked || projectiles.size() >= 64) &&
+                            room_inventory::consume(c.inventory, slot, ITEM_ARCANE_FREEZE, 1)) {
+                            spawnProjectile(true);
+                        } else if (owned == ITEM_ARCANE_HEAL) {
+                            SClient* healTarget = nullptr;
+                            Vec3 origin = c.body.player.eye();
+                            Vec3 direction = c.body.player.lookDir();
+                            float obstruction = arcane::kHealRange + .01f;
+                            IVec3 hitBlock{}, previous{}; Vec3 normal{};
+                            world.raycast(origin, direction, arcane::kHealRange, hitBlock, previous,
+                                          normal, nullptr, &obstruction);
+                            std::optional<combat::LimbHit> bestHit;
+                            for (SClient& target : clients) {
+                                if (target.id == c.id || target.team != c.team || target.spectator ||
+                                    !target.landed || target.fade > 0 || target.body.player.dead ||
+                                    !combat::canHealPlayer(target.body.player.vitals)) continue;
+                                auto hit = combat::rayPlayer(origin, direction, target.body.player.pos,
+                                    target.body.player.bodyYaw, arcane::kHealRange, obstruction);
+                                if (hit && (!bestHit || hit->distance < bestHit->distance)) {
+                                    bestHit = hit;
+                                    healTarget = &target;
+                                }
+                            }
+                            if (!healTarget && combat::canHealPlayer(c.body.player.vitals)) healTarget = &c;
+                            bool healBlocked = blocked || !healTarget;
+                            if (arcane::beginHeal(c.healCast, in.castSequence, serverTick, actor,
+                                    c.body.player.vitals, hand, owned, healBlocked) &&
+                                room_inventory::consume(c.inventory, slot, ITEM_ARCANE_HEAL, 1) &&
+                                combat::healPlayer(healTarget->body.player.vitals, arcane::kHealFraction)) {
+                                castAccepted = true;
+                                healTarget->healFlashUntil = serverTick + arcane::ticks(.8f);
+                                ArcaneEventNet pulse;
+                                pulse.serial = nextArcaneSerial++;
+                                if (!nextArcaneSerial) nextArcaneSerial = 1;
+                                pulse.kind = ArcaneEventKind::HealPulse;
+                                Vec3 center = healTarget->body.player.pos + Vec3{0,.9f,0};
+                                pulse.x = center.x; pulse.y = center.y; pulse.z = center.z;
+                                arcaneEvents.push_back({serverTick, pulse});
+                            }
+                        }
+                        if (castAccepted) {
+                            c.strikeKind = kStrikePunch;
+                            c.strikeCharge = 0.18f;
+                            c.strikeCool = 0.25f;
+                            c.mineCharge = 0.18f;
+                            c.mineCooldown = 0.0f;
                             c.heldL = room_inventory::held(c.inventory, c.body.player.vitals, c.selectedLeft);
                             c.heldR = room_inventory::held(c.inventory, c.body.player.vitals,
                                                            cfg::HAND_SLOTS + c.selectedRight);
@@ -1027,6 +1109,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 c.vz = 0.0f;
                                 room_body::spawn(c.body, {c.x, c.y, c.z});
                                 c.burning.clear();
+                                c.frozen = {};
+                                c.healFlashUntil = 0;
                             }
                         } else if (c.landed && c.fade > 0.0f) {
                             c.fade -= stepDt / matchmap::kDeployFade;
@@ -1043,7 +1127,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                 for (SClient& c : clients) {
                     if (!c.sentWelcome) continue;
                     if (!c.spectator) {
-                        room_body::tick(c.body, world, serverTick, c.landed, c.mineCharge > 0);
+                        room_body::tick(c.body, world, serverTick, c.landed, c.mineCharge > 0,
+                                        arcane::frozen(c.frozen, serverTick));
                         const Player& p = c.body.player;
                         c.x = p.pos.x; c.y = p.pos.y; c.z = p.pos.z;
                         c.vx = p.vel.x; c.vz = p.vel.z;
@@ -1154,50 +1239,84 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         ArcaneEventNet burst;
                         burst.serial = nextArcaneSerial++;
                         if (!nextArcaneSerial) nextArcaneSerial = 1;
-                        burst.kind = ArcaneEventKind::FireballExplode;
+                        burst.kind = projectile.kind == arcane::ProjectileKind::Freeze
+                            ? ArcaneEventKind::FreezeImpact : ArcaneEventKind::FireballExplode;
                         burst.x = impact.x; burst.y = impact.y; burst.z = impact.z;
                         arcaneEvents.push_back({serverTick, burst});
 
-                        for (SClient& target : clients) {
-                            combat::Actor victim{target.id, target.team,
-                                target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,
-                                combat::EntityCategory::Player};
-                            if (!combat::hostile(attacker, victim)) continue;
-                            Vec3 center = target.body.player.pos + Vec3{0, 0.9f, 0};
-                            float amount = arcane::explosionDamage((center - impact).length());
-                            if (amount <= 0.0f) continue;
-                            combat::DamageSource source{projectile.owner, projectile.action,
-                                ITEM_ARCANE_FIREBALL, combat::DamageCategory::Fire};
-                            auto result = combat::damagePlayer(target.body.player.vitals, source,
-                                                               {amount, 1.0f, true}, -1);
-                            if (!result.applied) continue;
-                            target.hitFlashUntil = serverTick + 4;
-                            if (result.killed) {
-                                target.body.player.dead = true;
-                                target.body.player.vel = {};
-                                target.burning.clear();
-                            } else {
-                                auto status = std::find_if(target.burning.begin(), target.burning.end(),
-                                    [&](const arcane::Burning& value) { return value.source == projectile.owner; });
-                                if (status == target.burning.end()) {
-                                    target.burning.erase(std::remove_if(target.burning.begin(), target.burning.end(),
-                                        [&](const arcane::Burning& value) { return !arcane::burning(value, serverTick); }),
-                                        target.burning.end());
-                                    if (target.burning.size() < 64) {
-                                        target.burning.push_back({});
-                                        status = target.burning.end() - 1;
+                        if (projectile.kind == arcane::ProjectileKind::Freeze) {
+                            if (hitPlayer) {
+                                combat::DamageSource source{projectile.owner, projectile.action,
+                                    ITEM_ARCANE_FREEZE, combat::DamageCategory::Frost};
+                                auto result = combat::damagePlayer(hitPlayer->body.player.vitals, source,
+                                    {arcane::kFreezeDamage, 1.0f, true}, -1);
+                                if (result.applied) {
+                                    hitPlayer->hitFlashUntil = serverTick + 4;
+                                    if (result.killed) {
+                                        hitPlayer->body.player.dead = true;
+                                        hitPlayer->body.player.vel = {};
+                                        hitPlayer->burning.clear();
+                                        hitPlayer->frozen = {};
+                                    } else {
+                                        arcane::freeze(hitPlayer->frozen, projectile.owner,
+                                                       projectile.action, serverTick);
+                                        hitPlayer->body.player.vel.x = 0.0f;
+                                        hitPlayer->body.player.vel.z = 0.0f;
+                                        hitPlayer->body.player.sprinting = false;
                                     }
+                                    CombatEventNet event;
+                                    event.serial = nextCombatSerial++;
+                                    if (!nextCombatSerial) nextCombatSerial = 1;
+                                    event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                                    event.attacker = projectile.owner; event.target = hitPlayer->id; event.limb = -1;
+                                    event.amount = (uint16_t)std::min(65535,
+                                        (int)std::lround(result.amount * 10000));
+                                    combatEvents.push_back({serverTick, event});
                                 }
-                                if (status != target.burning.end())
-                                    arcane::ignite(*status, projectile.owner, projectile.action, serverTick);
                             }
-                            CombatEventNet event;
-                            event.serial = nextCombatSerial++;
-                            if (!nextCombatSerial) nextCombatSerial = 1;
-                            event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
-                            event.attacker = projectile.owner; event.target = target.id; event.limb = -1;
-                            event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
-                            combatEvents.push_back({serverTick, event});
+                        } else {
+                            for (SClient& target : clients) {
+                                combat::Actor victim{target.id, target.team,
+                                    target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,
+                                    combat::EntityCategory::Player};
+                                if (!combat::hostile(attacker, victim)) continue;
+                                Vec3 center = target.body.player.pos + Vec3{0, 0.9f, 0};
+                                float amount = arcane::explosionDamage((center - impact).length());
+                                if (amount <= 0.0f) continue;
+                                combat::DamageSource source{projectile.owner, projectile.action,
+                                    ITEM_ARCANE_FIREBALL, combat::DamageCategory::Fire};
+                                auto result = combat::damagePlayer(target.body.player.vitals, source,
+                                                                   {amount, 1.0f, true}, -1);
+                                if (!result.applied) continue;
+                                target.hitFlashUntil = serverTick + 4;
+                                if (result.killed) {
+                                    target.body.player.dead = true;
+                                    target.body.player.vel = {};
+                                    target.burning.clear();
+                                    target.frozen = {};
+                                } else {
+                                    auto status = std::find_if(target.burning.begin(), target.burning.end(),
+                                        [&](const arcane::Burning& value) { return value.source == projectile.owner; });
+                                    if (status == target.burning.end()) {
+                                        target.burning.erase(std::remove_if(target.burning.begin(), target.burning.end(),
+                                            [&](const arcane::Burning& value) { return !arcane::burning(value, serverTick); }),
+                                            target.burning.end());
+                                        if (target.burning.size() < 64) {
+                                            target.burning.push_back({});
+                                            status = target.burning.end() - 1;
+                                        }
+                                    }
+                                    if (status != target.burning.end())
+                                        arcane::ignite(*status, projectile.owner, projectile.action, serverTick);
+                                }
+                                CombatEventNet event;
+                                event.serial = nextCombatSerial++;
+                                if (!nextCombatSerial) nextCombatSerial = 1;
+                                event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                                event.attacker = projectile.owner; event.target = target.id; event.limb = -1;
+                                event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
+                                combatEvents.push_back({serverTick, event});
+                            }
                         }
                         projectiles.erase(projectiles.begin() + (std::ptrdiff_t)i);
                         continue;
@@ -1209,8 +1328,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                 for (SClient& target : clients) {
                     if (target.body.player.dead || target.spectator || !target.landed) {
                         target.burning.clear();
+                        target.frozen = {};
+                        target.healFlashUntil = 0;
                         continue;
                     }
+                    if (!arcane::frozen(target.frozen, serverTick)) target.frozen = {};
                     for (arcane::Burning& status : target.burning) {
                         if (!arcane::takeBurnDamage(status, serverTick)) continue;
                         combat::DamageSource source{status.source, status.action,
@@ -1222,6 +1344,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         if (result.killed) {
                             target.body.player.dead = true;
                             target.body.player.vel = {};
+                            target.frozen = {};
                         }
                         CombatEventNet event;
                         event.serial = nextCombatSerial++;
@@ -1232,7 +1355,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         combatEvents.push_back({serverTick, event});
                         if (result.killed) break;
                     }
-                    if (target.body.player.dead) target.burning.clear();
+                    if (target.body.player.dead) {
+                        target.burning.clear();
+                        target.frozen = {};
+                        target.healFlashUntil = 0;
+                    }
                     else target.burning.erase(std::remove_if(target.burning.begin(), target.burning.end(),
                         [&](const arcane::Burning& value) { return !arcane::burning(value, serverTick); }),
                         target.burning.end());
@@ -1253,6 +1380,17 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     d.inventoryRevision = c.inventory.revision;
                     d.inventoryLayoutAck = c.inventory.lastLayoutSequence;
                     d.inventory = c.inventory.slots;
+                    clue::Target clueTarget = clueDirector.targetFor(c.team);
+                    if (clueTarget.active) {
+                        d.clue.active = true;
+                        d.clue.stage = clueTarget.stage;
+                        d.clue.destination = (uint8_t)clueTarget.destination;
+                        d.clue.rewardItem = clueTarget.rewardItem;
+                        d.clue.bossRewardClaimed = clueTarget.bossRewardClaimed;
+                        d.clue.x = clueTarget.position.x;
+                        d.clue.y = clueTarget.position.y;
+                        d.clue.z = clueTarget.position.z;
+                    }
                     for (const auto& drop : world.drops()) {
                         if (!drop.netId || d.drops.size() >= 128) continue;
                         DropNet net;
@@ -1275,6 +1413,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         if (d.projectiles.size() >= 64) break;
                         ArcaneProjectileNet net;
                         net.id = projectile.id; net.owner = projectile.owner;
+                        net.kind = projectile.kind == arcane::ProjectileKind::Freeze
+                            ? ArcaneProjectileKind::Freeze : ArcaneProjectileKind::Fireball;
                         net.x = projectile.pos.x; net.y = projectile.pos.y; net.z = projectile.pos.z;
                         net.vx = projectile.vel.x; net.vy = projectile.vel.y; net.vz = projectile.vel.z;
                         d.projectiles.push_back(net);

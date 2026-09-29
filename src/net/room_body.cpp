@@ -37,7 +37,7 @@ void spawn(State& s, Vec3 position) {
     s.player.bodyYaw = yaw;
 }
 
-void tick(State& s, const World& world, uint32_t tick, bool active, bool mining) {
+void tick(State& s, const World& world, uint32_t tick, bool active, bool mining, bool frozen) {
     Player& p = s.player;
     p.flying = p.noclip = p.privilegeMode = false;
     if (!active || vitals::isDead(p.vitals)) {
@@ -49,11 +49,16 @@ void tick(State& s, const World& world, uint32_t tick, bool active, bool mining)
     // cannot accelerate simulation: only the server's 20Hz tick calls this.
     bool fresh = s.hasInput && uint32_t(tick - s.lastInputTick) <= 10;
     InputState in = fresh ? s.input : InputState{};
+    if (frozen) {
+        p.vel.x = 0.0f;
+        p.vel.z = 0.0f;
+        p.sprinting = false;
+    }
     int bx = (int)std::floor(p.pos.x / cfg::BLOCK_SCALE);
     int bz = (int)std::floor(p.pos.z / cfg::BLOCK_SCALE);
     if (!world.columnLoaded(floorDiv(bx, cfg::CHUNK_X), floorDiv(bz, cfg::CHUNK_Z))) return;
     for (int sub = 0; sub < 6; ++sub) {
-        p.update(world, in, cfg::FIXED_DT, limits(p, in));
+        p.update(world, in, cfg::FIXED_DT, limits(p, in, frozen));
         matchmap::clampOutside(p.pos, p.vel);
         vitals::TickInput vin;
         vin.moving = p.vel.x * p.vel.x + p.vel.z * p.vel.z > .001f;

@@ -11,6 +11,8 @@
 #include "world/hold_bind.hpp"
 #include "world/vitals.hpp"
 #include "world/combat.hpp"
+#include "world/clue.hpp"
+#include "world/guide.hpp"
 #include "world/wear.hpp"
 #include "world/matchmap.hpp"
 #include "world/ritual.hpp"
@@ -1416,6 +1418,7 @@ int main(int argc, char** argv) {
     float hitMarker = 0.0f;
     float damageFlash = 0.0f;
     uint8_t roomPlayerStatus = 0;
+    ClueTargetNet roomClueTarget{};
     std::vector<ArcaneProjectileView> arcaneProjectiles;
     std::vector<ArcaneBurstView> arcaneBursts;
     struct ChunkNetState {
@@ -1447,6 +1450,9 @@ int main(int argc, char** argv) {
     bool ritualDone = false;
     bool storyShown = false;
     bool storyOpen = false;
+    bool guideOpen = false;
+    int guidePage = 0;
+    bool clueOpen = false;
     int storyIndex = 0;
     int storyPhase = 0;
     float storyAlpha = 0.0f;
@@ -1515,6 +1521,7 @@ int main(int argc, char** argv) {
         roomAttackNext = roomAttackPending = roomCastNext = roomCastPending = 0;
         roomPickupNext = roomPickupPending = roomPickupDrop = 0;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
+        roomClueTarget = {};
         arcaneProjectiles.clear(); arcaneBursts.clear();
         lobbyHost.close();
         lobbyGuest.close();
@@ -1616,6 +1623,9 @@ int main(int argc, char** argv) {
         deployDeath = false;
         storyShown = false;
         storyOpen = false;
+        guideOpen = false;
+        clueOpen = false;
+        guidePage = 0;
         ui.noteOpen = false;
         ui.storyOpen = false;
         deployPins.clear();
@@ -1861,6 +1871,7 @@ int main(int argc, char** argv) {
         roomInventoryKnown = roomLayoutDirty = false;
         roomAttackPending = roomCastPending = roomPickupPending = roomPickupDrop = 0;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
+        roomClueTarget = {};
         arcaneProjectiles.clear(); arcaneBursts.clear();
         int team = gameClient.team();
         for (RoomPlayerView& rp : roomPlayers)
@@ -2067,6 +2078,7 @@ int main(int argc, char** argv) {
                 for (const ArcaneProjectileNet& source : d.projectiles) {
                     ArcaneProjectileView view;
                     view.id = source.id; view.owner = source.owner;
+                    view.kind = (uint8_t)source.kind;
                     view.pos = {source.x, source.y, source.z};
                     view.vel = {source.vx, source.vy, source.vz};
                     arcaneProjectiles.push_back(view);
@@ -2080,9 +2092,10 @@ int main(int argc, char** argv) {
                 for (const ArcaneEventNet& event : d.arcane) {
                     if (event.serial <= roomArcaneAck) continue;
                     roomArcaneAck = event.serial;
-                    arcaneBursts.push_back({{event.x,event.y,event.z},0.0f});
+                    arcaneBursts.push_back({(uint8_t)event.kind,{event.x,event.y,event.z},0.0f});
                     if (arcaneBursts.size() > 32) arcaneBursts.erase(arcaneBursts.begin());
                 }
+                roomClueTarget = d.clue;
                 bool layoutAnswered = roomLayoutPending && d.inventoryLayoutAck == roomLayoutPending;
                 bool acceptInventory = !roomInventoryKnown || layoutAnswered ||
                     (!roomLayoutDirty && !roomLayoutPending && d.inventoryRevision >= roomInventoryRevision);
@@ -2641,6 +2654,7 @@ int main(int argc, char** argv) {
             player.dead = false;
         }
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
+                        && !guideOpen && !clueOpen
                         && !(structureEdit && structurePicker));
         bool lookLocked = (canMove && !inventoryOpen && !(structureEdit && blockBarOpen));
 
@@ -2729,6 +2743,15 @@ int main(int argc, char** argv) {
             if ((frameCounter / 150) % 2 == 0) in.jump = true;
         }
 
+        // Frozen is authoritative on the dedicated server. Mirror the last
+        // snapshot locally only to avoid prediction jitter; view rotation is
+        // deliberately left untouched.
+        if (roomSession && (roomPlayerStatus & kStatusFrozen)) {
+            in.forward = in.back = in.left = in.right = false;
+            in.sprint = in.jump = false;
+            player.vel.x = player.vel.z = 0.0f;
+        }
+
         roomMovement = (in.forward ? kMoveForward : 0) | (in.back ? kMoveBack : 0) |
             (in.left ? kMoveLeft : 0) | (in.right ? kMoveRight : 0) |
             (in.jump ? kMoveJump : 0) | (in.sneak ? kMoveSneak : 0) | (in.sprint ? kMoveSprint : 0);
@@ -2747,7 +2770,7 @@ int main(int argc, char** argv) {
         if (spectating) ui.camMode = 0;
         prevF5 = f5;
         bool e = keyDown('E');
-        if (playing && e && !prevE && !spectating && !deploying) {
+        if (playing && e && !prevE && !spectating && !deploying && !guideOpen && !clueOpen) {
             if (structureEdit) {
                 if (!structurePicker) blockBarOpen = !blockBarOpen;
             } else if (!paused) {
@@ -2806,6 +2829,14 @@ int main(int argc, char** argv) {
             else if (deploying) {
             }
             else if (storyOpen) {
+            }
+            else if (guideOpen) {
+                guideOpen = false;
+                firstLook = true;
+            }
+            else if (clueOpen) {
+                clueOpen = false;
+                firstLook = true;
             }
             else if (inventoryOpen) {
                 if (drag.active) endDrag(inv, worn, -1, -1, drag);
@@ -2967,7 +2998,7 @@ int main(int argc, char** argv) {
         float dropT = cfg::REACH + 1.0f;
         bool entityTarget = false;
         uint8_t entityAttackHand = 1;
-        bool arcaneCastClick = false;
+        bool specialUseClick = false;
         if (playing) {
             hitOk = world.raycast(player.eye(), player.lookDir(), cfg::REACH, hit, prev, nrm, &physHit, &hitT);
             dropHit = world.raycastDrop(player.eye(), player.lookDir(), cfg::REACH, dropT);
@@ -2977,7 +3008,8 @@ int main(int argc, char** argv) {
             } else {
                 dropHit = -1;
             }
-            if (roomSession && !spectating && !player.dead && !inventoryOpen && !paused) {
+            if (roomSession && !spectating && !player.dead && !inventoryOpen && !paused &&
+                !guideOpen && !clueOpen) {
                 int rightSlot = cfg::HAND_SLOTS + ui.selectedRight;
                 int leftSlot = ui.selectedLeft;
                 uint8_t weaponItem = AIR;
@@ -3005,7 +3037,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        ui.hasTarget = hitOk && !inventoryOpen && !paused && playing && !spectating;
+        ui.hasTarget = hitOk && !inventoryOpen && !paused && !guideOpen && !clueOpen && playing && !spectating;
         ui.targetBlock = hit;
         ui.hasPlacePreview = false;
         if (ui.hasTarget && physHit < 0 && !player.dead && !carry.empty()
@@ -3019,8 +3051,9 @@ int main(int argc, char** argv) {
         }
         ui.targetFace = hitOk ? world.faceFromHitNormal(nrm) : 0;
         ui.targetPhys = hitOk ? physHit : -1;
-        ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && playing && !spectating) ? dropHit : -1;
-        if (roomSession && entityTarget && lmb && !prevLmb && !roomAttackPending) {
+        ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
+                         playing && !spectating) ? dropHit : -1;
+        if (roomSession && entityTarget && lmb && !prevLmb && !roomAttackPending && !guideOpen && !clueOpen) {
             if (!++roomAttackNext) ++roomAttackNext;
             roomAttackPending = roomAttackNext;
             roomAttackHand = entityAttackHand;
@@ -3029,22 +3062,42 @@ int main(int argc, char** argv) {
             !deploying && !storyOpen && !structureEdit && !spectating && !player.dead && carry.empty()) {
             int rightSlot = cfg::HAND_SLOTS + ui.selectedRight;
             int leftSlot = ui.selectedLeft;
-            int castSlot = -1;
-            uint8_t castHand = 1;
+            int useSlot = -1;
+            uint8_t useHand = 1;
+            auto specialItem = [](uint8_t item) {
+                return item == ITEM_ARCANE_FIREBALL || item == ITEM_ARCANE_FREEZE ||
+                       item == ITEM_ARCANE_HEAL || item == ITEM_GUIDE_BOOK || item == ITEM_CLUE;
+            };
             if (rightSlot >= cfg::HAND_SLOTS && rightSlot < cfg::HOTBAR_SLOTS &&
-                inv[rightSlot].block == ITEM_ARCANE_FIREBALL) {
-                castSlot = rightSlot;
-            } else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS &&
-                       inv[leftSlot].block == ITEM_ARCANE_FIREBALL) {
-                castSlot = leftSlot;
-                castHand = 0;
+                specialItem(inv[rightSlot].block)) {
+                useSlot = rightSlot;
+            } else if (leftSlot >= 0 && leftSlot < cfg::HAND_SLOTS && specialItem(inv[leftSlot].block)) {
+                useSlot = leftSlot;
+                useHand = 0;
             }
-            if (castSlot >= 0) {
-                arcaneCastClick = true;
-                if (!roomCastPending && combat::slotUsable(player.vitals, castSlot)) {
-                    if (!++roomCastNext) ++roomCastNext;
-                    roomCastPending = roomCastNext;
-                    roomCastHand = castHand;
+            if (useSlot >= 0) {
+                specialUseClick = true;
+                uint8_t used = inv[useSlot].block;
+                if (combat::slotUsable(player.vitals, useSlot)) {
+                    if (used == ITEM_ARCANE_FIREBALL || used == ITEM_ARCANE_FREEZE ||
+                        used == ITEM_ARCANE_HEAL) {
+                        if (!roomCastPending) {
+                            if (!++roomCastNext) ++roomCastNext;
+                            roomCastPending = roomCastNext;
+                            roomCastHand = useHand;
+                        }
+                    } else if (used == ITEM_GUIDE_BOOK) {
+                        guidePage = 0;
+                        guideOpen = true;
+                        clueOpen = false;
+                        roomMovement = 0;
+                        in = InputState{};
+                    } else if (used == ITEM_CLUE) {
+                        clueOpen = true;
+                        guideOpen = false;
+                        roomMovement = 0;
+                        in = InputState{};
+                    }
                 }
             }
         }
@@ -3063,7 +3116,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating && !structureEdit) {
+        if (fPressed && !paused && !ui.matEditorOpen && playing && !player.dead && !spectating &&
+            !structureEdit && !guideOpen && !clueOpen) {
             if (!inventoryOpen && !carry.empty()) {
                 if (!roomSession) dropCarriedBlock(world, player, carry);
             } else if (!inventoryOpen && ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
@@ -3586,6 +3640,17 @@ int main(int argc, char** argv) {
                         else if (ui.menuHover == 3) leaveWorld();
                     }
                 }
+            } else if (guideOpen) {
+                if (lmb && !prevLmb) {
+                    if (ui.guidePrevHover && guidePage > 0) --guidePage;
+                    else if (ui.guideNextHover && guidePage + 1 < guide::kPageCount) ++guidePage;
+                    else if (ui.guideCloseHover) { guideOpen = false; firstLook = true; }
+                }
+            } else if (clueOpen) {
+                if (lmb && !prevLmb && ui.clueCloseHover) {
+                    clueOpen = false;
+                    firstLook = true;
+                }
             } else if (spectating) {
                 inventoryOpen = false;
                 player.strikeName.clear();
@@ -3781,7 +3846,7 @@ int main(int argc, char** argv) {
                     player.strikeName.clear();
                     player.pickRaised = false;
                 }
-                if (!structureEdit && rmb && !prevRmb && hitOk && !arcaneCastClick) {
+                if (!structureEdit && rmb && !prevRmb && hitOk && !specialUseClick) {
                     if (roomSession && !combat::slotUsable(player.vitals, ui.selectedSlot)) {
                         // A destroyed right hand preserves the slot but cannot use it.
                     } else
@@ -3867,7 +3932,9 @@ int main(int argc, char** argv) {
             while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS && !deploying && !storyOpen) {
                 // Local motion is prediction only; server snapshots correct it.
                 player.update(world, in, cfg::FIXED_DT,
-                    roomSession && !spectating && !structureEdit ? room_body::limits(player, in) : MovementLimits{});
+                    roomSession && !spectating && !structureEdit
+                        ? room_body::limits(player, in, (roomPlayerStatus & kStatusFrozen) != 0)
+                        : MovementLimits{});
                 if (roomSession && !structureEdit)
                     matchmap::clampOutside(player.pos, player.vel);
                 if (!roomSession) world.treeFallPhysics(cfg::FIXED_DT);
@@ -3982,7 +4049,7 @@ int main(int argc, char** argv) {
         ui.tickSpeed = tickSpeed;
         ui.humidityMode = roomSession ? false : humidityMode;
         ui.privilegeMode = (roomSession && !structureEdit) ? false : player.privilegeMode;
-        ui.hideAvatar = structureEdit || deploying || storyOpen;
+        ui.hideAvatar = structureEdit || deploying || storyOpen || guideOpen || clueOpen;
         ui.deploying = deploying;
         ui.deployPixels = deploying ? &deployPixels : nullptr;
         ui.deployStamp = deployStamp;
@@ -4040,6 +4107,24 @@ int main(int argc, char** argv) {
             if (storyIndex >= 0 && storyIndex < ritual::storyLineCount(rid))
                 ui.storySentence = ritual::storyLine(rid, storyIndex);
         }
+        if (guidePage < 0) guidePage = 0;
+        if (guidePage >= guide::kPageCount) guidePage = guide::kPageCount - 1;
+        ui.guideOpen = guideOpen && playing;
+        ui.guidePage = guidePage;
+        ui.guidePageCount = guide::kPageCount;
+        ui.guideTitle = guide::pageTitle(guidePage);
+        ui.guideLineCount = guide::pageLineCount(guidePage);
+        for (int i = 0; i < 7; ++i)
+            ui.guideLines[i] = i < ui.guideLineCount ? guide::pageLine(guidePage, i) : "";
+        ui.clueOpen = clueOpen && playing;
+        ui.clueTargetActive = roomClueTarget.active;
+        ui.clueStage = roomClueTarget.stage;
+        ui.clueDestination = roomClueTarget.active
+            ? clue::destinationName((clue::Destination)roomClueTarget.destination) : "";
+        ui.clueReward = roomClueTarget.active && roomClueTarget.rewardItem != AIR
+            ? blockOf(roomClueTarget.rewardItem).name : "";
+        ui.cluePosition = {roomClueTarget.x, roomClueTarget.y, roomClueTarget.z};
+        ui.clueBossRewardClaimed = roomClueTarget.bossRewardClaimed;
         ui.noteRitual = -1;
         ui.noteDone = ritualDone;
         ui.noteLineCount = 0;

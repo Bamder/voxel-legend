@@ -26,7 +26,7 @@ bool Spawner::validPosition(Vec3 p) const {
 }
 
 bool Spawner::spawnItemAt(Vec3 position, ItemSlot item) {
-    if (!validPosition(position) || !validStack(item.block, item.count)) return false;
+    if (item.block == ITEM_CLUE || !validPosition(position) || !validStack(item.block, item.count)) return false;
     world_.spawnDrop(position, item.block, item.count, true);
     return true;
 }
@@ -36,7 +36,7 @@ bool Spawner::spawnRandomLootAt(Vec3 position, std::span<const Entry> table) {
     uint32_t total = 0;
     // Reject the entire malformed table before drawing or spawning anything.
     for (const auto& entry : table) {
-        if (!entry.weight || entry.minCount > entry.maxCount ||
+        if (entry.item == ITEM_CLUE || !entry.weight || entry.minCount > entry.maxCount ||
             !validStack(entry.item, entry.minCount) || !validStack(entry.item, entry.maxCount)) return false;
         total += entry.weight;
     }
@@ -49,5 +49,14 @@ bool Spawner::spawnRandomLootAt(Vec3 position, std::span<const Entry> table) {
         choice -= entry.weight;
     }
     return false;
+}
+
+uint32_t Spawner::spawnClueAt(Vec3 position, clue::Director& director, const clue::Link& link) {
+    if (!validPosition(position) || !clue::validLink(link)) return 0;
+    uint32_t dropId = world_.spawnDrop(position, ITEM_CLUE, 1, true);
+    if (!dropId) return 0;
+    if (director.bindDrop(dropId, link)) return dropId;
+    world_.takeDropCountById(dropId, 1);
+    return 0;
 }
 }

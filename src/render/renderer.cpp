@@ -1143,8 +1143,11 @@ void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& 
     for (const ArcaneProjectileView& projectile : ui.arcaneProjectiles) {
         float pulse = 0.5f + 0.5f * std::sin(ui.timeOfDay * 0.09f + projectile.id * 1.7f);
         float core = 0.18f + pulse * 0.035f;
-        drawOutlineAt(vp, eye, projectile.pos, {core,core,core}, X,Y,Z, 1.0f,.78f,.08f,1.0f);
-        drawOutlineAt(vp, eye, projectile.pos, {core*.58f,core*.58f,core*.58f}, X,Y,Z, 1.0f,.20f,.02f,1.0f);
+        bool ice = projectile.kind == 2;
+        drawOutlineAt(vp, eye, projectile.pos, {core,core,core}, X,Y,Z,
+                      ice ? .62f : 1.0f, ice ? .91f : .78f, ice ? 1.0f : .08f, 1.0f);
+        drawOutlineAt(vp, eye, projectile.pos, {core*.58f,core*.58f,core*.58f}, X,Y,Z,
+                      ice ? .94f : 1.0f, ice ? 1.0f : .20f, ice ? 1.0f : .02f, 1.0f);
         Vec3 back = projectile.vel.normalized();
         for (int i = 0; i < 7; ++i) {
             float along = 0.12f + i * 0.105f;
@@ -1152,22 +1155,42 @@ void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& 
             float wobble = std::sin(ui.timeOfDay * .15f + projectile.id + i * 1.9f) * .035f;
             Vec3 at = projectile.pos - back * along + Vec3{0,wobble,0};
             drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          1.0f, i < 3 ? .46f : .16f, .02f, .82f - i * .08f);
+                          ice ? .48f : 1.0f, ice ? .82f : (i < 3 ? .46f : .16f),
+                          ice ? 1.0f : .02f, .82f - i * .08f);
         }
     }
 
     for (const ArcaneBurstView& burst : ui.arcaneBursts) {
         float u = clampf(burst.age / .65f, 0.0f, 1.0f);
         float alpha = 1.0f - u;
+        if (burst.kind == 3) {
+            float shell = .25f + u * 1.15f;
+            drawOutlineAt(vp, eye, burst.pos + Vec3{0,u*.7f,0}, {shell,.08f,shell}, X,Y,Z,
+                          .30f,1.0f,.38f,alpha);
+            for (int i = 0; i < 12; ++i) {
+                float angle = i * .523599f + u * .7f;
+                float radius = .18f + u * (.45f + (i % 3) * .10f);
+                Vec3 at = burst.pos + Vec3{std::cos(angle)*radius,
+                    .1f + u*(.8f + (i % 4)*.23f), std::sin(angle)*radius};
+                float size = .07f + (i % 2) * .025f;
+                drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
+                              (i & 1) ? 1.0f : .28f, 1.0f, (i & 1) ? .18f : .42f, alpha);
+            }
+            continue;
+        }
         float shell = .22f + u * 2.4f;
-        drawOutlineAt(vp, eye, burst.pos, {shell,shell,shell}, X,Y,Z, 1.0f,.28f,.02f,alpha);
+        bool ice = burst.kind == 2;
+        if (ice) shell = .16f + u * 1.25f;
+        drawOutlineAt(vp, eye, burst.pos, {shell,shell,shell}, X,Y,Z,
+                      ice ? .48f : 1.0f, ice ? .86f : .28f, ice ? 1.0f : .02f, alpha);
         drawOutlineAt(vp, eye, burst.pos, {shell*.62f,shell*.62f,shell*.62f}, X,Y,Z,
-                      1.0f,.82f,.12f,alpha);
+                      ice ? .92f : 1.0f, ice ? 1.0f : .82f, ice ? 1.0f : .12f,alpha);
         for (int i = 0; i < 12; ++i) {
-            Vec3 at = burst.pos + axes[i] * (u * 1.7f);
+            Vec3 at = burst.pos + axes[i] * (u * (ice ? 1.05f : 1.7f));
             float size = .16f * (1.0f - u * .55f);
             drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
-                          1.0f, (i & 1) ? .18f : .65f, .02f, alpha);
+                          ice ? .55f : 1.0f, ice ? ((i & 1) ? .82f : 1.0f) : ((i & 1) ? .18f : .65f),
+                          ice ? 1.0f : .02f, alpha);
         }
     }
 
@@ -1185,10 +1208,42 @@ void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& 
                           1.0f, i % 3 ? .18f : .72f, .01f, .9f-rise*.45f);
         }
     };
-    if (!firstPerson && !ui.spectating && !ui.hideAvatar && !ui.playerDead && (ui.playerStatus & 1u))
-        drawBurning(player.pos, 1);
+    auto drawFrozen = [&](Vec3 feet, uint32_t seed) {
+        float pulse = .72f + .18f * std::sin(ui.timeOfDay * .055f + seed);
+        drawOutlineAt(vp, eye, feet + Vec3{0,.9f,0}, {.72f,1.85f,.72f}, X,Y,Z,
+                      .42f,.78f,1.0f,pulse);
+        for (int i = 0; i < 10; ++i) {
+            float angle = seed * .17f + i * .628319f;
+            float height = .12f + (i % 4) * .38f;
+            float radius = .28f + (i % 2) * .11f;
+            Vec3 at = feet + Vec3{std::cos(angle)*radius,height,std::sin(angle)*radius};
+            float width = .055f + (i % 3) * .015f;
+            drawOutlineAt(vp, eye, at, {width,.25f + (i%3)*.08f,width}, X,Y,Z,
+                          .66f,.92f,1.0f,.95f);
+        }
+    };
+    auto drawHealing = [&](Vec3 feet, uint32_t seed) {
+        drawOutlineAt(vp, eye, feet + Vec3{0,.9f,0}, {.67f,1.8f,.67f}, X,Y,Z,
+                      .35f,1.0f,.42f,.78f);
+        for (int i = 0; i < 10; ++i) {
+            float phase = std::fmod(ui.timeOfDay * .035f + seed * .13f + i * .19f, 1.0f);
+            if (phase < 0.0f) phase += 1.0f;
+            float angle = seed * .11f + i * .628319f + phase;
+            Vec3 at = feet + Vec3{std::cos(angle)*.34f,.12f + phase*1.95f,std::sin(angle)*.34f};
+            float size = .065f + (1.0f-phase)*.035f;
+            drawOutlineAt(vp, eye, at, {size,size,size}, X,Y,Z,
+                          (i&1) ? 1.0f : .25f,1.0f,(i&1) ? .20f : .38f,.9f-phase*.3f);
+        }
+    };
+    auto drawStatuses = [&](Vec3 feet, uint32_t seed, uint8_t status) {
+        if (status & 1u) drawBurning(feet, seed);
+        if (status & 2u) drawFrozen(feet, seed);
+        if (status & 4u) drawHealing(feet, seed);
+    };
+    if (!firstPerson && !ui.spectating && !ui.hideAvatar && !ui.playerDead)
+        drawStatuses(player.pos, 1, ui.playerStatus);
     for (const RemoteAvatar& remote : ui.remotes)
-        if (!remote.spectator && !remote.dead && (remote.status & 1u)) drawBurning(remote.pos, remote.id);
+        if (!remote.spectator && !remote.dead) drawStatuses(remote.pos, remote.id, remote.status);
 
     gl::Enable(GL_CULL_FACE);
     gl::Disable(GL_BLEND);
@@ -3137,6 +3192,16 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
+    if (ui.guideOpen) {
+        drawGuide(ui);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
+    if (ui.clueOpen) {
+        drawClue(ui);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
     if (ui.matEditorOpen) {
         drawMaterialEditor(ui);
         gl::Enable(GL_DEPTH_TEST);
@@ -3535,6 +3600,88 @@ void Renderer::drawNote(UIState& ui) {
     quad(bx, by, bw, bh, 0, 0, 0, 0, hov ? 0.32f : 0.18f, hov ? 0.28f : 0.16f, hov ? 0.18f : 0.1f, 1);
     flushUI(progUI, whiteTex);
     centeredText("返回", bx + bw * 0.5f, by + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+}
+
+void Renderer::drawGuide(UIState& ui) {
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.62f);
+    float w = std::min(820.0f, (float)scrW - 48.0f);
+    float h = std::min(570.0f, (float)scrH - 48.0f);
+    float x = ((float)scrW - w) * 0.5f;
+    float y = ((float)scrH - h) * 0.5f;
+    quad(x, y, w, h, 0, 0, 0, 0, 0.07f, 0.09f, 0.08f, 0.98f);
+    quad(x + 12.0f, y + 12.0f, w - 24.0f, h - 24.0f, 0, 0, 0, 0,
+         0.14f, 0.13f, 0.10f, 0.98f);
+    flushUI(progUI, whiteTex);
+    centeredText("新手指南", x + w * 0.5f, y + 30.0f, 1.45f, 0.96f, 0.90f, 0.67f, 1.0f);
+    centeredText(ui.guideTitle, x + w * 0.5f, y + 76.0f, 1.20f, 0.86f, 0.91f, 0.82f, 1.0f);
+    for (int i = 0; i < ui.guideLineCount && i < 7; ++i)
+        drawString(ui.guideLines[i], x + 52.0f, y + 122.0f + (float)i * 42.0f,
+                   1.0f, 0.91f, 0.89f, 0.82f, 1.0f);
+    centeredText(std::to_string(ui.guidePage + 1) + " / " + std::to_string(ui.guidePageCount),
+                 x + w * 0.5f, y + h - 48.0f, 0.9f, 0.70f, 0.72f, 0.68f, 1.0f);
+
+    float bw = 116.0f, bh = 38.0f, by = y + h - 68.0f;
+    float prevX = x + 28.0f, nextX = x + w - bw - 28.0f;
+    float closeX = x + (w - bw) * 0.5f;
+    ui.guidePrevHover = ui.mouseX >= prevX && ui.mouseX < prevX + bw &&
+        ui.mouseY >= by && ui.mouseY < by + bh && ui.guidePage > 0;
+    ui.guideNextHover = ui.mouseX >= nextX && ui.mouseX < nextX + bw &&
+        ui.mouseY >= by && ui.mouseY < by + bh && ui.guidePage + 1 < ui.guidePageCount;
+    ui.guideCloseHover = ui.mouseX >= closeX && ui.mouseX < closeX + bw &&
+        ui.mouseY >= by && ui.mouseY < by + bh;
+    buttonChrome(prevX, by, bw, bh, ui.guidePrevHover, ui.guidePage > 0 ? .47f : .24f,
+                 ui.guidePage > 0 ? .47f : .24f, ui.guidePage > 0 ? .47f : .24f);
+    buttonChrome(closeX, by, bw, bh, ui.guideCloseHover);
+    buttonChrome(nextX, by, bw, bh, ui.guideNextHover,
+                 ui.guidePage + 1 < ui.guidePageCount ? .47f : .24f,
+                 ui.guidePage + 1 < ui.guidePageCount ? .47f : .24f,
+                 ui.guidePage + 1 < ui.guidePageCount ? .47f : .24f);
+    flushUI(progUI, whiteTex);
+    centeredText("上一页", prevX + bw * .5f, by + bh * .5f, .95f, 1, 1, 1, 1);
+    centeredText("关闭", closeX + bw * .5f, by + bh * .5f, .95f, 1, 1, 1, 1);
+    centeredText("下一页", nextX + bw * .5f, by + bh * .5f, .95f, 1, 1, 1, 1);
+}
+
+void Renderer::drawClue(UIState& ui) {
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.60f);
+    float w = std::min(700.0f, (float)scrW - 48.0f);
+    float h = std::min(430.0f, (float)scrH - 48.0f);
+    float x = ((float)scrW - w) * 0.5f;
+    float y = ((float)scrH - h) * 0.5f;
+    quad(x, y, w, h, 0, 0, 0, 0, 0.10f, 0.085f, 0.055f, 0.98f);
+    flushUI(progUI, whiteTex);
+    centeredText("建筑线索", x + w * 0.5f, y + 34.0f, 1.45f, 0.95f, 0.83f, 0.55f, 1.0f);
+    if (!ui.clueTargetActive) {
+        centeredText("这张线索尚未绑定目标", x + w * 0.5f, y + 150.0f,
+                     1.15f, 0.82f, 0.75f, 0.62f, 1.0f);
+        centeredText("请在建筑中拾取服务器登记的下一阶段线索", x + w * 0.5f, y + 198.0f,
+                     .92f, 0.70f, 0.68f, 0.62f, 1.0f);
+    } else {
+        centeredText("阶段 " + std::to_string(ui.clueStage) + " · " + ui.clueDestination,
+                     x + w * 0.5f, y + 106.0f, 1.15f, 0.88f, 0.84f, 0.70f, 1.0f);
+        const float invBlock = cfg::BLOCK_SCALE > 0 ? 1.0f / cfg::BLOCK_SCALE : 1.0f;
+        int bx = (int)std::floor(ui.cluePosition.x * invBlock);
+        int by = (int)std::floor(ui.cluePosition.y * invBlock);
+        int bz = (int)std::floor(ui.cluePosition.z * invBlock);
+        centeredText("目标方块坐标", x + w * 0.5f, y + 164.0f,
+                     .90f, 0.70f, 0.72f, 0.68f, 1.0f);
+        centeredText("X " + std::to_string(bx) + "    Y " + std::to_string(by) +
+                     "    Z " + std::to_string(bz), x + w * 0.5f, y + 207.0f,
+                     1.35f, 0.96f, 0.90f, 0.68f, 1.0f);
+        if (!ui.clueReward.empty())
+            centeredText("目标奖励：" + ui.clueReward, x + w * 0.5f, y + 260.0f,
+                         .95f, 0.80f, 0.84f, 0.76f, 1.0f);
+        if (ui.clueBossRewardClaimed)
+            centeredText("Boss 圣物已掉落", x + w * 0.5f, y + 300.0f,
+                         .95f, 0.55f, 0.88f, 0.55f, 1.0f);
+    }
+    float bw = 120.0f, bh = 38.0f;
+    float bx = x + (w - bw) * .5f, by = y + h - 62.0f;
+    ui.clueCloseHover = ui.mouseX >= bx && ui.mouseX < bx + bw &&
+        ui.mouseY >= by && ui.mouseY < by + bh;
+    buttonChrome(bx, by, bw, bh, ui.clueCloseHover);
+    flushUI(progUI, whiteTex);
+    centeredText("关闭", bx + bw * .5f, by + bh * .5f, .95f, 1, 1, 1, 1);
 }
 
 void Renderer::drawInventory(UIState& ui) {

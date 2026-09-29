@@ -45,10 +45,12 @@ struct RemoteAvatar {
 
 struct ArcaneProjectileView {
     uint32_t id = 0, owner = 0;
+    uint8_t kind = 1; // 1 fireball, 2 freeze
     Vec3 pos{}, vel{};
 };
 
 struct ArcaneBurstView {
+    uint8_t kind = 1; // 1 fireball, 2 freeze, 3 heal
     Vec3 pos{};
     float age = 0.0f;
 };
@@ -174,6 +176,23 @@ struct UIState {
     bool notePlaced[3] = { false, false, false };
     uint8_t noteItemId[3] = { 0, 0, 0 };
     bool noteDone = false;
+    bool guideOpen = false;
+    int guidePage = 0;
+    int guidePageCount = 0;
+    std::string guideTitle;
+    std::string guideLines[7];
+    int guideLineCount = 0;
+    bool guidePrevHover = false;
+    bool guideNextHover = false;
+    bool guideCloseHover = false;
+    bool clueOpen = false;
+    bool clueTargetActive = false;
+    int clueStage = 0;
+    std::string clueDestination;
+    std::string clueReward;
+    Vec3 cluePosition{};
+    bool clueBossRewardClaimed = false;
+    bool clueCloseHover = false;
     bool storyOpen = false;
     bool storyHold = false;
     float storyFade = 1.0f;
@@ -422,6 +441,8 @@ private:
     void drawCreateWorld(UIState& ui);
     void drawInventory(UIState& ui);
     void drawNote(UIState& ui);
+    void drawGuide(UIState& ui);
+    void drawClue(UIState& ui);
     void drawInventoryDoll(UIState& ui, float x, float y, float w, float h);
     void drawDeath(UIState& ui);
     void drawMaterialEditor(UIState& ui);

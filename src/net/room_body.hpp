@@ -14,6 +14,7 @@ InputState movement(uint8_t bits);
 MovementLimits limits(const Player& player, const InputState& input, bool frozen = false);
 bool accept(State& state, const PlayInputNet& input, uint32_t serverTick);
 void spawn(State& state, Vec3 position);
-void tick(State& state, const World& world, uint32_t serverTick, bool active, bool mining);
+void tick(State& state, const World& world, uint32_t serverTick, bool active, bool mining,
+          bool frozen = false);
 BodyStateNet snapshot(const State& state, bool landed);
 }
