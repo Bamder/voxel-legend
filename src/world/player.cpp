@@ -1,5 +1,6 @@
 #include "player.hpp"
 #include "player_model.hpp"
+#include "structure.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -139,7 +140,10 @@ void Player::moveAxis(const World& world, int axis, float delta) {
     for (int bx = x0; bx <= x1 && !hit; bx++)
         for (int by = y0; by <= y1 && !hit; by++)
             for (int bz = z0; bz <= z1 && !hit; bz++)
-                if (blocksMotion(world.getBlock(bx, by, bz))) { hitX = bx; hitY = by; hitZ = bz; hit = true; }
+                if (blocksMotion(world.getBlock(bx, by, bz)) &&
+                    !structure::isGuardianToken(bx, by, bz, world.getBlock(bx, by, bz))) {
+                    hitX = bx; hitY = by; hitZ = bz; hit = true;
+                }
 
     if (!hit) {
         world.resolvePhysPlayer(pos, vel, axis, delta, HW, HGT, onGround);
@@ -160,7 +164,9 @@ void Player::moveAxis(const World& world, int axis, float delta) {
             for (int bx = x0; bx <= x1 && clear; bx++)
                 for (int by = ny0; by <= ny1 && clear; by++)
                     for (int bz = z0; bz <= z1 && clear; bz++)
-                        if (blocksMotion(world.getBlock(bx, by, bz))) clear = false;
+                        if (blocksMotion(world.getBlock(bx, by, bz)) &&
+                            !structure::isGuardianToken(bx, by, bz, world.getBlock(bx, by, bz)))
+                            clear = false;
             if (clear) {
                 onGround = true;
                 vel.y = 0.0f;

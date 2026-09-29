@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "../core/math.hpp"
 
 class World;
 
@@ -33,6 +34,45 @@ bool isOfferingCell(World& world, int ritual, int x, int y, int z);
 // The team's three relics are all sitting in that triangle.
 bool offeringReady(World& world, int ritual);
 bool offeringPlaced(World& world, int ritual, int relic);
+
+// The relic block on a guardian platform is a hidden token, not the pickup.
+// Defeating that guardian removes the token and the caller spawns the drop.
+struct GuardianSpan {
+    int relic = -1;
+    float feetX = 0, feetY = 0, feetZ = 0;
+    float minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+    int hp = 0;
+    int maxHp = 1;
+};
+
+bool isGuardianToken(int x, int y, int z, uint8_t block);
+void collectGuardians(const World& world, std::vector<GuardianSpan>& out);
+bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, float maxDist,
+                     float& tHit, GuardianSpan& hit);
+// True on the blow that drops the relic. Writes the token cell.
+// amount is subtracted from the guardian's hit points. Zero deals no damage.
+bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, int& z);
+// Hurt dealt by one swing, after armor, resistance, and multipliers.
+int guardianStrikeHurt(uint8_t held, int relic);
+// Nearest living guardian within maxDist of pos (world units). 
+bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, GuardianSpan& out);
+const char* guardianAppearance(int relic);
+
+// Free-explore trial chamber: 255×128×255 blocks (the world is only 128 blocks tall).
+// Origin is chunk-aligned and far from the explore spawn.
+inline constexpr int kTrialX0 = 262144;
+inline constexpr int kTrialZ0 = 262144;
+inline constexpr int kTrialSpan = 255;
+inline constexpr int kTrialCX = kTrialX0 + (kTrialSpan - 1) / 2;
+inline constexpr int kTrialCZ = kTrialZ0 + (kTrialSpan - 1) / 2;
+inline constexpr int kTrialFloor = 0;
+
+// Replaces the site list with one guardian platform. Only for free explore.
+void openTrial(int relic);
+void closeTrial();
+bool trialActive();
+// Places the hidden token once the player is within radius (world units) of the ruin.
+void approachTrial(World& world, const Vec3& pos, float radius);
 
 bool inVolume(int x, int y, int z);
 bool paintFile(World& world, const std::string& path);

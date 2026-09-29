@@ -17,6 +17,7 @@
 #include "../world/wear.hpp"
 #include "../world/matchmap.hpp"
 #include "../world/structure.hpp"
+#include "../world/ritual.hpp"
 #include <algorithm>
 #include <cstdarg>
 #include <cstddef>
@@ -821,9 +822,16 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             AIR, AIR, AIR, nullptr, nullptr, 0.0f, &sky);
         }
 
+        drawGuardians(world, eye, vp, &sky);
+
         if (ui.humidityMode) drawHumidity(world, eye, vp);
 
-        if (ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
+        if (ui.targetGuardian >= 0) {
+            float hurt = clampf(ui.guardianHurt, 0.0f, 1.0f);
+            drawOutlineAt(vp, eye, ui.guardianCenter, ui.guardianSize,
+                          { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 },
+                          1.0f, 1.0f - hurt, 1.0f - hurt, 0.95f);
+        } else if (ui.targetDrop >= 0 && ui.targetDrop < (int)world.drops().size()) {
             const loot::Drop& d = world.drops()[(size_t)ui.targetDrop];
             const dropgeom::Shape& sh = dropgeom::cached(d.item);
             Vec3 box{ sh.half.x * 2.16f, sh.half.y * 2.16f, sh.half.z * 2.16f };
@@ -1638,6 +1646,59 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
     drawBound(heldRight, "right", rightClip);
     drawBound(heldLeft, "left", locClip);
     if (hugging) drawBound(carried, "right", "hold_block", 0.5f);
+    gl::Enable(GL_CULL_FACE);
+}
+
+void Renderer::drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun) {
+    std::vector<structure::GuardianSpan> guards;
+    structure::collectGuardians(world, guards);
+    if (guards.empty()) return;
+
+    static std::vector<pm::Part> parts[ritual::RelicCount];
+    static bool loaded[ritual::RelicCount]{};
+
+    gl::Enable(GL_DEPTH_TEST);
+    gl::DepthMask(GL_TRUE);
+    gl::Disable(GL_CULL_FACE);
+    for (const structure::GuardianSpan& g : guards) {
+        if (g.relic < 0 || g.relic >= ritual::RelicCount) continue;
+        if (!loaded[g.relic]) {
+            loaded[g.relic] = true;
+            const char* stem = structure::guardianAppearance(g.relic);
+            if (stem && stem[0]) {
+                std::string path = pack::entityModel(std::string("guardians/") + stem);
+                parts[g.relic] = pm::loadEntity(path.c_str()).parts;
+            }
+        }
+        if (parts[g.relic].empty()) continue;
+        Vec3 feet{ g.feetX, g.feetY, g.feetZ };
+        auto xform = [&](const pm::Part& p, float lx, float ly, float lz) -> Vec3 {
+            (void)p;
+            float rx, rz;
+            pm::lookYawXZ(lx, lz, 0.0f, rx, rz);
+            return { feet.x + rx - eye.x, feet.y + ly - eye.y, feet.z + rz - eye.z };
+        };
+        pdraw::Mesh mesh;
+        pdraw::build(parts[g.relic], xform, [](const std::string&) { return false; }, false, false, mesh);
+        if (mesh.solid.empty()) continue;
+        gl::UseProgram(progHum);
+        if (sun) {
+            gl::Uniform1f(uHumLit, 1.0f);
+            gl::Uniform3f(uHumSunDir, sun->sunDir.x, sun->sunDir.y, sun->sunDir.z);
+            gl::Uniform3f(uHumSunColor, sun->sunColor.x, sun->sunColor.y, sun->sunColor.z);
+            gl::Uniform3f(uHumAmbient, sun->ambient.x, sun->ambient.y, sun->ambient.z);
+            gl::Uniform3f(uHumFogColor, sun->fogColor.x, sun->fogColor.y, sun->fogColor.z);
+            gl::Uniform1f(uHumFogDensity, cfg::FOG_DENSITY);
+        } else {
+            gl::Uniform1f(uHumLit, 0.0f);
+        }
+        gl::UniformMatrix4fv(uHumMVP, 1, GL_FALSE, vp.m);
+        gl::BindVertexArray(humVAO);
+        gl::BindBuffer(GL_ARRAY_BUFFER, humVBO);
+        gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(mesh.solid.size() * sizeof(float)), mesh.solid.data(), GL_STREAM_DRAW);
+        gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(mesh.solid.size() / 7));
+        gl::BindVertexArray(0);
+    }
     gl::Enable(GL_CULL_FACE);
 }
 
@@ -2760,14 +2821,51 @@ void Renderer::drawSettings(UIState& ui) {
 
 void Renderer::drawDebugMenu(UIState& ui) {
     const float bw = 340.0f, bh = 42.0f;
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.6f);
+
+    if (ui.trialPick) {
+        ui.trialHover = -1;
+        ui.railHover = -1;
+        const float rowH = 34.0f;
+        const float listTop = 108.0f;
+        const float listBot = (float)scrH - 96.0f;
+        int visible = (int)((listBot - listTop) / rowH);
+        if (visible < 1) visible = 1;
+        int maxScroll = ritual::RelicCount - visible;
+        if (maxScroll < 0) maxScroll = 0;
+        if (ui.trialScroll < 0) ui.trialScroll = 0;
+        if (ui.trialScroll > maxScroll) ui.trialScroll = maxScroll;
+        const float bx = (scrW - bw) * 0.5f;
+        for (int i = 0; i < visible; i++) {
+            int idx = ui.trialScroll + i;
+            if (idx < 0 || idx >= ritual::RelicCount) break;
+            float y = listTop + i * rowH;
+            bool hover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= y && ui.mouseY < y + rowH - 4.0f;
+            if (hover) ui.trialHover = idx;
+            buttonChrome(bx, y, bw, rowH - 4.0f, hover);
+        }
+        float backY = (float)scrH - 78.0f;
+        bool backHover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= backY && ui.mouseY < backY + bh;
+        if (backHover) ui.trialHover = -2;
+        buttonChrome(bx, backY, bw, bh, backHover);
+        flushUI(progUI, whiteTex);
+        centeredText("选择守护者", scrW * 0.5f, 56.0f, 1.3f, 1, 1, 1, 1);
+        for (int i = 0; i < visible; i++) {
+            int idx = ui.trialScroll + i;
+            if (idx < 0 || idx >= ritual::RelicCount) break;
+            float y = listTop + i * rowH;
+            centeredText(ritual::relicName(idx), bx + bw * 0.5f, y + (rowH - 4.0f) * 0.5f, 1.0f, 1, 1, 1, 1);
+        }
+        centeredText("返回", bx + bw * 0.5f, backY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+        return;
+    }
+
     const float bx = (scrW - bw) * 0.5f;
     const float titleY = scrH * 0.5f - 236.0f;
     const float sliderW = 380.0f, sliderH = 14.0f;
     const float sliderX = (scrW - sliderW) * 0.5f;
     const float ts = 1.3f;
     const float gap = 6.0f;
-
-    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.6f);
 
     auto slider = [&](float y, float frac, float* rx, float* ry, float* rw, float* rh) {
         float f = clampf(frac, 0.0f, 1.0f);
@@ -2787,8 +2885,7 @@ void Renderer::drawDebugMenu(UIState& ui) {
     slider(timeY, ui.timeOfDay / (float)cfg::TICKS_PER_DAY, &ui.timeSliderX, &ui.timeSliderY, &ui.timeSliderW, &ui.timeSliderH);
 
     const float permY = scrH * 0.5f + 12.0f;
-    const float flyY = permY + bh + gap;
-    const float humY = flyY + bh + gap;
+    const float humY = permY + bh + gap;
     const float matY = humY + bh + gap;
     const float modY = matY + bh + gap;
     const float dumY = modY + bh + gap;
@@ -2799,13 +2896,10 @@ void Renderer::drawDebugMenu(UIState& ui) {
     };
 
     ui.debugHover = -1;
+    ui.railHover = -1;
     bool permHover = hitBtn(permY);
     if (permHover) ui.debugHover = 5;
     buttonChrome(bx, permY, bw, bh, permHover);
-
-    bool flyHover = hitBtn(flyY);
-    if (flyHover) ui.debugHover = 6;
-    buttonChrome(bx, flyY, bw, bh, flyHover);
 
     bool humHover = hitBtn(humY);
     if (humHover) ui.debugHover = 1;
@@ -2826,6 +2920,28 @@ void Renderer::drawDebugMenu(UIState& ui) {
     bool backHover = hitBtn(backY);
     if (backHover) ui.debugHover = 0;
     buttonChrome(bx, backY, bw, bh, backHover);
+
+    const bool showRail = (ui.privilegeMode || ui.inTrial) && !ui.roomSession && !ui.structureEdit;
+    const float aw = 46.0f, ah = 72.0f;
+    const float ax = bx + bw + 12.0f;
+    const float ay = permY;
+    const float colW = 280.0f;
+    const float colX = ax + aw + 12.0f;
+    const float spaceY = ay;
+    const float flyBtnY = spaceY + bh + gap;
+    if (showRail) {
+        bool arrowHover = ui.mouseX >= ax && ui.mouseX < ax + aw && ui.mouseY >= ay && ui.mouseY < ay + ah;
+        if (arrowHover) ui.railHover = 0;
+        buttonChrome(ax, ay, aw, ah, arrowHover);
+        if (ui.railOpen) {
+            bool spaceHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= spaceY && ui.mouseY < spaceY + bh;
+            bool flyHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= flyBtnY && ui.mouseY < flyBtnY + bh;
+            if (spaceHover) ui.railHover = 1;
+            if (flyHover) ui.railHover = 2;
+            buttonChrome(colX, spaceY, colW, bh, spaceHover);
+            buttonChrome(colX, flyBtnY, colW, bh, flyHover);
+        }
+    }
     flushUI(progUI, whiteTex);
 
     centeredText("调试菜单", scrW * 0.5f, titleY, ts, 1, 1, 1, 1);
@@ -2840,7 +2956,14 @@ void Renderer::drawDebugMenu(UIState& ui) {
     snprintf(val, sizeof(val), "%02d:%02d", hours, mins);
     drawString(val, sliderX + sliderW + 18.0f, timeY - 4.0f, 0.9f, 0.78f, 0.78f, 0.78f, 1.0f);
     centeredText(ui.privilegeMode ? "权限模式：开" : "权限模式：关", bx + bw * 0.5f, permY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
-    centeredText(ui.flying ? "飞行模式：开" : "飞行模式：关", bx + bw * 0.5f, flyY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
+    if (showRail) {
+        centeredText(ui.railOpen ? "▶" : "◀", ax + aw * 0.5f, ay + ah * 0.5f, 1.15f, 1, 1, 1, 1);
+        if (ui.railOpen) {
+            const char* spaceLabel = ui.inTrial ? "退出守护者空间" : "进入守护者空间";
+            centeredText(spaceLabel, colX + colW * 0.5f, spaceY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
+            centeredText(ui.flying ? "关闭飞行" : "开启飞行", colX + colW * 0.5f, flyBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
+        }
+    }
     std::string humLabel = std::string("湿度显示：") + (ui.humidityMode ? "开" : "关");
     centeredText(humLabel, bx + bw * 0.5f, humY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
     centeredText("材质编辑器", bx + bw * 0.5f, matY + bh * 0.5f, 1.0f, 1, 1, 1, 1);
@@ -3093,6 +3216,23 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
 
     const float cx = scrW * 0.5f;
     const float cy = scrH * 0.5f;
+    if (ui.bossNear && ui.bossMaxHp > 0 && !ui.bossName.empty()) {
+        const float barW = 420.0f;
+        const float barH = 16.0f;
+        const float barX = cx - barW * 0.5f;
+        const float barY = 52.0f;
+        float frac = clampf((float)ui.bossHp / (float)ui.bossMaxHp, 0.0f, 1.0f);
+        centeredText("守护者", cx, 16.0f, 0.72f, 0.86f, 0.70f, 0.36f, 1.0f);
+        centeredText(ui.bossName, cx, 36.0f, 1.05f, 0.96f, 0.93f, 0.84f, 1.0f);
+        quad(barX - 3.0f, barY - 3.0f, barW + 6.0f, barH + 6.0f, 0, 0, 0, 0, 0.04f, 0.03f, 0.03f, 0.88f);
+        quad(barX, barY, barW, barH, 0, 0, 0, 0, 0.22f, 0.08f, 0.08f, 0.95f);
+        if (frac > 0.0f)
+            quad(barX, barY, barW * frac, barH, 0, 0, 0, 0, 0.78f, 0.16f, 0.13f, 1.0f);
+        flushUI(progUI, whiteTex);
+        char hpBuf[48];
+        snprintf(hpBuf, sizeof(hpBuf), "%d / %d", ui.bossHp, ui.bossMaxHp);
+        centeredText(hpBuf, cx, barY + barH * 0.5f, 0.62f, 1.0f, 0.96f, 0.92f, 1.0f);
+    }
     const int n = cfg::HOTBAR_SLOTS;
     const float slot = 46.0f, gap = 4.0f;
     const float carryS = 56.0f;

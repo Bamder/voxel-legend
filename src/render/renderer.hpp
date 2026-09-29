@@ -79,6 +79,15 @@ struct UIState {
     int targetFace = 0;
     int targetPhys = -1;
     int targetDrop = -1;
+    int targetGuardian = -1; // relic index while the crosshair is on its guardian
+    Vec3 guardianCenter{ 0, 0, 0 };
+    Vec3 guardianSize{ 1, 1, 1 };
+    float guardianHurt = 0.0f; // 0 intact, 1 empty
+    bool bossNear = false;
+    int bossRelic = -1;
+    std::string bossName;
+    int bossHp = 0;
+    int bossMaxHp = 1;
     float breakProgress = 0.0f; // 0 intact .. 1 more cracks (targeted block)
     bool hasBreakOverlay = false;
     bool breakSod = false; // thinning sod overlay; dirt face stays drawn underneath
@@ -113,7 +122,13 @@ struct UIState {
     float tickSpeed = 1.0f;   // game-tick multiplier (0 = pause, up to 20x)
     float tickSliderX = 0, tickSliderY = 0, tickSliderW = 0, tickSliderH = 0;
     float timeSliderX = 0, timeSliderY = 0, timeSliderW = 0, timeSliderH = 0;
-    int debugHover = -1;      // 0 back, 1 humidity, 2 mat, 3 model, 4 dummy, 5 privilege, 6 fly
+    int debugHover = -1;      // 0 back, 1 humidity, 2 mat, 3 model, 4 dummy, 5 privilege, 6 fly, 7 trial space
+    bool inTrial = false;
+    bool trialPick = false;
+    int trialHover = -1;      // trial list: -2 back, 0..14 relic
+    int trialScroll = 0;
+    bool railOpen = false;    // 权限模式右侧第二列
+    int railHover = -1;       // 0 arrow, 1 guardian space, 2 fly
     bool humidityMode = false; // render air as red/blue humidity blocks
     bool privilegeMode = false; // 权限模式 (debug): skip survival vitals / death
     float borderFog = 0.0f;     // 0..1 screen fog in the match rim
@@ -350,6 +365,7 @@ private:
                          const anim::Clip* strike = nullptr, float strikeAt = 0.0f,
                          const Sky* sun = nullptr,
                          uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR);
+    void drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun);
     void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);
     void drawDeploy(UIState& ui);
 

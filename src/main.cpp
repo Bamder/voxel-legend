@@ -1571,8 +1571,69 @@ int main(int argc, char** argv) {
         gameTick = 0;
     };
 
+    struct TrialAnchor {
+        bool active = false;
+        Vec3 pos{ 0, 0, 0 };
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+        bool flying = false;
+    };
+    TrialAnchor trialAnchor;
+
+    auto exitTrial = [&]() {
+        if (!trialAnchor.active && !world.guardianArena()) return;
+        world.clearTrialDrops();
+        structure::closeTrial();
+        world.setGuardianArena(false);
+        if (trialAnchor.active) {
+            player.pos = trialAnchor.pos;
+            player.vel = { 0, 0, 0 };
+            player.yaw = trialAnchor.yaw;
+            player.pitch = trialAnchor.pitch;
+            player.flying = trialAnchor.flying;
+            player.syncBodyYaw();
+            trialAnchor.active = false;
+        }
+        ui.trialPick = false;
+        ui.inTrial = false;
+        debugMenuOpen = false;
+        paused = false;
+    };
+
+    auto enterTrial = [&](int relic) {
+        if (roomSession || structureEdit || !player.privilegeMode) return;
+        if (relic < 0 || relic >= ritual::RelicCount) return;
+        if (!trialAnchor.active) {
+            trialAnchor.pos = player.pos;
+            trialAnchor.yaw = player.yaw;
+            trialAnchor.pitch = player.pitch;
+            trialAnchor.flying = player.flying;
+            trialAnchor.active = true;
+        }
+        world.setGuardianArena(true);
+        world.discardGuardianArenaChunks();
+        structure::openTrial(relic);
+        world.clearTrialDrops();
+        const float S = cfg::BLOCK_SCALE;
+        int sx = structure::kTrialCX;
+        int sz = structure::kTrialCZ + 48;
+        player.pos = { (sx + 0.5f) * S, (structure::kTrialFloor + 1) * S + 0.05f, (sz + 0.5f) * S };
+        player.vel = { 0, 0, 0 };
+        player.yaw = 0.0f;
+        player.pitch = 0.0f;
+        player.syncBodyYaw();
+        world.loadGuardianArena();
+        ui.trialPick = false;
+        ui.inTrial = true;
+        debugMenuOpen = false;
+        settingsOpen = false;
+        paused = false;
+        firstLook = true;
+    };
+
     auto leaveWorld = [&]() {
         if (appScreen == AppScreen::Playing && !roomSession) {
+            exitTrial();
             world.saveAll();
             if (!noSave && !currentWorld.empty())
                 savePlayer(world.saveDir(), player, timeOfDay, inv, carry, worn, mouseSens, invertY);
@@ -2663,6 +2724,7 @@ int main(int argc, char** argv) {
                 }
                 ui.menuMessage.clear();
             } else if (ui.matEditorOpen) ui.matEditorOpen = false;
+            else if (debugMenuOpen && ui.trialPick) ui.trialPick = false;
             else if (debugMenuOpen) debugMenuOpen = false;
             else if (settingsOpen) settingsOpen = false;
             else if (deploying) {
@@ -2706,6 +2768,10 @@ int main(int argc, char** argv) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
             ui.structureScroll -= steps;
+        } else if (g_wheel != 0 && debugMenuOpen && ui.trialPick) {
+            int steps = g_wheel / 120;
+            if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
+            ui.trialScroll -= steps;
         } else if (g_wheel != 0 && structureEdit && blockBarOpen) {
             int steps = g_wheel / 120;
             if (steps == 0) steps = (g_wheel > 0) ? 1 : -1;
@@ -2836,6 +2902,50 @@ int main(int argc, char** argv) {
             } else {
                 dropHit = -1;
             }
+        }
+        if (playing && trialAnchor.active)
+            structure::approachTrial(world, player.pos, 16.0f);
+        int guardianRelic = -1;
+        structure::GuardianSpan guardianHit;
+        float guardianT = cfg::REACH + 1.0f;
+        if (playing && !inventoryOpen && !paused && !spectating && !structureEdit) {
+            if (structure::raycastGuardian(world, player.eye(), player.lookDir(), cfg::REACH, guardianT, guardianHit)) {
+                bool closerThanBlock = !hitOk || guardianT <= hitT;
+                bool closerThanDrop = dropHit < 0 || guardianT <= dropT;
+                if (closerThanBlock && closerThanDrop) {
+                    hitOk = false;
+                    physHit = -1;
+                    dropHit = -1;
+                    guardianRelic = guardianHit.relic;
+                }
+            }
+        }
+        ui.targetGuardian = guardianRelic;
+        ui.guardianHurt = 0.0f;
+        ui.bossNear = false;
+        ui.bossRelic = -1;
+        if (playing && !spectating) {
+            structure::GuardianSpan nearBoss;
+            if (structure::nearestGuardian(world, player.pos, 16.0f, nearBoss)) {
+                ui.bossNear = true;
+                ui.bossRelic = nearBoss.relic;
+                ui.bossName = ritual::relicName(nearBoss.relic);
+                ui.bossHp = nearBoss.hp;
+                ui.bossMaxHp = nearBoss.maxHp > 0 ? nearBoss.maxHp : 1;
+            }
+        }
+        if (guardianRelic >= 0 && guardianHit.maxHp > 0) {
+            ui.guardianCenter = {
+                (guardianHit.minX + guardianHit.maxX) * 0.5f,
+                (guardianHit.minY + guardianHit.maxY) * 0.5f,
+                (guardianHit.minZ + guardianHit.maxZ) * 0.5f
+            };
+            ui.guardianSize = {
+                (guardianHit.maxX - guardianHit.minX) * 1.04f,
+                (guardianHit.maxY - guardianHit.minY) * 1.04f,
+                (guardianHit.maxZ - guardianHit.minZ) * 1.04f
+            };
+            ui.guardianHurt = 1.0f - (float)guardianHit.hp / (float)guardianHit.maxHp;
         }
         ui.hasTarget = hitOk && !inventoryOpen && !paused && playing && !spectating;
         ui.targetBlock = hit;
@@ -3336,7 +3446,11 @@ int main(int argc, char** argv) {
                         mouseSens = cfg::SENS_MIN + t * (cfg::SENS_MAX - cfg::SENS_MIN);
                     }
                 } else if (debugMenuOpen) {
-                    if (lmb && !prevLmb && ui.debugHover == 0) debugMenuOpen = false; // back
+                    if (ui.trialPick) {
+                        if (lmb && !prevLmb && ui.trialHover == -2) ui.trialPick = false;
+                        else if (lmb && !prevLmb && ui.trialHover >= 0 && ui.trialHover < ritual::RelicCount)
+                            enterTrial(ui.trialHover);
+                    } else if (lmb && !prevLmb && ui.debugHover == 0) debugMenuOpen = false; // back
                     if (lmb && !prevLmb && ui.debugHover == 1) humidityMode = !humidityMode;
                     if (lmb && !prevLmb && ui.debugHover == 2) { ui.matEditorOpen = true; debugMenuOpen = false; paused = false; }
                     if (lmb && !prevLmb && ui.debugHover == 3) { launchModelEditor(); } // open the model editor
@@ -3350,19 +3464,29 @@ int main(int argc, char** argv) {
                     }
                     if (lmb && !prevLmb && ui.debugHover == 5) {
                         player.privilegeMode = !player.privilegeMode;
+                        if (!player.privilegeMode && !trialAnchor.active) ui.railOpen = false;
                     }
-                    if (lmb && !prevLmb && ui.debugHover == 6) {
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 0)
+                        ui.railOpen = !ui.railOpen;
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 1) {
+                        if (trialAnchor.active) exitTrial();
+                        else if (player.privilegeMode && !roomSession && !structureEdit) {
+                            ui.trialPick = true;
+                            ui.trialScroll = 0;
+                        }
+                    }
+                    if (!ui.trialPick && lmb && !prevLmb && ui.railHover == 2) {
                         player.flying = !player.flying;
                         if (!player.flying) player.vel.y = 0.0f;
                     }
-                    if (lmb && ui.tickSliderW > 1.0f &&
+                    if (!ui.trialPick && lmb && ui.tickSliderW > 1.0f &&
                         ui.mouseX >= ui.tickSliderX - 12.0f && ui.mouseX <= ui.tickSliderX + ui.tickSliderW + 12.0f &&
                         ui.mouseY >= ui.tickSliderY - 12.0f && ui.mouseY <= ui.tickSliderY + ui.tickSliderH + 12.0f) {
                         float t = (ui.mouseX - ui.tickSliderX) / ui.tickSliderW;
                         t = clampf(t, 0.0f, 1.0f);
                         tickSpeed = t * 20.0f;
                     }
-                    if (lmb && ui.timeSliderW > 1.0f &&
+                    if (!ui.trialPick && lmb && ui.timeSliderW > 1.0f &&
                         ui.mouseX >= ui.timeSliderX - 12.0f && ui.mouseX <= ui.timeSliderX + ui.timeSliderW + 12.0f &&
                         ui.mouseY >= ui.timeSliderY - 12.0f && ui.mouseY <= ui.timeSliderY + ui.timeSliderH + 12.0f) {
                         float t = (ui.mouseX - ui.timeSliderX) / ui.timeSliderW;
@@ -3474,6 +3598,7 @@ int main(int argc, char** argv) {
                     player.strikeName.clear();
 
                 bool canMine = false;
+                bool guardianSwing = false;
                 uint8_t heldMine = AIR;
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 0)
                     saveCurrentStructure();
@@ -3490,6 +3615,10 @@ int main(int argc, char** argv) {
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
                     world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
+                if (!structureEdit && lmb && ui.targetGuardian >= 0 && lookLocked && !player.dead) {
+                    guardianSwing = true;
+                    heldMine = inv[ui.selectedSlot].block;
+                }
                 if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
                     heldMine = inv[ui.selectedSlot].block;
                     canMine = true;
@@ -3515,10 +3644,46 @@ int main(int argc, char** argv) {
                         if (dmg <= 0.0f) canMine = false;
                     }
                 }
-                if (!canMine) {
+                if (!canMine && !guardianSwing) {
                     player.mineCharge = 0.0f;
                 } else if (player.mineCooldown > 0.0f) {
                     // Cooling down: holding or click-spam cannot skip this.
+                } else if (guardianSwing) {
+                    bool axe = heldMine != AIR && hasItemTags(heldMine, TAG_AXE);
+                    if (player.strikeName.empty()
+                        || (axe && player.strikeName != "axe_chop")
+                        || (!axe && player.strikeName != "punch")) {
+                        player.strikeName = axe ? "axe_chop" : "punch";
+                        player.pickRaised = false;
+                        player.strikeCharge = axe ? anim::axeChopSec() : 0.50f;
+                        player.strikeCool = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
+                    }
+                    player.mineCharge += dt;
+                    float need = axe ? anim::axeChopSec() : 0.50f;
+                    float recover = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
+                    if (player.mineCharge >= need) {
+                        player.mineCharge = 0.0f;
+                        player.mineCooldown = recover;
+                        int gx = 0, gy = 0, gz = 0;
+                        int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
+                        bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
+                        if (ui.bossRelic == ui.targetGuardian) {
+                            ui.bossHp -= dmg;
+                            if (ui.bossHp < 0) ui.bossHp = 0;
+                            if (ui.bossMaxHp > 0)
+                                ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
+                            if (slain) ui.bossNear = false;
+                        }
+                        if (slain) {
+                            uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
+                            world.setBlock(gx, gy, gz, AIR, true);
+                            noteRoomEdit(gx, gy, gz, AIR);
+                            const dropgeom::Shape& sh = dropgeom::cached(item);
+                            const float S = cfg::BLOCK_SCALE;
+                            Vec3 dropPos{ (gx + 0.5f) * S, gy * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                            world.spawnDrop(dropPos, item, 1, true);
+                        }
+                    }
                 } else {
                     if (player.strikeName.empty()) {
                         if (heldMine == AIR) player.strikeName = "punch";
@@ -3598,7 +3763,7 @@ int main(int argc, char** argv) {
                             uint8_t target = world.getBlock(hit.x, hit.y, hit.z);
                             plugin::BlockEvent ev{ &world, hit.x, hit.y, hit.z, target, target };
                             if (!plugin::blockStrategy(target)->onInteract(ev)) {
-                                bool relic = sel.block >= ITEM_ELEM_CORE && sel.block < BLOCK_COUNT;
+                                bool relic = sel.block >= ITEM_ELEM_CORE && sel.block <= ITEM_EYELESS;
                                 IVec3 place = hit;
                                 if (!isLiquid(world.getBlock(hit.x, hit.y, hit.z))) place = prev;
                                 int rid = ritual::assignedRitual(gameClient.team());
@@ -3761,6 +3926,8 @@ int main(int argc, char** argv) {
         ui.tickSpeed = tickSpeed;
         ui.humidityMode = roomSession ? false : humidityMode;
         ui.privilegeMode = (roomSession && !structureEdit) ? false : player.privilegeMode;
+        ui.inTrial = trialAnchor.active;
+        if (!debugMenuOpen) ui.trialPick = false;
         ui.hideAvatar = structureEdit || deploying || storyOpen;
         ui.deploying = deploying;
         ui.deployPixels = deploying ? &deployPixels : nullptr;
@@ -3909,6 +4076,7 @@ int main(int argc, char** argv) {
     }
 
     if (appScreen == AppScreen::Playing && !roomSession) {
+        exitTrial();
         world.saveAll();
         if (!noSave) savePlayer(world.saveDir(), player, timeOfDay, inv, carry, worn, mouseSens, invertY);
     }
