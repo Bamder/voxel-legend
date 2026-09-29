@@ -144,6 +144,7 @@ struct UIState {
     bool railOpen = false;    // 权限模式右侧第二列
     int railHover = -1;       // 0 arrow, 1 guardian space, 2 fly, 3 quick break
     bool quickBreak = false;  // 权限模式：左键直接破坏方块
+    float quickBreakWait = 0.0f; // seconds until the next quick break
     bool humidityMode = false; // render air as red/blue humidity blocks
     bool privilegeMode = false; // 权限模式 (debug): skip survival vitals / death
     float borderFog = 0.0f;     // 0..1 screen fog in the match rim

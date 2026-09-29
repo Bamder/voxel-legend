@@ -2672,6 +2672,10 @@ int main(int argc, char** argv) {
         if (dt > 0.1f) dt = 0.1f;
         if (dt <= 0.0f) dt = 1.0f / 60.0f;
         if (hitMarker > 0.0f) { hitMarker -= dt; if (hitMarker < 0.0f) hitMarker = 0.0f; }
+        if (ui.quickBreakWait > 0.0f) {
+            ui.quickBreakWait -= dt;
+            if (ui.quickBreakWait < 0.0f) ui.quickBreakWait = 0.0f;
+        }
         if (damageFlash > 0.0f) { damageFlash -= dt; if (damageFlash < 0.0f) damageFlash = 0.0f; }
         for (ArcaneBurstView& burst : arcaneBursts) burst.age += dt;
         arcaneBursts.erase(std::remove_if(arcaneBursts.begin(), arcaneBursts.end(),
@@ -3863,9 +3867,14 @@ int main(int argc, char** argv) {
                         player.mineCooldown = 0.0f;
                         player.strikeName.clear();
                         player.pickRaised = false;
-                        finishMinedBlock(world, inv[ui.selectedSlot].block, physHit, hit);
                         canMine = false;
                         guardianSwing = false;
+                        // A click stays down for several frames. Space the breaks so one
+                        // click removes a single block; holding keeps breaking at this rate.
+                        if (ui.quickBreakWait <= 0.0f) {
+                            finishMinedBlock(world, inv[ui.selectedSlot].block, physHit, hit);
+                            ui.quickBreakWait = 0.28f;
+                        }
                     }
                 }
                 if (!canMine && !guardianSwing) {
