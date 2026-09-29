@@ -50,8 +50,9 @@ void fillBuiltin() {
     g_item[SHIRT] = { Kind::Item, 1, (int8_t)wear::Upper };
     g_item[SHORTS] = { Kind::Item, 1, (int8_t)wear::Lower };
     g_item[SHOES] = { Kind::Item, 1, (int8_t)wear::Shoes };
-    for (int i = ITEM_ELEM_CORE; i < BLOCK_COUNT; i++)
+    for (int i = ITEM_ELEM_CORE; i <= ITEM_EYELESS; i++)
         kind((uint8_t)i, Kind::Item, 1);
+    kind(ITEM_ARCANE_FIREBALL, Kind::Item, 8);
 
     auto blk = [](uint8_t id, float h, float d) {
         g_block[id] = { h, d, 0.0f };
@@ -80,7 +81,7 @@ void fillBuiltin() {
     blk(GOLD_ORE, 5.0f, 36.0f);
     blk(DIAMOND_ORE, 6.0f, 45.0f);
     blk(BEDROCK, 100.0f, 10000.0f);
-    for (int i = ITEM_ELEM_CORE; i < BLOCK_COUNT; i++) {
+    for (int i = ITEM_ELEM_CORE; i <= ITEM_EYELESS; i++) {
         blk((uint8_t)i, 0.4f, 2.0f);
         HarvestRule relic;
         relic.used = true;

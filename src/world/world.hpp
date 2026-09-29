@@ -160,11 +160,14 @@ public:
                            float hw, float hgt, bool& onGround) const;
 
     // inPlace: sit on `pos` with no velocity. Otherwise `vel` is the initial velocity.
-    void spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace = false, Vec3 vel = { 0, 0, 0 });
+    uint32_t spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace = false, Vec3 vel = { 0, 0, 0 });
     void updateDrops(float dt);
     const std::vector<loot::Drop>& drops() const { return m_drops; }
     int raycastDrop(const Vec3& origin, const Vec3& dir, float maxDist, float& tHit) const;
     bool takeDrop(int index, uint8_t& item, uint8_t& count); // removes; returns false if gone
+    const loot::Drop* dropById(uint32_t id) const;
+    bool takeDropCountById(uint32_t id, uint8_t count);
+    void replaceNetworkDrops(const std::vector<loot::Drop>& drops);
     void setDropCount(int index, uint8_t count);
 
     // Mining durability. applyMineHit applies the break formula once; true when the block is gone.
@@ -357,6 +360,7 @@ private:
     size_t m_sodCursor = 0;   // round-robin cursor for sodTick
     std::vector<PhysicsIsland> m_phys;
     std::vector<loot::Drop> m_drops;
+    uint32_t m_nextDropId = 1;
     uint32_t m_dropRng = 0xA341316Cu;
     std::unordered_map<uint64_t, MineState> m_blockDur;
     uint32_t m_mineEpoch = 1;

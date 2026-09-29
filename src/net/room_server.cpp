@@ -7,8 +7,11 @@
 
 #include "room_net.hpp"
 #include "room_body.hpp"
+#include "room_inventory.hpp"
 #include "../core/config.hpp"
 #include "../world/animation.hpp"
+#include "../world/arcane.hpp"
+#include "../world/combat.hpp"
 #include "../world/world.hpp"
 #include "../world/matchmap.hpp"
 
@@ -76,6 +79,10 @@ struct SeenSlice {
 
 struct SClient {
     room_body::State body;
+    room_inventory::State inventory;
+    combat::MeleeState melee;
+    arcane::CastState fireball;
+    std::vector<arcane::Burning> burning;
     NetConn conn;
     uint32_t id = 0;
     std::string name;
@@ -100,6 +107,11 @@ struct SClient {
     uint8_t strikeKind = 0;
     float strikeCharge = 0, strikeCool = 0, mineCharge = 0, mineCooldown = 0;
     bool pickRaised = false;
+    uint8_t selectedLeft = 0, selectedRight = 0;
+    uint32_t attackStartedAt = 0;
+    uint32_t combatAck = 0;
+    uint32_t arcaneAck = 0;
+    uint32_t hitFlashUntil = 0;
     std::string animName = "idle";
     float animClock = 0;
     uint8_t animClip = anim::kNetIdle;
@@ -172,6 +184,8 @@ void applyMine(World& world, const PlayInputNet::MineEdit& e) {
     } else if (e.y < 0 || e.y >= cfg::WORLD_H) {
         return;
     }
+    uint8_t mined = phys < 0 ? world.getBlock(e.x, e.y, e.z)
+                             : world.getPhysBlock(phys, e.x, e.y, e.z);
     bool broke = world.applyMineHit(phys, e.x, e.y, e.z, e.tool, e.face);
     if (!broke) return;
     if (phys < 0) {
@@ -179,6 +193,15 @@ void applyMine(World& world, const PlayInputNet::MineEdit& e) {
         int cz = floorDiv(e.z, cfg::CHUNK_Z);
         world.ensureColumn(cx, cz);
         world.setBlock(e.x, e.y, e.z, AIR, false, false);
+        if (loot::isHarvestBreak(mined, e.tool)) {
+            loot::DropSpec drops[4];
+            int count = loot::harvestDrops(mined, e.tool, drops, 4);
+            Vec3 position{(e.x + .5f) * cfg::BLOCK_SCALE,
+                          (e.y + .5f) * cfg::BLOCK_SCALE,
+                          (e.z + .5f) * cfg::BLOCK_SCALE};
+            for (int i = 0; i < count; ++i)
+                world.spawnDrop(position, drops[i].item, drops[i].count, true);
+        }
     } else {
         uint8_t drop = AIR;
         world.breakPhysBlock(phys, e.x, e.y, e.z, drop);
@@ -591,7 +614,7 @@ void stepAvatar(SClient& c) {
     }
 }
 
-PlayerPoseNet poseOf(const SClient& o) {
+PlayerPoseNet poseOf(const SClient& o, uint32_t serverTick) {
     PlayerPoseNet pose;
     pose.id = o.id;
     pose.name = o.name;
@@ -612,6 +635,11 @@ PlayerPoseNet poseOf(const SClient& o) {
     pose.wearU = o.wearU;
     pose.wearL = o.wearL;
     pose.wearS = o.wearS;
+    for (int i = 0; i < vitals::Count; ++i) pose.health[i] = o.body.player.vitals.limb[i].health;
+    for (const auto& status : o.burning)
+        if (arcane::burning(status, serverTick)) { pose.status |= kStatusBurning; break; }
+    pose.hitFlash = serverTick < o.hitFlashUntil ? 1 : 0;
+    pose.dead = o.body.player.dead;
     return pose;
 }
 
@@ -697,6 +725,12 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     long long tickClock = started;
     float tickAcc = 0.0f;
     uint32_t serverTick = 0;
+    std::deque<std::pair<uint32_t, CombatEventNet>> combatEvents;
+    uint32_t nextCombatSerial = 1;
+    std::vector<arcane::Projectile> projectiles;
+    uint32_t nextProjectileId = 1;
+    std::deque<std::pair<uint32_t, ArcaneEventNet>> arcaneEvents;
+    uint32_t nextArcaneSerial = 1;
 
     auto broadcastDeploy = [&]() {
         for (SClient& c : clients) {
@@ -807,21 +841,86 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             std::fabs(in.x) > 100000 || std::fabs(in.y) > 100000 || std::fabs(in.z) > 100000) continue;
                         c.x = in.x; c.y = in.y; c.z = in.z;
                     }
-                    c.heldL = in.heldL;
-                    c.heldR = in.heldR;
+                    c.selectedLeft = in.selectedLeft;
+                    c.selectedRight = in.selectedRight;
+                    if (in.layoutSequence)
+                        room_inventory::acceptLayout(c.inventory, in.layoutSequence,
+                                                     in.layoutBaseRevision, in.layout);
+                    if (in.pickupSequence && !c.spectator && c.landed && !c.body.player.dead)
+                        room_inventory::pickup(c.inventory, in.pickupSequence, world, in.pickupDrop,
+                                               c.body.player.eye(), c.body.player.pos);
+                    c.heldL = room_inventory::held(c.inventory, c.body.player.vitals, c.selectedLeft);
+                    c.heldR = room_inventory::held(c.inventory, c.body.player.vitals,
+                                                   cfg::HAND_SLOTS + c.selectedRight);
                     c.carried = in.carried;
                     c.wearU = in.wearU;
                     c.wearL = in.wearL;
                     c.wearS = in.wearS;
-                    c.strikeKind = in.strikeKind;
-                    c.strikeCharge = in.strikeCharge;
-                    c.strikeCool = in.strikeCool;
-                    c.mineCharge = in.mineCharge;
-                    c.mineCooldown = in.mineCooldown;
-                    c.pickRaised = in.pickRaised;
+                    c.combatAck = in.combatAck;
+                    c.arcaneAck = in.arcaneAck;
+                    bool combatBusy = c.melee.pending || uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
+                    if (!combatBusy) {
+                        c.strikeKind = in.strikeKind;
+                        c.strikeCharge = in.strikeCharge;
+                        c.strikeCool = in.strikeCool;
+                        c.mineCharge = in.mineCharge;
+                        c.mineCooldown = in.mineCooldown;
+                        c.pickRaised = in.pickRaised;
+                    }
+                    bool attackAccepted = false;
+                    if (in.attackSequence) {
+                        combat::Hand hand = in.attackHand ? combat::Hand::Right : combat::Hand::Left;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t owned = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        combat::Actor actor{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (combat::beginMelee(c.melee, in.attackSequence, serverTick, actor,
+                                               c.body.player.vitals, hand, owned, false)) {
+                            attackAccepted = true;
+                            c.attackStartedAt = serverTick;
+                            c.strikeKind = owned == HAND_AXE ? kStrikeAxe : kStrikePick;
+                            c.pickRaised = false;
+                        }
+                    }
+                    bool castAccepted = false;
+                    if (in.castSequence) {
+                        combat::Hand hand = in.castHand ? combat::Hand::Right : combat::Hand::Left;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t owned = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        combat::Actor actor{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        bool blocked = combatBusy || attackAccepted || c.melee.pending ||
+                            in.mineCharge > 0.0f || in.mineCooldown > 0.0f ||
+                            in.carried != AIR || projectiles.size() >= 64;
+                        if (arcane::beginFireball(c.fireball, in.castSequence, serverTick, actor,
+                                                 c.body.player.vitals, hand, owned, blocked) &&
+                            room_inventory::consume(c.inventory, slot, ITEM_ARCANE_FIREBALL, 1)) {
+                            uint32_t projectileId = nextProjectileId++;
+                            if (!nextProjectileId) nextProjectileId = 1;
+                            Vec3 direction = c.body.player.lookDir();
+                            auto projectile = arcane::makeFireball(projectileId, c.id, in.castSequence,
+                                c.team, c.body.player.eye() + direction * 0.45f, direction, serverTick);
+                            if (projectile.id) {
+                                projectiles.push_back(projectile);
+                                castAccepted = true;
+                                c.strikeKind = kStrikePunch;
+                                c.strikeCharge = 0.18f;
+                                c.strikeCool = 0.25f;
+                                c.mineCharge = 0.18f;
+                                c.mineCooldown = 0.0f;
+                            }
+                            c.heldL = room_inventory::held(c.inventory, c.body.player.vitals, c.selectedLeft);
+                            c.heldR = room_inventory::held(c.inventory, c.body.player.vitals,
+                                                           cfg::HAND_SLOTS + c.selectedRight);
+                        }
+                    }
                     c.hasInput = true;
-                    if (!c.spectator && c.landed && !c.body.player.dead) {
-                        for (const PlayInputNet::MineEdit& e : in.mines) applyMine(world, e);
+                    if (!c.spectator && c.landed && !c.body.player.dead &&
+                        !attackAccepted && !castAccepted && !combatBusy && !c.melee.pending) {
+                        for (const PlayInputNet::MineEdit& e : in.mines)
+                            if (e.tool == c.heldR) applyMine(world, e);
                         for (const BlockEditNet& e : in.edits) applyEdit(world, e);
                         for (const PlayInputNet::BarkEdit& e : in.bark) applyBark(world, e);
                     }
@@ -927,6 +1026,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 c.vx = 0.0f;
                                 c.vz = 0.0f;
                                 room_body::spawn(c.body, {c.x, c.y, c.z});
+                                c.burning.clear();
                             }
                         } else if (c.landed && c.fade > 0.0f) {
                             c.fade -= stepDt / matchmap::kDeployFade;
@@ -936,6 +1036,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                 }
                 for (int sub = 0; sub < 6; sub++) world.treeFallPhysics(cfg::FIXED_DT);
                 world.treeFallGameTick();
+                world.updateDrops(1.0f / (float)cfg::TICKS_PER_SECOND);
                 world.sodTick(2048, serverTick);
                 world.waterTick(serverTick);
                 noteAuth(srvChunks, world);
@@ -948,8 +1049,198 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         c.vx = p.vel.x; c.vz = p.vel.z;
                         c.bodyYaw = p.bodyYaw; c.flying = false; c.sprinting = p.sprinting;
                     }
+                    if (c.body.player.dead) combat::cancelMelee(c.melee);
+                    if (combat::takeMeleeHit(c.melee, serverTick)) {
+                        combat::Hand hand = c.melee.hand;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t equipped = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        auto def = combat::weapon(c.melee.item);
+                        combat::Actor attacker{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (def && equipped == c.melee.item && attacker.active) {
+                            Vec3 origin = c.body.player.eye();
+                            Vec3 direction = c.body.player.lookDir();
+                            float obstruction = def->reach + .01f;
+                            IVec3 block{}, previous{}; Vec3 normal{};
+                            world.raycast(origin, direction, def->reach, block, previous, normal,
+                                          nullptr, &obstruction);
+                            SClient* bestTarget = nullptr;
+                            std::optional<combat::LimbHit> bestHit;
+                            for (SClient& target : clients) {
+                                combat::Actor victim{target.id, target.team,
+                                    target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,
+                                    combat::EntityCategory::Player};
+                                if (!combat::hostile(attacker, victim)) continue;
+                                auto hit = combat::rayPlayer(origin, direction, target.body.player.pos,
+                                                             target.body.player.bodyYaw, def->reach, obstruction);
+                                if (hit && (!bestHit || hit->distance < bestHit->distance)) {
+                                    bestHit = hit; bestTarget = &target;
+                                }
+                            }
+                            if (bestTarget && bestHit) {
+                                combat::DamageSource source{c.id, c.melee.action, c.melee.item,
+                                                            combat::DamageCategory::Physical};
+                                auto result = combat::damagePlayer(bestTarget->body.player.vitals,
+                                                                   source, def->damage, bestHit->limb);
+                                if (result.applied) {
+                                    bestTarget->hitFlashUntil = serverTick + 4;
+                                    if (result.killed) {
+                                        bestTarget->body.player.dead = true;
+                                        bestTarget->body.player.vel = {};
+                                    }
+                                    CombatEventNet event;
+                                    event.serial = nextCombatSerial++;
+                                    if (!nextCombatSerial) nextCombatSerial = 1;
+                                    event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                                    event.attacker = c.id; event.target = bestTarget->id;
+                                    event.limb = (int8_t)result.limb;
+                                    event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
+                                    combatEvents.push_back({serverTick, event});
+                                }
+                            }
+                        }
+                    }
+                    if (auto def = combat::weapon(c.melee.item)) {
+                        bool recovering = uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
+                        if (c.melee.pending) {
+                            c.strikeCharge = def->windup;
+                            c.strikeCool = def->recovery;
+                            c.mineCharge = (float)uint32_t(serverTick - c.attackStartedAt) / cfg::TICKS_PER_SECOND;
+                            c.mineCooldown = 0;
+                        } else if (recovering) {
+                            c.mineCharge = 0;
+                            c.mineCooldown = (float)uint32_t(c.melee.readyAt - serverTick) / cfg::TICKS_PER_SECOND;
+                        } else if (c.melee.action) {
+                            c.strikeKind = kStrikeNone; c.mineCharge = c.mineCooldown = 0;
+                            c.melee.item = AIR; c.melee.action = 0;
+                        }
+                    }
                     stepAvatar(c);
                 }
+                for (size_t i = 0; i < projectiles.size();) {
+                    arcane::Projectile& projectile = projectiles[i];
+                    if (arcane::reached(serverTick, projectile.expireAt)) {
+                        projectiles.erase(projectiles.begin() + (std::ptrdiff_t)i);
+                        continue;
+                    }
+                    Vec3 old = projectile.pos;
+                    Vec3 step = projectile.vel * (1.0f / (float)cfg::TICKS_PER_SECOND);
+                    float distance = step.length();
+                    Vec3 direction = distance > 1e-6f ? step / distance : Vec3{};
+                    float obstruction = distance + 0.01f;
+                    IVec3 block{}, previous{}; Vec3 normal{};
+                    bool hitWorld = distance > 0.0f && world.raycast(old, direction, distance,
+                        block, previous, normal, nullptr, &obstruction);
+                    SClient* hitPlayer = nullptr;
+                    float hitDistance = obstruction;
+                    combat::Actor attacker{projectile.owner, projectile.team, true,
+                                            combat::EntityCategory::Player};
+                    for (SClient& target : clients) {
+                        combat::Actor victim{target.id, target.team,
+                            target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (!combat::hostile(attacker, victim)) continue;
+                        auto hit = combat::rayPlayer(old, direction, target.body.player.pos,
+                            target.body.player.bodyYaw, distance, obstruction);
+                        if (hit && hit->distance < hitDistance) {
+                            hitDistance = hit->distance;
+                            hitPlayer = &target;
+                        }
+                    }
+                    if (hitWorld || hitPlayer) {
+                        float impactDistance = hitPlayer ? hitDistance : obstruction;
+                        Vec3 impact = old + direction * std::min(distance, impactDistance);
+                        ArcaneEventNet burst;
+                        burst.serial = nextArcaneSerial++;
+                        if (!nextArcaneSerial) nextArcaneSerial = 1;
+                        burst.kind = ArcaneEventKind::FireballExplode;
+                        burst.x = impact.x; burst.y = impact.y; burst.z = impact.z;
+                        arcaneEvents.push_back({serverTick, burst});
+
+                        for (SClient& target : clients) {
+                            combat::Actor victim{target.id, target.team,
+                                target.landed && target.fade <= 0 && !target.spectator && !target.body.player.dead,
+                                combat::EntityCategory::Player};
+                            if (!combat::hostile(attacker, victim)) continue;
+                            Vec3 center = target.body.player.pos + Vec3{0, 0.9f, 0};
+                            float amount = arcane::explosionDamage((center - impact).length());
+                            if (amount <= 0.0f) continue;
+                            combat::DamageSource source{projectile.owner, projectile.action,
+                                ITEM_ARCANE_FIREBALL, combat::DamageCategory::Fire};
+                            auto result = combat::damagePlayer(target.body.player.vitals, source,
+                                                               {amount, 1.0f, true}, -1);
+                            if (!result.applied) continue;
+                            target.hitFlashUntil = serverTick + 4;
+                            if (result.killed) {
+                                target.body.player.dead = true;
+                                target.body.player.vel = {};
+                                target.burning.clear();
+                            } else {
+                                auto status = std::find_if(target.burning.begin(), target.burning.end(),
+                                    [&](const arcane::Burning& value) { return value.source == projectile.owner; });
+                                if (status == target.burning.end()) {
+                                    target.burning.erase(std::remove_if(target.burning.begin(), target.burning.end(),
+                                        [&](const arcane::Burning& value) { return !arcane::burning(value, serverTick); }),
+                                        target.burning.end());
+                                    if (target.burning.size() < 64) {
+                                        target.burning.push_back({});
+                                        status = target.burning.end() - 1;
+                                    }
+                                }
+                                if (status != target.burning.end())
+                                    arcane::ignite(*status, projectile.owner, projectile.action, serverTick);
+                            }
+                            CombatEventNet event;
+                            event.serial = nextCombatSerial++;
+                            if (!nextCombatSerial) nextCombatSerial = 1;
+                            event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                            event.attacker = projectile.owner; event.target = target.id; event.limb = -1;
+                            event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
+                            combatEvents.push_back({serverTick, event});
+                        }
+                        projectiles.erase(projectiles.begin() + (std::ptrdiff_t)i);
+                        continue;
+                    }
+                    projectile.pos = old + step;
+                    ++i;
+                }
+
+                for (SClient& target : clients) {
+                    if (target.body.player.dead || target.spectator || !target.landed) {
+                        target.burning.clear();
+                        continue;
+                    }
+                    for (arcane::Burning& status : target.burning) {
+                        if (!arcane::takeBurnDamage(status, serverTick)) continue;
+                        combat::DamageSource source{status.source, status.action,
+                            ITEM_ARCANE_FIREBALL, combat::DamageCategory::Fire};
+                        auto result = combat::damagePlayer(target.body.player.vitals, source,
+                                                           {arcane::kBurnDamage, 1.0f, true}, -1);
+                        if (!result.applied) continue;
+                        target.hitFlashUntil = serverTick + 4;
+                        if (result.killed) {
+                            target.body.player.dead = true;
+                            target.body.player.vel = {};
+                        }
+                        CombatEventNet event;
+                        event.serial = nextCombatSerial++;
+                        if (!nextCombatSerial) nextCombatSerial = 1;
+                        event.kind = result.killed ? CombatEventKind::Death : CombatEventKind::Hit;
+                        event.attacker = status.source; event.target = target.id; event.limb = -1;
+                        event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
+                        combatEvents.push_back({serverTick, event});
+                        if (result.killed) break;
+                    }
+                    if (target.body.player.dead) target.burning.clear();
+                    else target.burning.erase(std::remove_if(target.burning.begin(), target.burning.end(),
+                        [&](const arcane::Burning& value) { return !arcane::burning(value, serverTick); }),
+                        target.burning.end());
+                }
+                while (!combatEvents.empty() && uint32_t(serverTick - combatEvents.front().first) > 200)
+                    combatEvents.pop_front();
+                while (!arcaneEvents.empty() && uint32_t(serverTick - arcaneEvents.front().first) > 200)
+                    arcaneEvents.pop_front();
                 for (SClient& c : clients) {
                     if (!c.sentWelcome) continue;
                     PlayDeltaNet d;
@@ -959,13 +1250,46 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     fillTrees(world, c, d, serverTick);
                     fillMines(world, c, d);
                     std::vector<uint32_t> visible;
-                    d.players.push_back(poseOf(c));
+                    d.inventoryRevision = c.inventory.revision;
+                    d.inventoryLayoutAck = c.inventory.lastLayoutSequence;
+                    d.inventory = c.inventory.slots;
+                    for (const auto& drop : world.drops()) {
+                        if (!drop.netId || d.drops.size() >= 128) continue;
+                        DropNet net;
+                        net.id = drop.netId;
+                        net.x = drop.pos.x; net.y = drop.pos.y; net.z = drop.pos.z;
+                        net.vx = drop.vel.x; net.vy = drop.vel.y; net.vz = drop.vel.z;
+                        net.axx = drop.ax.x; net.axy = drop.ax.y; net.axz = drop.ax.z;
+                        net.ayx = drop.ay.x; net.ayy = drop.ay.y; net.ayz = drop.ay.z;
+                        net.azx = drop.az.x; net.azy = drop.az.y; net.azz = drop.az.z;
+                        net.avx = drop.angVel.x; net.avy = drop.angVel.y; net.avz = drop.angVel.z;
+                        net.age = drop.age;
+                        net.item = drop.item; net.count = drop.count; net.grounded = drop.grounded;
+                        d.drops.push_back(net);
+                    }
+                    for (const auto& queued : combatEvents) {
+                        if (queued.second.serial <= c.combatAck || d.combat.size() >= 32) continue;
+                        d.combat.push_back(queued.second);
+                    }
+                    for (const auto& projectile : projectiles) {
+                        if (d.projectiles.size() >= 64) break;
+                        ArcaneProjectileNet net;
+                        net.id = projectile.id; net.owner = projectile.owner;
+                        net.x = projectile.pos.x; net.y = projectile.pos.y; net.z = projectile.pos.z;
+                        net.vx = projectile.vel.x; net.vy = projectile.vel.y; net.vz = projectile.vel.z;
+                        d.projectiles.push_back(net);
+                    }
+                    for (const auto& queued : arcaneEvents) {
+                        if (queued.second.serial <= c.arcaneAck || d.arcane.size() >= 32) continue;
+                        d.arcane.push_back(queued.second);
+                    }
+                    d.players.push_back(poseOf(c, serverTick));
                     for (const SClient& o : clients) {
                         if (!o.sentWelcome || o.id == c.id) continue;
                         if (!chunksVisible(c, o)) continue;
                         if (visible.size() >= 63) break;
                         visible.push_back(o.id);
-                        d.players.push_back(poseOf(o));
+                        d.players.push_back(poseOf(o, serverTick));
                     }
                     for (uint32_t old : c.announced) {
                         bool still = false;
