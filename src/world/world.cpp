@@ -257,6 +257,7 @@ void World::reset(uint32_t seed) {
     m_sodCursor = 0;
     m_phys.clear();
     m_drops.clear();
+    m_nextDropId = 1;
     m_blockDur.clear();
     m_originTrees.clear();
     m_authCells.clear();
@@ -2339,12 +2340,16 @@ void World::saveAll() {
     }
 }
 
-void World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Vec3 vel) {
-    if (item == AIR || count <= 0 || !validBlock(item)) return;
+uint32_t World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Vec3 vel) {
+    if (item == AIR || count <= 0 || !validBlock(item)) return 0;
+    uint32_t firstId = 0;
     int left = count;
     const int stack = (int)loot::maxStack(item);
     while (left > 0) {
         loot::Drop d;
+        d.netId = m_nextDropId++;
+        if (!m_nextDropId) m_nextDropId = 1;
+        if (!firstId) firstId = d.netId;
         d.pos = pos;
         d.item = item;
         int n = std::min(left, stack);
@@ -2364,6 +2369,7 @@ void World::spawnDrop(const Vec3& pos, uint8_t item, int count, bool inPlace, Ve
         d.age = 0.0f;
         m_drops.push_back(d);
     }
+    return firstId;
 }
 
 int World::raycastDrop(const Vec3& origin, const Vec3& dir, float maxDist, float& tHit) const {
@@ -2412,6 +2418,35 @@ void World::setDropCount(int index, uint8_t count) {
         return;
     }
     m_drops[(size_t)index].count = count;
+}
+
+const loot::Drop* World::dropById(uint32_t id) const {
+    if (!id) return nullptr;
+    for (const auto& drop : m_drops) if (drop.netId == id) return &drop;
+    return nullptr;
+}
+
+bool World::takeDropCountById(uint32_t id, uint8_t count) {
+    if (!id || !count) return false;
+    for (size_t i = 0; i < m_drops.size(); ++i) {
+        loot::Drop& drop = m_drops[i];
+        if (drop.netId != id || drop.count < count) continue;
+        drop.count = (uint8_t)(drop.count - count);
+        if (!drop.count) {
+            m_drops[i] = std::move(m_drops.back());
+            m_drops.pop_back();
+        }
+        return true;
+    }
+    return false;
+}
+
+void World::replaceNetworkDrops(const std::vector<loot::Drop>& drops) {
+    m_drops = drops;
+    uint32_t largest = 0;
+    for (const auto& drop : m_drops) largest = std::max(largest, drop.netId);
+    m_nextDropId = largest + 1;
+    if (!m_nextDropId) m_nextDropId = 1;
 }
 
 static uint64_t makeDurKey(int phys, int x, int y, int z) {

@@ -1,4 +1,5 @@
 #include "../src/world/combat.hpp"
+#include "../src/world/arcane.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -104,5 +105,49 @@ int main() {
     check(!rayPlayer({0,1.6f,-2}, {0,0,1}, feet, 0, 1, 4), "reach limit enforced");
     check(!rayPlayer({0,1.6f,-2}, {}, feet, 0, 3, 4), "zero direction rejected");
     check(!rayPlayer({nan,1.6f,-2}, {0,0,1}, feet, 0, 3, 4), "invalid ray rejected");
+
+    arcane::CastState cast;
+    body = {};
+    check(arcane::beginFireball(cast, 1, 0, attacker, body, Hand::Right, ITEM_ARCANE_FIREBALL),
+          "fireball cast accepted from authoritative item");
+    check(cast.readyAt == 60, "fireball cooldown is three seconds");
+    check(!arcane::beginFireball(cast, 1, 60, attacker, body, Hand::Right, ITEM_ARCANE_FIREBALL),
+          "cast sequence cannot replay");
+    check(!arcane::beginFireball(cast, 2, 59, attacker, body, Hand::Right, ITEM_ARCANE_FIREBALL),
+          "server cooldown blocks early cast");
+    check(!arcane::beginFireball(cast, 2, 60, attacker, body, Hand::Right, ITEM_ARCANE_FIREBALL),
+          "rejected cast sequence stays consumed");
+    check(arcane::beginFireball(cast, 3, 60, attacker, body, Hand::Left, ITEM_ARCANE_FIREBALL),
+          "cast resumes after cooldown");
+    body.limb[vitals::HandL].health = 0;
+    check(!arcane::beginFireball(cast, 4, 120, attacker, body, Hand::Left, ITEM_ARCANE_FIREBALL),
+          "sealed hand cannot cast");
+    check(!arcane::beginFireball(cast, 5, 120, attacker, body, Hand::Right, ITEM_PRIM_FIRE),
+          "ritual fire is not a fireball item");
+
+    auto projectile = arcane::makeFireball(7, 1, 3, 1, {1,2,3}, {0,0,2}, 10);
+    check(projectile.id == 7 && near(projectile.vel.length(), arcane::kFireballSpeed) &&
+          projectile.expireAt == 110, "authoritative fireball spawn normalizes direction and sets ttl");
+    check(!arcane::makeFireball(0, 1, 1, 1, {}, {0,0,1}, 0).id,
+          "invalid projectile identity rejected");
+    check(near(arcane::explosionDamage(0), .12f), "fireball center damage");
+    check(near(arcane::explosionDamage(1.5f), .084f), "fireball linear falloff");
+    check(near(arcane::explosionDamage(3), .048f), "fireball edge minimum damage");
+    check(arcane::explosionDamage(3.01f) == 0 && arcane::explosionDamage(nan) == 0,
+          "fireball radius and invalid distance rejected");
+
+    arcane::Burning burning;
+    arcane::ignite(burning, 1, 10, 0);
+    check(arcane::burning(burning, 0) && burning.until == 80 && burning.nextDamage == 20,
+          "burning begins for four seconds");
+    check(!arcane::takeBurnDamage(burning, 19) && arcane::takeBurnDamage(burning, 20),
+          "burning ticks once per second");
+    arcane::ignite(burning, 1, 11, 25);
+    check(burning.until == 105 && burning.nextDamage == 40,
+          "same source refreshes duration without adding an early stack");
+    int burnTicks = 1;
+    for (uint32_t tick : {40u,60u,80u,100u}) if (arcane::takeBurnDamage(burning, tick)) ++burnTicks;
+    check(burnTicks == 5 && !arcane::burning(burning, 105) && !arcane::takeBurnDamage(burning, 120),
+          "refreshed burning has one cadence and expires naturally");
     std::cout << "combat: " << checks << " checks passed\n";
 }

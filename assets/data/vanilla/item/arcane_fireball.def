@@ -1,0 +1,14 @@
+# VOXEL LEGEND data pack entry
+id arcane_fireball
+display 火球术卷轴
+kind item
+max_stack 8
+hardness 0.2
+durability 1
+efficiency 0
+weight 0.2
+friction 0.25
+wrong_tool_resist 1
+tags
+harvest_need none
+harvest_drop arcane_fireball 1

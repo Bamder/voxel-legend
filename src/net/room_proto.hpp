@@ -3,13 +3,16 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <array>
+#include <algorithm>
 #include <cmath>
 #include "../core/config.hpp"
+#include "../world/blocks.hpp"
 #include "../world/vitals.hpp"
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609281701u;
+constexpr uint32_t kRoomProto = 2609290101u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -19,6 +22,11 @@ constexpr uint8_t kPfGround = 4;
 // Movement intent, never a client position or simulation timestep.
 constexpr uint8_t kMoveForward = 1, kMoveBack = 2, kMoveLeft = 4, kMoveRight = 8;
 constexpr uint8_t kMoveJump = 16, kMoveSneak = 32, kMoveSprint = 64;
+
+inline bool validWireSlot(const ItemSlot& slot) {
+    return slot.block == AIR ? slot.count == 0
+        : slot.block < BLOCK_COUNT && slot.count > 0 && slot.count <= cfg::MAX_STACK;
+}
 
 constexpr uint8_t kStrikeNone = 0;
 constexpr uint8_t kStrikePunch = 1;
@@ -79,6 +87,10 @@ struct PlayerPoseNet {
     uint16_t strikeQ = 0;
     uint8_t heldL = 0, heldR = 0, carried = 0;
     uint8_t wearU = 0, wearL = 0, wearS = 0;
+    float health[vitals::Count] = {1,1,1,1,1,1,1};
+    uint8_t status = 0;
+    uint8_t hitFlash = 0;
+    bool dead = false;
 };
 
 struct PlayInputNet {
@@ -106,6 +118,18 @@ struct PlayInputNet {
         uint32_t tree = 0;
     };
     std::vector<MineEdit> mines;
+    uint8_t selectedLeft = 0, selectedRight = 0;
+    uint32_t attackSequence = 0;
+    uint8_t attackHand = 1; // 0 left, 1 right
+    uint32_t castSequence = 0;
+    uint8_t castHand = 1; // 0 left, 1 right
+    uint32_t pickupSequence = 0;
+    uint32_t pickupDrop = 0;
+    uint32_t layoutSequence = 0;
+    uint32_t layoutBaseRevision = 0;
+    std::array<ItemSlot, cfg::INVENTORY_SLOTS> layout{};
+    uint32_t combatAck = 0;
+    uint32_t arcaneAck = 0;
 };
 
 struct AuthCellNet {
@@ -487,6 +511,14 @@ inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
         b.u8(in.mines[i].tool);
         b.u32(in.mines[i].tree);
     }
+    b.u8(in.selectedLeft); b.u8(in.selectedRight);
+    b.u32(in.attackSequence); b.u8(in.attackHand);
+    b.u32(in.castSequence); b.u8(in.castHand);
+    b.u32(in.pickupSequence); b.u32(in.pickupDrop);
+    b.u32(in.layoutSequence); b.u32(in.layoutBaseRevision);
+    for (const auto& slot : in.layout) { b.u8(slot.block); b.u8(slot.count); }
+    b.u32(in.combatAck);
+    b.u32(in.arcaneAck);
     return b.data();
 }
 
@@ -547,6 +579,15 @@ inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& 
             !Buf::u8(p, end, in.mines[i].tool) || !Buf::u32(p, end, in.mines[i].tree))
             return false;
     }
+    if (!Buf::u8(p, end, in.selectedLeft) || in.selectedLeft >= cfg::HAND_SLOTS ||
+        !Buf::u8(p, end, in.selectedRight) || in.selectedRight >= cfg::HAND_SLOTS ||
+        !Buf::u32(p, end, in.attackSequence) || !Buf::u8(p, end, in.attackHand) || in.attackHand > 1 ||
+        !Buf::u32(p, end, in.castSequence) || !Buf::u8(p, end, in.castHand) || in.castHand > 1 ||
+        !Buf::u32(p, end, in.pickupSequence) || !Buf::u32(p, end, in.pickupDrop) ||
+        !Buf::u32(p, end, in.layoutSequence) || !Buf::u32(p, end, in.layoutBaseRevision)) return false;
+    for (auto& slot : in.layout)
+        if (!Buf::u8(p, end, slot.block) || !Buf::u8(p, end, slot.count) || !validWireSlot(slot)) return false;
+    if (!Buf::u32(p, end, in.combatAck) || !Buf::u32(p, end, in.arcaneAck)) return false;
     return true;
 }
 
@@ -555,6 +596,42 @@ struct BodyStateNet {
     vitals::Vitals vitals;
     vitals::Fatigue fatigue;
     uint8_t flags = 0; // bit0: landed; bit1: grounded; bit2: in water
+};
+
+struct DropNet {
+    uint32_t id = 0;
+    float x = 0, y = 0, z = 0;
+    float vx = 0, vy = 0, vz = 0;
+    float axx = 1, axy = 0, axz = 0;
+    float ayx = 0, ayy = 1, ayz = 0;
+    float azx = 0, azy = 0, azz = 1;
+    float avx = 0, avy = 0, avz = 0;
+    float age = 0;
+    uint8_t item = AIR, count = 0;
+    bool grounded = false;
+};
+
+enum class CombatEventKind : uint8_t { Hit = 1, Death = 2 };
+struct CombatEventNet {
+    uint32_t serial = 0, attacker = 0, target = 0;
+    CombatEventKind kind = CombatEventKind::Hit;
+    int8_t limb = -1;
+    uint16_t amount = 0; // normalized health removed, * 10000
+};
+
+inline constexpr uint8_t kStatusBurning = 1u;
+
+struct ArcaneProjectileNet {
+    uint32_t id = 0, owner = 0;
+    float x = 0, y = 0, z = 0;
+    float vx = 0, vy = 0, vz = 0;
+};
+
+enum class ArcaneEventKind : uint8_t { FireballExplode = 1 };
+struct ArcaneEventNet {
+    uint32_t serial = 0;
+    ArcaneEventKind kind = ArcaneEventKind::FireballExplode;
+    float x = 0, y = 0, z = 0;
 };
 
 struct PlayDeltaNet {
@@ -571,6 +648,13 @@ struct PlayDeltaNet {
     uint32_t treeHash = 0;
     std::vector<MineNet> mines;
     std::vector<MineGoneNet> mineGone;
+    uint32_t inventoryRevision = 0;
+    uint32_t inventoryLayoutAck = 0;
+    std::array<ItemSlot, cfg::INVENTORY_SLOTS> inventory{};
+    std::vector<DropNet> drops;
+    std::vector<CombatEventNet> combat;
+    std::vector<ArcaneProjectileNet> projectiles;
+    std::vector<ArcaneEventNet> arcane;
 };
 
 inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
@@ -613,6 +697,10 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
         b.u8(pl.wearU);
         b.u8(pl.wearL);
         b.u8(pl.wearS);
+        for (float health : pl.health) b.f32(health);
+        b.u8(pl.status);
+        b.u8(pl.hitFlash);
+        b.u8(pl.dead ? 1 : 0);
     }
     b.u16((uint16_t)d.bases.size());
     for (const ChunkBaseNet& base : d.bases) {
@@ -737,6 +825,42 @@ inline std::vector<uint8_t> encodePlayDelta(const PlayDeltaNet& d) {
         b.i32(d.mineGone[i].y);
         b.i32(d.mineGone[i].z);
     }
+    b.u32(d.inventoryRevision); b.u32(d.inventoryLayoutAck);
+    for (const auto& slot : d.inventory) { b.u8(slot.block); b.u8(slot.count); }
+    uint16_t ndrop = (uint16_t)std::min<size_t>(d.drops.size(), 128);
+    b.u16(ndrop);
+    for (uint16_t i = 0; i < ndrop; ++i) {
+        const auto& drop = d.drops[i];
+        b.u32(drop.id); b.f32(drop.x); b.f32(drop.y); b.f32(drop.z);
+        b.f32(drop.vx); b.f32(drop.vy); b.f32(drop.vz);
+        b.f32(drop.axx); b.f32(drop.axy); b.f32(drop.axz);
+        b.f32(drop.ayx); b.f32(drop.ayy); b.f32(drop.ayz);
+        b.f32(drop.azx); b.f32(drop.azy); b.f32(drop.azz);
+        b.f32(drop.avx); b.f32(drop.avy); b.f32(drop.avz); b.f32(drop.age);
+        b.u8(drop.item); b.u8(drop.count); b.u8(drop.grounded ? 1 : 0);
+    }
+    uint8_t ncombat = (uint8_t)std::min<size_t>(d.combat.size(), 32);
+    b.u8(ncombat);
+    for (uint8_t i = 0; i < ncombat; ++i) {
+        const auto& event = d.combat[i];
+        b.u32(event.serial); b.u8((uint8_t)event.kind); b.u32(event.attacker); b.u32(event.target);
+        b.u8((uint8_t)event.limb); b.u16(event.amount);
+    }
+    uint8_t nprojectiles = (uint8_t)std::min<size_t>(d.projectiles.size(), 64);
+    b.u8(nprojectiles);
+    for (uint8_t i = 0; i < nprojectiles; ++i) {
+        const auto& projectile = d.projectiles[i];
+        b.u32(projectile.id); b.u32(projectile.owner);
+        b.f32(projectile.x); b.f32(projectile.y); b.f32(projectile.z);
+        b.f32(projectile.vx); b.f32(projectile.vy); b.f32(projectile.vz);
+    }
+    uint8_t narcane = (uint8_t)std::min<size_t>(d.arcane.size(), 32);
+    b.u8(narcane);
+    for (uint8_t i = 0; i < narcane; ++i) {
+        const auto& event = d.arcane[i];
+        b.u32(event.serial); b.u8((uint8_t)event.kind);
+        b.f32(event.x); b.f32(event.y); b.f32(event.z);
+    }
     return b.data();
 }
 
@@ -776,7 +900,7 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
     if (!Buf::u16(p, end, np) || np > 64) return false;
     d.players.resize(np);
     for (uint16_t i = 0; i < np; i++) {
-        uint8_t spec = 0;
+        uint8_t spec = 0, dead = 0;
         PlayerPoseNet& pl = d.players[i];
         if (!Buf::u32(p, end, pl.id) || !Buf::str(p, end, pl.name) || !Buf::f32(p, end, pl.x) ||
             !Buf::f32(p, end, pl.y) || !Buf::f32(p, end, pl.z) || !Buf::f32(p, end, pl.yaw) ||
@@ -786,7 +910,13 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
             !Buf::u8(p, end, pl.heldL) || !Buf::u8(p, end, pl.heldR) || !Buf::u8(p, end, pl.carried) ||
             !Buf::u8(p, end, pl.wearU) || !Buf::u8(p, end, pl.wearL) || !Buf::u8(p, end, pl.wearS))
             return false;
+        for (float& health : pl.health)
+            if (!Buf::f32(p, end, health) || !std::isfinite(health) || health < 0 || health > 1) return false;
+        if (!Buf::u8(p, end, pl.status) || (pl.status & ~kStatusBurning) ||
+            !Buf::u8(p, end, pl.hitFlash) || pl.hitFlash > 1 ||
+            !Buf::u8(p, end, dead) || dead > 1) return false;
         pl.spectator = spec != 0;
+        pl.dead = dead != 0;
     }
     uint16_t nb = 0;
     if (!Buf::u16(p, end, nb) || nb > 32) return false;
@@ -941,6 +1071,73 @@ inline bool decodePlayDelta(const uint8_t* p, const uint8_t* end, PlayDeltaNet& 
         if (!Buf::u32(p, end, d.mineGone[i].tree) || !Buf::i32(p, end, d.mineGone[i].x) ||
             !Buf::i32(p, end, d.mineGone[i].y) || !Buf::i32(p, end, d.mineGone[i].z))
             return false;
+    }
+    if (!Buf::u32(p, end, d.inventoryRevision) || !Buf::u32(p, end, d.inventoryLayoutAck)) return false;
+    for (auto& slot : d.inventory)
+        if (!Buf::u8(p, end, slot.block) || !Buf::u8(p, end, slot.count) || !validWireSlot(slot)) return false;
+    uint16_t ndrop = 0;
+    if (!Buf::u16(p, end, ndrop) || ndrop > 128) return false;
+    d.drops.resize(ndrop);
+    for (auto& drop : d.drops) {
+        uint8_t grounded = 0;
+        if (!Buf::u32(p, end, drop.id) || !drop.id ||
+            !Buf::f32(p, end, drop.x) || !Buf::f32(p, end, drop.y) || !Buf::f32(p, end, drop.z) ||
+            !Buf::f32(p, end, drop.vx) || !Buf::f32(p, end, drop.vy) || !Buf::f32(p, end, drop.vz) ||
+            !Buf::f32(p, end, drop.axx) || !Buf::f32(p, end, drop.axy) || !Buf::f32(p, end, drop.axz) ||
+            !Buf::f32(p, end, drop.ayx) || !Buf::f32(p, end, drop.ayy) || !Buf::f32(p, end, drop.ayz) ||
+            !Buf::f32(p, end, drop.azx) || !Buf::f32(p, end, drop.azy) || !Buf::f32(p, end, drop.azz) ||
+            !Buf::f32(p, end, drop.avx) || !Buf::f32(p, end, drop.avy) || !Buf::f32(p, end, drop.avz) ||
+            !Buf::f32(p, end, drop.age) ||
+            !std::isfinite(drop.x) || !std::isfinite(drop.y) || !std::isfinite(drop.z) ||
+            !std::isfinite(drop.vx) || !std::isfinite(drop.vy) || !std::isfinite(drop.vz) ||
+            !std::isfinite(drop.axx) || !std::isfinite(drop.axy) || !std::isfinite(drop.axz) ||
+            !std::isfinite(drop.ayx) || !std::isfinite(drop.ayy) || !std::isfinite(drop.ayz) ||
+            !std::isfinite(drop.azx) || !std::isfinite(drop.azy) || !std::isfinite(drop.azz) ||
+            !std::isfinite(drop.avx) || !std::isfinite(drop.avy) || !std::isfinite(drop.avz) ||
+            !std::isfinite(drop.age) || drop.age < 0.0f ||
+            !Buf::u8(p, end, drop.item) || drop.item == AIR || drop.item >= BLOCK_COUNT ||
+            !Buf::u8(p, end, drop.count) || !drop.count || drop.count > cfg::MAX_STACK ||
+            !Buf::u8(p, end, grounded) || grounded > 1) return false;
+        drop.grounded = grounded != 0;
+    }
+    uint8_t ncombat = 0;
+    if (!Buf::u8(p, end, ncombat) || ncombat > 32) return false;
+    d.combat.resize(ncombat);
+    for (auto& event : d.combat) {
+        uint8_t kind = 0, limb = 0;
+        if (!Buf::u32(p, end, event.serial) || !event.serial || !Buf::u8(p, end, kind) ||
+            kind < (uint8_t)CombatEventKind::Hit || kind > (uint8_t)CombatEventKind::Death ||
+            !Buf::u32(p, end, event.attacker) || !Buf::u32(p, end, event.target) ||
+            !Buf::u8(p, end, limb) || !Buf::u16(p, end, event.amount)) return false;
+        event.kind = (CombatEventKind)kind; event.limb = (int8_t)limb;
+    }
+    uint8_t nprojectiles = 0;
+    if (!Buf::u8(p, end, nprojectiles) || nprojectiles > 64) return false;
+    d.projectiles.resize(nprojectiles);
+    for (auto& projectile : d.projectiles) {
+        if (!Buf::u32(p, end, projectile.id) || !projectile.id ||
+            !Buf::u32(p, end, projectile.owner) || !projectile.owner ||
+            !Buf::f32(p, end, projectile.x) || !Buf::f32(p, end, projectile.y) ||
+            !Buf::f32(p, end, projectile.z) || !Buf::f32(p, end, projectile.vx) ||
+            !Buf::f32(p, end, projectile.vy) || !Buf::f32(p, end, projectile.vz) ||
+            !std::isfinite(projectile.x) || !std::isfinite(projectile.y) || !std::isfinite(projectile.z) ||
+            !std::isfinite(projectile.vx) || !std::isfinite(projectile.vy) || !std::isfinite(projectile.vz) ||
+            std::fabs(projectile.x) > 100000 || std::fabs(projectile.y) > 100000 ||
+            std::fabs(projectile.z) > 100000 || std::fabs(projectile.vx) > 1000 ||
+            std::fabs(projectile.vy) > 1000 || std::fabs(projectile.vz) > 1000) return false;
+    }
+    uint8_t narcane = 0;
+    if (!Buf::u8(p, end, narcane) || narcane > 32) return false;
+    d.arcane.resize(narcane);
+    for (auto& event : d.arcane) {
+        uint8_t kind = 0;
+        if (!Buf::u32(p, end, event.serial) || !event.serial || !Buf::u8(p, end, kind) ||
+            kind != (uint8_t)ArcaneEventKind::FireballExplode ||
+            !Buf::f32(p, end, event.x) || !Buf::f32(p, end, event.y) || !Buf::f32(p, end, event.z) ||
+            !std::isfinite(event.x) || !std::isfinite(event.y) || !std::isfinite(event.z) ||
+            std::fabs(event.x) > 100000 || std::fabs(event.y) > 100000 ||
+            std::fabs(event.z) > 100000) return false;
+        event.kind = (ArcaneEventKind)kind;
     }
     return true;
 }
