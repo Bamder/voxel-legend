@@ -125,8 +125,10 @@ void roll(uint32_t seed) {
 }
 
 bool relicSpawned(int relic) {
-    if (!g_rolled) return false;
-    return relic >= 0 && relic < RelicCount;
+    (void)relic;
+    // Legacy relic platforms remain harmless landmarks. Relics are no longer
+    // stamped into the map; the authoritative Boss reward path creates them.
+    return false;
 }
 
 } // namespace ritual

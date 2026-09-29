@@ -48,12 +48,16 @@ struct GuardianSpan {
 bool isGuardianToken(int x, int y, int z, uint8_t block);
 void collectGuardians(const World& world, std::vector<GuardianSpan>& out);
 bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, float maxDist,
-                     float& tHit, GuardianSpan& hit);
+                     float& tHit, GuardianSpan& hit, float radius = 0.0f);
 // True on the blow that drops the relic. Writes the token cell.
 // amount is subtracted from the guardian's hit points. Zero deals no damage.
 bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, int& z);
 // Hurt dealt by one swing, after armor, resistance, and multipliers.
 int guardianStrikeHurt(uint8_t held, int relic);
+// Converts Arcane percentage damage into this legacy guardian's integer HP.
+// Fireball distance is measured from the explosion to the guardian bounds;
+// Freeze is a direct hit. Static guardians do not receive timed AI statuses.
+int guardianArcaneHurt(uint8_t item, int relic, float distance = 0.0f);
 
 // Match-world guardians. The room server owns hp; clients only display it.
 struct GuardianSync {

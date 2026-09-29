@@ -300,6 +300,36 @@ out vec4 fragColor;
 void main() { fragColor = uColor; }
 )GLSL";
 
+inline constexpr const char* PARTICLE_VERT = R"GLSL(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+uniform mat4 uMVP;
+out vec2 vUV;
+void main() {
+    vUV = aUV;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+inline constexpr const char* PARTICLE_FRAG = R"GLSL(
+#version 330 core
+in vec2 vUV;
+uniform vec4 uColor;
+uniform float uSoftness;
+uniform float uRing;
+out vec4 fragColor;
+void main() {
+    float d = length(vUV * 2.0 - 1.0);
+    float soft = clamp(uSoftness, 0.01, 0.48);
+    float alpha = 1.0 - smoothstep(1.0 - soft, 1.0, d);
+    if (uRing > 0.0)
+        alpha *= smoothstep(uRing, min(0.99, uRing + soft), d);
+    if (alpha <= 0.001) discard;
+    fragColor = vec4(uColor.rgb, uColor.a * alpha);
+}
+)GLSL";
+
 inline constexpr const char* HUM_VERT = R"GLSL(
 #version 330 core
 layout(location = 0) in vec3 aPos;

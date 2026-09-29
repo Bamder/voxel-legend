@@ -6,6 +6,7 @@
 #include "loot.hpp"
 #include "player_model.hpp"
 #include "asset_pack.hpp"
+#include "arcane.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -561,10 +562,11 @@ void collectGuardians(const World& world, std::vector<GuardianSpan>& out) {
 }
 
 bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, float maxDist,
-                     float& tHit, GuardianSpan& hit) {
+                     float& tHit, GuardianSpan& hit, float radius) {
     Vec3 nd = dir;
     float len = nd.length();
-    if (len < 1e-8f) return false;
+    if (len < 1e-8f || !std::isfinite(maxDist) || maxDist <= 0.0f ||
+        !std::isfinite(radius) || radius < 0.0f || radius > 1.0f) return false;
     nd = nd / len;
     tHit = maxDist + 1.0f;
     bool any = false;
@@ -572,8 +574,8 @@ bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, fl
         GuardianSpan g;
         if (!spanOf(world, s, g)) continue;
         float t = 0.0f;
-        Vec3 mn{ g.minX, g.minY, g.minZ };
-        Vec3 mx{ g.maxX, g.maxY, g.maxZ };
+        Vec3 mn{ g.minX - radius, g.minY - radius, g.minZ - radius };
+        Vec3 mx{ g.maxX + radius, g.maxY + radius, g.maxZ + radius };
         if (!loot::rayAabb(origin, nd, mn, mx, t)) continue;
         if (t < 0.0f || t > maxDist || t >= tHit) continue;
         tHit = t;
@@ -636,6 +638,16 @@ int guardianStrikeHurt(uint8_t held, int relic) {
     float hurt = phys * (baseAtk + strAmp + physVuln) + occult * (baseAtk + physVuln);
     if (hurt <= 0.0f) return 0;
     return (int)std::lround(hurt);
+}
+
+int guardianArcaneHurt(uint8_t item, int relic, float distance) {
+    if (relic < 0 || relic >= ritual::RelicCount || !std::isfinite(distance) || distance < 0.0f)
+        return 0;
+    float fraction = 0.0f;
+    if (item == ITEM_ARCANE_FIREBALL) fraction = arcane::explosionDamage(distance);
+    else if (item == ITEM_ARCANE_FREEZE) fraction = arcane::kFreezeDamage;
+    if (!(fraction > 0.0f)) return 0;
+    return std::max(1, (int)std::lround(fraction * (float)kGuardianHp[relic]));
 }
 
 void collectRoomGuardians(std::vector<GuardianSync>& out) {

@@ -44,12 +44,47 @@ bool rayBox(Vec3 o, Vec3 d, Vec3 lo, Vec3 hi, float maxT, float& hit) {
     hit = enter;
     return true;
 }
+
+std::optional<LimbHit> hitPlayer(const Vec3& origin, const Vec3& direction,
+    const Vec3& feet, float bodyYaw, float reach, float obstructionDistance,
+    float radius) {
+    if (!finite(origin) || !finite(direction) || !finite(feet) || !std::isfinite(bodyYaw) ||
+        !std::isfinite(reach) || !std::isfinite(obstructionDistance) || !std::isfinite(radius) ||
+        reach <= 0 || obstructionDistance < 0 || radius < 0 || radius > 1.0f ||
+        !std::isfinite(direction.lengthSq()) || direction.lengthSq() < 1e-10f)
+        return std::nullopt;
+    float c = std::cos(bodyYaw), s = std::sin(bodyYaw);
+    auto local = [&](Vec3 p) { return Vec3{p.x*c + p.z*s, p.y, p.x*s - p.z*c}; };
+    Vec3 o = local(origin - feet), d = local(direction.normalized());
+    struct Box { Vec3 lo, hi; int limb; };
+    const Box boxes[] = {
+        {{-.18f,1.44f,-.18f},{.18f,1.80f,.18f},vitals::Head},
+        {{-.20f,1.08f,-.16f},{.20f,1.44f,.16f},vitals::Chest},
+        {{-.20f,.72f,-.16f},{.20f,1.08f,.16f},vitals::Core},
+        {{-.36f,.80f,-.16f},{-.20f,1.44f,.16f},vitals::HandL},
+        {{.20f,.80f,-.16f},{.36f,1.44f,.16f},vitals::HandR},
+        {{-.20f,0,-.16f},{0,.72f,.16f},vitals::FootL},
+        {{0,0,-.16f},{.20f,.72f,.16f},vitals::FootR}
+    };
+    const Vec3 inflate{radius, radius, radius};
+    std::optional<LimbHit> result;
+    float best = std::min(reach, obstructionDistance);
+    for (const auto& box : boxes) {
+        float t = 0;
+        if (rayBox(o, d, box.lo - inflate, box.hi + inflate, best, t) &&
+            t < obstructionDistance && (!result || t < best)) {
+            result = LimbHit{box.limb, t};
+            best = t;
+        }
+    }
+    return result;
+}
 } // namespace
 
 std::optional<Weapon> weapon(uint8_t item) {
     // Combat timings are deliberately separate from the existing mining table.
-    if (item == HAND_PICK) return Weapon{item, {0.14f, 0.35f, false}, 3.0f, 0.55f, 0.55f};
-    if (item == HAND_AXE) return Weapon{item, {0.10f, 2.5f, false}, 3.0f, 0.85f, 0.85f};
+    if (item == HAND_PICK) return Weapon{item, {0.14f, 0.35f, false}, 4.5f, 0.55f, 0.55f};
+    if (item == HAND_AXE) return Weapon{item, {0.10f, 2.5f, false}, 4.5f, 0.85f, 0.85f};
     return std::nullopt;
 }
 
@@ -120,37 +155,22 @@ bool healPlayer(vitals::Vitals& v, float fraction) {
     return changed;
 }
 
+bool canHealPlayer(const vitals::Vitals& v) {
+    if (!alive(v)) return false;
+    for (const auto& limb : v.limb)
+        if (limb.health < 1.0f) return true;
+    return false;
+}
+
 std::optional<LimbHit> rayPlayer(const Vec3& origin, const Vec3& direction,
     const Vec3& feet, float bodyYaw, float reach, float obstructionDistance) {
-    if (!finite(origin) || !finite(direction) || !finite(feet) || !std::isfinite(bodyYaw) ||
-        !std::isfinite(reach) || !std::isfinite(obstructionDistance) || reach <= 0 ||
-        obstructionDistance < 0 || !std::isfinite(direction.lengthSq()) || direction.lengthSq() < 1e-10f)
-        return std::nullopt;
-    float c = std::cos(bodyYaw), s = std::sin(bodyYaw);
-    auto local = [&](Vec3 p) { return Vec3{p.x*c + p.z*s, p.y, p.x*s - p.z*c}; };
-    Vec3 o = local(origin - feet), d = local(direction.normalized());
-    struct Box { Vec3 lo, hi; int limb; };
-    // Stable upright anatomical volumes, including arms as part of the hand region.
-    const Box boxes[] = {
-        {{-.18f,1.44f,-.18f},{.18f,1.80f,.18f},vitals::Head},
-        {{-.20f,1.08f,-.16f},{.20f,1.44f,.16f},vitals::Chest},
-        {{-.20f,.72f,-.16f},{.20f,1.08f,.16f},vitals::Core},
-        {{-.36f,.80f,-.16f},{-.20f,1.44f,.16f},vitals::HandL},
-        {{.20f,.80f,-.16f},{.36f,1.44f,.16f},vitals::HandR},
-        {{-.20f,0,-.16f},{0,.72f,.16f},vitals::FootL},
-        {{0,0,-.16f},{.20f,.72f,.16f},vitals::FootR}
-    };
-    std::optional<LimbHit> result;
-    float best = std::min(reach, obstructionDistance);
-    for (const auto& box : boxes) {
-        float t = 0;
-        if (rayBox(o, d, box.lo, box.hi, best, t) && t < obstructionDistance &&
-            (!result || t < best)) {
-            result = LimbHit{box.limb, t};
-            best = t;
-        }
-    }
-    return result;
+    return hitPlayer(origin, direction, feet, bodyYaw, reach, obstructionDistance, 0.0f);
+}
+
+std::optional<LimbHit> sweepPlayer(const Vec3& origin, const Vec3& direction,
+    const Vec3& feet, float bodyYaw, float reach, float obstructionDistance,
+    float radius) {
+    return hitPlayer(origin, direction, feet, bodyYaw, reach, obstructionDistance, radius);
 }
 
 bool beginMelee(MeleeState& state, uint32_t sequence, uint32_t tick,
