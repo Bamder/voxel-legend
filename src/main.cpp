@@ -2679,8 +2679,10 @@ int main(int argc, char** argv) {
         structureChosen = false;
         structureCanReturn = false;
         carry.clear();
+        world.reset(12345);  // 初始化编辑器世界的种子
         world.setSaveEnabled(false);
         world.setBuildCanvas(true);
+        world.update({ 12.0f, 10.0f, 18.0f }, 64);  // 预加载玩家周围区块
         player.privilegeMode = true;
         player.flying = true;
         player.setSpawn({ 12.0f, 10.0f, 18.0f });
