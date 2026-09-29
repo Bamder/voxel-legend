@@ -120,6 +120,13 @@ bool healPlayer(vitals::Vitals& v, float fraction) {
     return changed;
 }
 
+bool canHealPlayer(const vitals::Vitals& v) {
+    if (!alive(v)) return false;
+    for (const auto& limb : v.limb)
+        if (limb.health < 1.0f) return true;
+    return false;
+}
+
 std::optional<LimbHit> rayPlayer(const Vec3& origin, const Vec3& direction,
     const Vec3& feet, float bodyYaw, float reach, float obstructionDistance) {
     if (!finite(origin) || !finite(direction) || !finite(feet) || !std::isfinite(bodyYaw) ||

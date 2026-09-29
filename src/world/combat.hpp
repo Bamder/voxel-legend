@@ -72,6 +72,7 @@ float damageFor(const DamageSpec& spec, EntityCategory target);
 DamageResult damagePlayer(vitals::Vitals& body, const DamageSource& source,
                           const DamageSpec& spec, int limb);
 bool healPlayer(vitals::Vitals& body, float fraction = 0.25f);
+bool canHealPlayer(const vitals::Vitals& body);
 
 struct LimbHit { int limb = -1; float distance = 0.0f; };
 // Fixed gameplay hit volumes, independent of editable clothing/hair/model assets.

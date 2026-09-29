@@ -2,6 +2,8 @@
 #include "../src/net/room_inventory.hpp"
 #include "../src/plugin/plugin.hpp"
 #include "../src/world/building_loot.hpp"
+#include "../src/world/guide.hpp"
+#include "../src/world/ritual.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -93,10 +95,12 @@ int main() {
     wireDrop.item = HAND_PICK; wireDrop.count = 1; wireDrop.grounded = true;
     delta.drops.push_back(wireDrop);
     delta.combat.push_back({13,1,2,CombatEventKind::Hit,vitals::HandL,1400});
-    PlayerPoseNet burningPose; burningPose.id = 2; burningPose.status = kStatusBurning;
+    PlayerPoseNet burningPose; burningPose.id = 2;
+    burningPose.status = kStatusBurning | kStatusFrozen | kStatusHealing;
     delta.players.push_back(burningPose);
-    delta.projectiles.push_back({31,1,2,3,4,5,6,7});
-    delta.arcane.push_back({17,ArcaneEventKind::FireballExplode,8,9,10});
+    delta.projectiles.push_back({31,1,ArcaneProjectileKind::Freeze,2,3,4,5,6,7});
+    delta.arcane.push_back({17,ArcaneEventKind::HealPulse,8,9,10});
+    delta.clue = {true, 3, (uint8_t)clue::Destination::Boss, ITEM_ELEM_CORE, false, 24, 2, -16};
     bytes = encodePlayDelta(delta);
     PlayDeltaNet output;
     check(decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output) &&
@@ -110,10 +114,15 @@ int main() {
           output.drops[0].id == 22 && output.drops[0].vx == .25f && output.drops[0].axz == 1 &&
           output.drops[0].avy == .5f && output.drops[0].age == 2 &&
           output.combat.size() == 1 && output.combat[0].limb == vitals::HandL &&
-          output.players.size() == 1 && output.players[0].status == kStatusBurning &&
-          output.projectiles.size() == 1 && output.projectiles[0].id == 31 && output.projectiles[0].vz == 7 &&
-          output.arcane.size() == 1 && output.arcane[0].serial == 17 && output.arcane[0].z == 10,
-          "inventory combat status and arcane snapshot roundtrip");
+          output.players.size() == 1 &&
+          output.players[0].status == (kStatusBurning | kStatusFrozen | kStatusHealing) &&
+          output.projectiles.size() == 1 && output.projectiles[0].id == 31 &&
+          output.projectiles[0].kind == ArcaneProjectileKind::Freeze && output.projectiles[0].vz == 7 &&
+          output.arcane.size() == 1 && output.arcane[0].serial == 17 &&
+          output.arcane[0].kind == ArcaneEventKind::HealPulse && output.arcane[0].z == 10 &&
+          output.clue.active && output.clue.stage == 3 &&
+          output.clue.destination == (uint8_t)clue::Destination::Boss && output.clue.x == 24,
+          "inventory combat status arcane and clue snapshot roundtrip");
     for (size_t n = 0; n < bytes.size(); ++n)
         check(!decodePlayDelta(bytes.data(), bytes.data()+n, output), "all truncated authority snapshots rejected");
     delta.body.vitals.limb[0].health = nan;
@@ -127,23 +136,42 @@ int main() {
     bytes = encodePlayDelta(delta);
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize player vector rejected");
     delta.players.clear(); delta.projectiles.clear(); delta.arcane.clear(); delta.combat.clear(); delta.drops.clear();
+    delta.clue = {};
     bytes = encodePlayDelta(delta);
-    bytes[bytes.size()-2] = 65;
+    bytes[bytes.size()-3] = 65;
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize projectile vector rejected");
     bytes = encodePlayDelta(delta);
-    bytes.back() = 33;
+    bytes[bytes.size()-2] = 33;
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "oversize arcane event vector rejected");
-    delta.projectiles.push_back({1,1,nan,0,0,0,0,0});
+    delta.clue = {true, 1, 4, AIR, false, 1, 2, 3};
+    bytes = encodePlayDelta(delta);
+    check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "unknown clue destination rejected");
+    delta.clue = {true, 1, (uint8_t)clue::Destination::Clue, AIR, false, nan, 2, 3};
+    bytes = encodePlayDelta(delta);
+    check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "NaN clue target rejected");
+    delta.clue = {};
+    delta.projectiles.push_back({1,1,ArcaneProjectileKind::Fireball,nan,0,0,0,0,0});
     bytes = encodePlayDelta(delta);
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "NaN projectile rejected");
     delta.projectiles.clear();
-    burningPose.status = 2; delta.players.push_back(burningPose);
+    delta.projectiles.push_back({1,1,(ArcaneProjectileKind)3,0,0,0,0,0,0});
+    bytes = encodePlayDelta(delta);
+    check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "unknown projectile kind rejected");
+    delta.projectiles.clear();
+    delta.arcane.push_back({1,(ArcaneEventKind)4,0,0,0});
+    bytes = encodePlayDelta(delta);
+    check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "unknown arcane event kind rejected");
+    delta.arcane.clear();
+    burningPose.status = 8; delta.players.push_back(burningPose);
     bytes = encodePlayDelta(delta);
     check(!decodePlayDelta(bytes.data(), bytes.data()+bytes.size(), output), "unknown status bits rejected");
     delta.players.clear();
 
     // A deterministic flat test arena; never spawned in the actual game world.
     plugin::init();
+    ritual::roll(7);
+    check(!ritual::relicSpawned(0) && !ritual::relicSpawned(ritual::RelicCount - 1),
+          "legacy map stamping no longer gives away Boss relics");
     World world(7);
     world.setSaveEnabled(false);
     std::vector<uint8_t> blocks(cfg::CHUNK_VOLUME, AIR), zeros(cfg::CHUNK_VOLUME, 0);
@@ -156,10 +184,15 @@ int main() {
     world.writeAuthChunk(0, 0, 0, blocks.data(), zeros.data(), zeros.data(), {}, {});
     building_loot::Spawner lootSpawner(world, 17);
     check(world.drops().empty(), "creating building spawner never scatters items");
+    check(guide::kPageCount == 8 && guide::pageLineCount(0) > 0 && guide::pageLineCount(7) > 0,
+          "guide book exposes all eight static pages");
     check(lootSpawner.spawnItemAt({8,1,8}, {HAND_PICK, 1}), "building point accepts registered tool");
     check(world.drops().size() == 1 && world.drops()[0].item == HAND_PICK,
           "explicit building spawn uses existing world drops");
     check(!lootSpawner.spawnItemAt({8,1,8}, {HAND_AXE, 2}), "tools cannot stack");
+    check(lootSpawner.spawnItemAt({8,1,8}, {ITEM_ARCANE_FREEZE, 2}) &&
+          lootSpawner.spawnItemAt({8,1,8}, {ITEM_ARCANE_HEAL, 2}),
+          "building point accepts both new stackable arcane items");
     check(!lootSpawner.spawnItemAt({8,1,8}, {AIR, 1}), "air is not loot");
     check(!lootSpawner.spawnItemAt({nan,1,8}, {HAND_PICK, 1}), "invalid building point rejected");
     check(!lootSpawner.spawnItemAt({8,.1f,8}, {HAND_PICK, 1}), "loot cannot spawn inside solid floor");
@@ -176,9 +209,51 @@ int main() {
     const building_loot::Entry bad[] = {{HAND_PICK,1,1,1}, {HAND_AXE,1,2,1}};
     check(!lootSpawner.spawnRandomLootAt({8,1,8}, bad), "malformed table rejected atomically");
     check(!lootSpawner.spawnRandomLootAt({8,1,8}, {}), "empty table rejected");
+    const building_loot::Entry unboundClue[] = {{ITEM_CLUE,1,1,1}};
+    check(!lootSpawner.spawnItemAt({8,1,8}, {ITEM_CLUE,1}) &&
+          !lootSpawner.spawnRandomLootAt({8,1,8}, unboundClue),
+          "generic building loot cannot create an unbound clue");
     std::vector<building_loot::Entry> tooMany(65, {HAND_PICK,1,1,1});
     check(!lootSpawner.spawnRandomLootAt({8,1,8}, tooMany), "loot table size bounded");
     check(world.drops().size() == beforeInvalid, "invalid tables create no partial loot");
+
+    clue::Director clues;
+    clue::Link stageTwo{1, 2, {9,1,9}, clue::Destination::Boss, ITEM_ELEM_CORE};
+    uint32_t stageTwoDrop = lootSpawner.spawnClueAt({8,1,8}, clues, stageTwo);
+    check(stageTwoDrop && !clues.canPickup(stageTwoDrop, 1), "later clue stage cannot skip the route");
+    clue::Link stageThree{1, 3, {14,1,14}, clue::Destination::Clue, AIR};
+    uint32_t stageThreeDrop = lootSpawner.spawnClueAt({8,1,8}, clues, stageThree);
+    clue::Link stageOne{1, 1, {12,1,12}, clue::Destination::Arcane, ITEM_ARCANE_FIREBALL};
+    uint32_t stageOneDrop = lootSpawner.spawnClueAt({8,1,8}, clues, stageOne);
+    check(stageOneDrop && clues.knowsDrop(stageOneDrop) && clues.canPickup(stageOneDrop, 1) &&
+          !clues.canPickup(stageOneDrop, 2), "bound clue is restricted to its team and expected stage");
+    room_inventory::State clueInventory;
+    check(room_inventory::pickup(clueInventory, 1, world, stageOneDrop, {8,1.5f,8}, {8,.5f,8}) &&
+          clues.claimPickup(stageOneDrop, 1), "server pickup reveals a bound clue target");
+    clue::Target target = clues.targetFor(1);
+    check(target.active && target.stage == 1 && target.destination == clue::Destination::Arcane &&
+          target.position.x == 12 && target.rewardItem == ITEM_ARCANE_FIREBALL,
+          "team receives the authoritative Arcane building coordinate");
+    check(clues.canPickup(stageTwoDrop, 1) &&
+          room_inventory::pickup(clueInventory, 2, world, stageTwoDrop, {8,1.5f,8}, {8,.5f,8}) &&
+          clues.claimPickup(stageTwoDrop, 1), "next bound clue advances the team route");
+    target = clues.targetFor(1);
+    check(target.stage == 2 && target.destination == clue::Destination::Boss &&
+          target.rewardItem == ITEM_ELEM_CORE, "final clue carries a future Boss relic contract");
+    check(stageThreeDrop && !clues.canPickup(stageThreeDrop, 1),
+          "an undefeated Boss blocks the next clue stage");
+    check(!clues.completeBoss(world, 1, 91, {100,1,100}), "Boss reward must be near its bound encounter");
+    uint32_t relicDrop = clues.completeBoss(world, 1, 91, {9,1,9});
+    check(relicDrop && world.dropById(relicDrop) && world.dropById(relicDrop)->item == ITEM_ELEM_CORE,
+          "authoritative Boss completion spawns the configured relic");
+    check(!clues.completeBoss(world, 1, 91, {9,1,9}) && clues.targetFor(1).bossRewardClaimed,
+          "Boss relic completion is replay-safe and exactly once");
+    check(clues.canPickup(stageThreeDrop, 1), "Boss reward completion unlocks the next clue chain");
+
+    room_inventory::State guideInventory;
+    check(room_inventory::add(guideInventory, ITEM_GUIDE_BOOK, 1) == 0 &&
+          guideInventory.slots[0].block == ITEM_GUIDE_BOOK,
+          "server can grant one guide book at match entry");
     room_inventory::State inventory;
     check(room_inventory::add(inventory, HAND_PICK, 1) == 0 && inventory.slots[0].block == HAND_PICK,
           "server inventory adds a tool");
@@ -213,6 +288,18 @@ int main() {
           "server consumes exactly one accepted fireball");
     check(!room_inventory::consume(arcaneInventory, 0, ITEM_PRIM_FIRE),
           "server cannot consume a different item as a fireball");
+    check(room_inventory::add(arcaneInventory, ITEM_ARCANE_FREEZE, 8) == 0 &&
+          room_inventory::add(arcaneInventory, ITEM_ARCANE_HEAL, 8) == 0,
+          "freeze and heal items stack to their configured cap");
+    int freezeSlot = -1, healSlot = -1;
+    for (int i = 0; i < cfg::INVENTORY_SLOTS; ++i) {
+        if (arcaneInventory.slots[i].block == ITEM_ARCANE_FREEZE) freezeSlot = i;
+        if (arcaneInventory.slots[i].block == ITEM_ARCANE_HEAL) healSlot = i;
+    }
+    check(freezeSlot >= 0 && healSlot >= 0 &&
+          room_inventory::consume(arcaneInventory, freezeSlot, ITEM_ARCANE_FREEZE) &&
+          room_inventory::consume(arcaneInventory, healSlot, ITEM_ARCANE_HEAL),
+          "server consumes one accepted freeze and heal item");
 
     room_inventory::State pickupInventory;
     uint32_t pickupId = world.spawnDrop({8,1,8}, HAND_AXE, 1, true);
@@ -251,16 +338,23 @@ int main() {
     room_body::accept(state, input, 13);
     room_body::tick(state, world, 13, false, false);
     check(state.player.pos.z == 8, "undeployed player cannot move");
+    room_body::spawn(state, {8,.5001f,8});
+    input = {}; input.movement = kMoveForward | kMoveJump | kMoveSprint;
+    room_body::accept(state, input, 14);
+    room_body::tick(state, world, 14, true, false, true);
+    check(state.player.pos.x == 8 && state.player.pos.z == 8 &&
+          state.player.vel.x == 0 && state.player.vel.z == 0 && !state.player.jumpedThisUpdate,
+          "frozen server tick blocks movement sprint and jump");
     state.player.vitals.limb[vitals::FootL].health = 0;
     state.player.vitals.limb[vitals::FootR].health = 0;
     state.player.vel = {5,0,5};
     input.movement |= kMoveJump;
-    room_body::accept(state, input, 14);
-    room_body::tick(state, world, 14, true, false);
+    room_body::accept(state, input, 15);
+    room_body::tick(state, world, 15, true, false);
     check(state.player.pos.x == 8 && state.player.pos.z == 8 && state.player.vel.y <= 0,
           "both feet loss stops momentum and jump in real physics");
     state.player.vitals.limb[vitals::Head].health = 0;
-    room_body::tick(state, world, 15, true, false);
+    room_body::tick(state, world, 16, true, false);
     check(state.player.dead && state.player.vel.lengthSq() == 0, "server death stops simulation");
     std::cout << "room body: " << checks << " checks passed\n";
 }

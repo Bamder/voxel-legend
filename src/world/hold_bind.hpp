@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+namespace plugin { const char* blockId(uint8_t id); }
+
 // Binding file: model skeleton <-> action clip <-> held item.
 // Path: assets/entities/<rig>.hold
 // One row is a relative pose of an item on a bone (usually arm_*_palm).
@@ -40,6 +42,8 @@ inline const char* defaultBone(const std::string& side) {
 
 inline std::string itemNameOf(uint8_t block) {
     if (block == AIR || !validBlock(block)) return {};
+    const char* id = plugin::blockId(block);
+    if (id && id[0]) return std::string(id);
     const char* n = blockOf(block).name;
     return n ? std::string(n) : std::string{};
 }
