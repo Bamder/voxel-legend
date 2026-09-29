@@ -418,7 +418,8 @@ private:
                          const Sky* sun = nullptr,
                          uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR,
                          bool bare = false);
-    void drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun);
+    void drawGuardians(const World& world, const Player& player, const UIState& ui,
+                       const Vec3& eye, const Mat4& vp, const Sky* sun);
     void drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
                            const UIState& ui, bool firstPerson);
     void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);

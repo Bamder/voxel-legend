@@ -1,0 +1,31 @@
+# Guardian attack. Only bones shared by the guardian models: torso and right arm.
+# Pivots are placeholders; playback rebinds them from each guardian's own parts.
+# One shot when a player enters range, then the pose returns to rest.
+name guardian_attack
+fps 20.000
+length 20
+loop 0
+rig player
+bone hip parent - pivot 0.0000 0.8800 0.0000
+bone chest parent hip pivot 0.0000 1.2900 0.0000
+bone head parent chest pivot 0.0000 1.4400 0.0000
+bone arm_l_upper parent chest pivot -0.2800 1.3000 0.0000
+bone arm_r_upper parent chest pivot 0.2800 1.3000 0.0000
+bone arm_r_fore parent arm_r_upper pivot 0.2800 1.0600 0.0000
+bone arm_r_hand parent arm_r_fore pivot 0.2800 0.8600 0.0000
+key 0 chest 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 4 chest 0.00000 0.00000 0.00000 -0.08000 0.00000 0.00000
+key 10 chest 0.00000 0.00000 0.00000 -0.20000 0.00000 0.00000
+key 19 chest 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 0 arm_r_upper 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 4 arm_r_upper 0.00000 0.00000 0.00000 -0.35000 0.00000 0.00000
+key 10 arm_r_upper 0.00000 0.00000 0.00000 -1.20000 0.00000 0.00000
+key 14 arm_r_upper 0.00000 0.00000 0.00000 -0.35000 0.00000 0.00000
+key 19 arm_r_upper 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 0 arm_r_fore 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 4 arm_r_fore 0.00000 0.00000 0.00000 -0.70000 0.00000 0.00000
+key 10 arm_r_fore 0.00000 0.00000 0.00000 -0.15000 0.00000 0.00000
+key 19 arm_r_fore 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 0 arm_r_hand 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 10 arm_r_hand 0.00000 0.00000 0.00000 -0.20000 0.00000 0.00000
+key 19 arm_r_hand 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000

@@ -72,6 +72,49 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
+struct AnimLibGeom {
+    float px = 0, py = 0, pw = 0, ph = 0;
+    float lx = 0, ly = 0, lw = 0, lh = 0, row = 28.0f;
+    int vis = 1;
+    float bx = 0, by = 0, bw = 0, bh = 36.0f, gap = 8.0f;
+};
+
+static AnimLibGeom animLibGeom() {
+    AnimLibGeom g;
+    g.pw = 520.0f;
+    g.ph = 520.0f;
+    if (g.ph > (float)g_winH - 40.0f) g.ph = (float)g_winH - 40.0f;
+    if (g.pw > (float)g_winW - 40.0f) g.pw = (float)g_winW - 40.0f;
+    if (g.pw < 280.0f) g.pw = 280.0f;
+    if (g.ph < 240.0f) g.ph = 240.0f;
+    g.px = ((float)g_winW - g.pw) * 0.5f;
+    g.py = ((float)g_winH - g.ph) * 0.5f;
+    g.lx = g.px + 16.0f;
+    g.ly = g.py + 64.0f;
+    g.lw = g.pw - 32.0f;
+    g.lh = g.ph - 64.0f - 84.0f;
+    if (g.lh < g.row) g.lh = g.row;
+    g.vis = (int)(g.lh / g.row);
+    if (g.vis < 1) g.vis = 1;
+    g.by = g.py + g.ph - 62.0f;
+    g.bw = (g.pw - 32.0f - 4.0f * g.gap) / 5.0f;
+    g.bx = g.px + 16.0f;
+    return g;
+}
+
+static void animLibClamp(const AnimLibGeom& g, int n, int& scroll, int& sel) {
+    int maxScroll = n - g.vis;
+    if (maxScroll < 0) maxScroll = 0;
+    if (scroll < 0) scroll = 0;
+    if (scroll > maxScroll) scroll = maxScroll;
+    if (n <= 0) { sel = -1; return; }
+    if (sel < 0) sel = 0;
+    if (sel >= n) sel = n - 1;
+    if (sel < scroll) scroll = sel;
+    if (sel >= scroll + g.vis) scroll = sel - g.vis + 1;
+    if (scroll < 0) scroll = 0;
+}
+
 static void loadWglExtensions() {
     HINSTANCE inst = GetModuleHandle(nullptr);
     HWND hw = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
@@ -177,6 +220,10 @@ struct Editor {
     bool modelMode = false;          // false = texture painter, true = model editor
     bool entityMode = false;         // edit the entity (player) model parts
     bool animMode = false;           // edit reusable .animation clips
+    bool animLibrary = false;        // pick a .animation file before editing it
+    int animLibSel = 0;
+    int animLibScroll = 0;
+    int animLibConfirm = -1;        // list index armed for delete
     int animView = 1;                // 0 skeleton only, 1 bound model + skeleton
     bool animPlaying = false;
     float animClock = 0.0f;          // fractional frame
@@ -2720,22 +2767,46 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (!animNames.empty()) loadAnimClip(animNames[0]);
         else newAnimClip();
     };
-    auto enterAnimMode = [&]() {
-        ed.animMode = true;
+    auto openAnimLibrary = [&]() {
         scanAnimFiles();
+        ed.animLibrary = true;
+        ed.animMode = false;
+        ed.animPlaying = false;
+        ed.modelMode = false;
+        ed.entityMode = false;
+        ed.animLibConfirm = -1;
+        if (animNames.empty()) ed.animLibSel = -1;
+        else if (ed.animLibSel < 0 || ed.animLibSel >= (int)animNames.size())
+            ed.animLibSel = 0;
+    };
+    auto openAnimFile = [&](const std::string& stem) {
+        ed.animLibrary = false;
+        ed.animMode = true;
+        ed.animLibConfirm = -1;
         if (animBindParts.empty()) loadAnimBind("player");
-        if (animNames.empty()) {
-            anim::Clip rig = anim::rigFromParts(animBindParts, animBindName);
-            anim::Clip idle = anim::makeIdle(rig);
-            idle.name = "idle";
-            anim::save(pack::animationFile("idle").c_str(), idle);
-            anim::Clip walk = anim::makeWalk(rig);
-            walk.name = "walk";
-            anim::save(pack::animationFile("walk").c_str(), walk);
-            scanAnimFiles();
-        }
-        loadAnimClip(animNames.empty() ? "idle" : animNames[0]);
+        loadAnimClip(stem);
         loadHoldFile();
+    };
+    auto dupAnimFile = [&](const std::string& stem) {
+        anim::Clip c = anim::load(pack::animationFile(stem).c_str());
+        if (c.bones.empty()) return;
+        std::string name = uniqueAnimName(stem);
+        c.name = name;
+        anim::save(pack::animationFile(name).c_str(), c);
+        scanAnimFiles();
+        for (int i = 0; i < (int)animNames.size(); ++i)
+            if (animNames[i] == name) { ed.animLibSel = i; break; }
+        ed.animLibConfirm = -1;
+    };
+    auto delAnimFile = [&](const std::string& stem) {
+        std::error_code ec;
+        std::filesystem::remove(pack::animationFile(stem), ec);
+        scanAnimFiles();
+        if (animNames.empty()) ed.animLibSel = -1;
+        else if (ed.animLibSel >= (int)animNames.size())
+            ed.animLibSel = (int)animNames.size() - 1;
+        else if (ed.animLibSel < 0) ed.animLibSel = 0;
+        ed.animLibConfirm = -1;
     };
     scanAnimFiles();
     auto clearEditorTools = [&]() {
@@ -4012,7 +4083,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     loadBlockModel(GRASS_TUFT);
 
     // Enter the requested mode (or stay on the chooser when startMode < 0).
-    if (startMode == 3) enterAnimMode();
+    if (startMode == 3) openAnimLibrary();
     else if (startMode == 2) ed.entityMode = true;
     else if (startMode == 1) ed.modelMode = true;
 
@@ -5652,7 +5723,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         };
 
         // mouse wheel: zoom the 3D view in model modes, or the canvas in texture mode.
-        if (g_wheel != 0) {
+        if (g_wheel != 0 && !ed.animLibrary) {
             if (ed.modelMode && ed.modelTool == 7 && inLeft3d) {
                 stepTexScaleSel(g_wheel > 0 ? 1 : -1);
                 g_wheel = 0;
@@ -5684,7 +5755,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     ed.skinPanY += paintDispH * (ratio - 1.0f) * (0.5f - v);
                     if (ed.skinViewZoom <= 1.001f) { ed.skinPanX = 0.0f; ed.skinPanY = 0.0f; }
                 }
-            } else if (!ed.animMode) {
+            } else if (!ed.animMode && !ed.animLibrary) {
                 ed.canvasZoom *= (g_wheel > 0) ? 1.2f : (1.0f / 1.2f);
                 if (ed.canvasZoom < 0.25f) ed.canvasZoom = 0.25f;
                 if (ed.canvasZoom > 3.0f) ed.canvasZoom = 3.0f;
@@ -5701,16 +5772,100 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
 
         bool tab = keyDown(VK_TAB);
         if (tab && !prevTab && startMode >= 0) {
-            if (ed.modelMode) bakeFillIfLeaving();
-            if (ed.animMode) { ed.animMode = false; ed.animPlaying = false; }
-            else if (!ed.modelMode && !ed.entityMode) { syncTilesToGL(); ed.modelMode = true; }
-            else if (ed.modelMode) { ed.modelMode = false; ed.entityMode = true; }
-            else { ed.entityMode = false; enterAnimMode(); }
-            clearEditorTools();
+            if (ed.animLibrary) {
+                ed.animLibrary = false;
+                ed.animLibConfirm = -1;
+                startMode = -1;
+            } else {
+                if (ed.modelMode) bakeFillIfLeaving();
+                if (ed.animMode) { ed.animMode = false; ed.animPlaying = false; }
+                else if (!ed.modelMode && !ed.entityMode) { syncTilesToGL(); ed.modelMode = true; }
+                else if (ed.modelMode) { ed.modelMode = false; ed.entityMode = true; }
+                else { ed.entityMode = false; openAnimLibrary(); }
+                clearEditorTools();
+            }
         }
         prevTab = tab;
 
-        if (startMode < 0) {
+        if (ed.animLibrary) {
+            AnimLibGeom lg = animLibGeom();
+            animLibClamp(lg, (int)animNames.size(), ed.animLibScroll, ed.animLibSel);
+            auto rowAt = [&](float x, float y) -> int {
+                if (x < lg.lx || x >= lg.lx + lg.lw || y < lg.ly || y >= lg.ly + lg.lh) return -1;
+                int row = (int)((y - lg.ly) / lg.row);
+                if (row < 0 || row >= lg.vis) return -1;
+                int idx = ed.animLibScroll + row;
+                if (idx < 0 || idx >= (int)animNames.size()) return -1;
+                return idx;
+            };
+            auto btnAt = [&](float x, float y) -> int {
+                if (y < lg.by || y >= lg.by + lg.bh) return -1;
+                for (int i = 0; i < 5; i++) {
+                    float bx = lg.bx + (float)i * (lg.bw + lg.gap);
+                    if (x >= bx && x < bx + lg.bw) return i;
+                }
+                return -1;
+            };
+            bool hasSel = ed.animLibSel >= 0 && ed.animLibSel < (int)animNames.size();
+            if (g_wheel != 0) {
+                if (mx >= lg.lx && mx < lg.lx + lg.lw && my >= lg.ly && my < lg.ly + lg.lh)
+                    ed.animLibScroll -= g_wheel / 120;
+                g_wheel = 0;
+                animLibClamp(lg, (int)animNames.size(), ed.animLibScroll, ed.animLibSel);
+            }
+            static bool prevUp = false, prevDown = false, prevEnter = false, prevDelK = false, prevEsc = false;
+            bool up = keyDown(VK_UP), down = keyDown(VK_DOWN);
+            bool enter = keyDown(VK_RETURN), delk = keyDown(VK_DELETE), esc = keyDown(VK_ESCAPE);
+            if (up && !prevUp && hasSel) { ed.animLibSel--; ed.animLibConfirm = -1; }
+            if (down && !prevDown && hasSel) { ed.animLibSel++; ed.animLibConfirm = -1; }
+            animLibClamp(lg, (int)animNames.size(), ed.animLibScroll, ed.animLibSel);
+            hasSel = ed.animLibSel >= 0 && ed.animLibSel < (int)animNames.size();
+            auto leaveLib = [&]() {
+                ed.animLibrary = false;
+                ed.animLibConfirm = -1;
+                startMode = -1;
+            };
+            auto openSel = [&]() {
+                if (hasSel) openAnimFile(animNames[ed.animLibSel]);
+            };
+            auto newFile = [&]() {
+                if (animBindParts.empty()) loadAnimBind("player");
+                newAnimClip();
+                ed.animLibrary = false;
+                ed.animMode = true;
+                ed.animLibConfirm = -1;
+                loadHoldFile();
+                scanAnimFiles();
+                for (int i = 0; i < (int)animNames.size(); ++i)
+                    if (animNames[i] == editClip.name) ed.animLibSel = i;
+            };
+            if (enter && !prevEnter) openSel();
+            if (esc && !prevEsc) {
+                if (ed.animLibConfirm >= 0) ed.animLibConfirm = -1;
+                else leaveLib();
+            }
+            if (delk && !prevDelK && hasSel) {
+                if (ed.animLibConfirm == ed.animLibSel) delAnimFile(animNames[ed.animLibSel]);
+                else ed.animLibConfirm = ed.animLibSel;
+            }
+            prevUp = up; prevDown = down; prevEnter = enter; prevDelK = delk; prevEsc = esc;
+            if (lmb && !prevLmb) {
+                int row = rowAt(mx, my);
+                int btn = btnAt(mx, my);
+                if (row >= 0) {
+                    if (row == ed.animLibSel) openSel();
+                    else { ed.animLibSel = row; ed.animLibConfirm = -1; }
+                } else if (btn == 0) openSel();
+                else if (btn == 1) newFile();
+                else if (btn == 2 && hasSel) dupAnimFile(animNames[ed.animLibSel]);
+                else if (btn == 3 && hasSel) {
+                    if (ed.animLibConfirm == ed.animLibSel) delAnimFile(animNames[ed.animLibSel]);
+                    else ed.animLibConfirm = ed.animLibSel;
+                } else if (btn == 4) leaveLib();
+                else ed.animLibConfirm = -1;
+            }
+            animLibClamp(lg, (int)animNames.size(), ed.animLibScroll, ed.animLibSel);
+        } else if (startMode < 0) {
             // ---- mode chooser (entry screen): pick texture / block / entity ----
             const float bw = 380.0f, bh = 64.0f, gap = 20.0f;
             const int nOpts = 6;
@@ -5732,7 +5887,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     clearEditorTools();
                     if (choice == 1) { syncTilesToGL(); ed.modelMode = true; }
                     else if (choice == 2) ed.entityMode = true;
-                    else if (choice == 3) enterAnimMode();
+                    else if (choice == 3) openAnimLibrary();
                 }
             }
         } else if (ed.animMode) {
@@ -10011,6 +10166,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 ed.entityMode = false;
                 ed.modelMode = false;
                 ed.animMode = false;
+                ed.animLibrary = false;
+                ed.animLibConfirm = -1;
                 ed.animPlaying = false;
                 ed.toolHover = -1;
                 clearEditorTools();
@@ -10022,6 +10179,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         if (f5 && !prevF5 && startMode >= 0) {
             if (ed.animMode) {
                 saveAnimClip();
+            } else if (ed.animLibrary) {
             } else if (ed.entityMode) {
                 saveEntity();
             } else if (ed.modelMode) {
@@ -10046,6 +10204,109 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         gl::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         gl::Disable(GL_DEPTH_TEST);
         gl::UseProgram(prog);
+
+        if (ed.animLibrary) {
+            AnimLibGeom lg = animLibGeom();
+            animLibClamp(lg, (int)animNames.size(), ed.animLibScroll, ed.animLibSel);
+            Mat4 libOrtho{};
+            libOrtho.m[0] = 2.0f / g_winW; libOrtho.m[5] = -2.0f / g_winH; libOrtho.m[10] = 1.0f;
+            libOrtho.m[12] = -1.0f; libOrtho.m[13] = 1.0f; libOrtho.m[15] = 1.0f;
+            std::vector<float> rv;
+            auto rect = [&](float x, float y, float w, float h, float r, float g, float b, float a) {
+                float v[6][7] = {
+                    {x,y,0,r,g,b,a},{x+w,y,0,r,g,b,a},{x+w,y+h,0,r,g,b,a},
+                    {x,y,0,r,g,b,a},{x+w,y+h,0,r,g,b,a},{x,y+h,0,r,g,b,a},
+                };
+                for (auto& e : v) for (int i = 0; i < 7; i++) rv.push_back(e[i]);
+            };
+            const char* labs[5] = { "Open", "New", "Dup", "Del", "Back" };
+            bool hasSel = ed.animLibSel >= 0 && ed.animLibSel < (int)animNames.size();
+            rect(lg.px, lg.py, lg.pw, lg.ph, 0.12f, 0.12f, 0.16f, 1.0f);
+            rect(lg.lx, lg.ly, lg.lw, lg.lh, 0.07f, 0.07f, 0.09f, 1.0f);
+            for (int row = 0; row < lg.vis; row++) {
+                int idx = ed.animLibScroll + row;
+                if (idx < 0 || idx >= (int)animNames.size()) break;
+                float y = lg.ly + (float)row * lg.row;
+                bool on = idx == ed.animLibSel;
+                bool hov = mx >= lg.lx && mx < lg.lx + lg.lw && my >= y && my < y + lg.row;
+                float r = on ? 0.28f : (hov ? 0.20f : 0.13f);
+                float gc = on ? 0.36f : (hov ? 0.24f : 0.14f);
+                float b = on ? 0.48f : (hov ? 0.30f : 0.18f);
+                rect(lg.lx + 2.0f, y + 1.0f, lg.lw - 4.0f, lg.row - 2.0f, r, gc, b, 1.0f);
+            }
+            for (int i = 0; i < 5; i++) {
+                float x = lg.bx + (float)i * (lg.bw + lg.gap);
+                bool enabled = (i == 1 || i == 4 || hasSel);
+                bool hov = enabled && mx >= x && mx < x + lg.bw && my >= lg.by && my < lg.by + lg.bh;
+                bool arm = i == 3 && hasSel && ed.animLibConfirm == ed.animLibSel;
+                float r = !enabled ? 0.14f : (arm ? 0.48f : (hov ? 0.30f : 0.22f));
+                float gc = !enabled ? 0.14f : (arm ? 0.18f : (hov ? 0.34f : 0.24f));
+                float b = !enabled ? 0.16f : (arm ? 0.16f : (hov ? 0.40f : 0.30f));
+                rect(x, lg.by, lg.bw, lg.bh, r, gc, b, 1.0f);
+            }
+            if (!rv.empty()) {
+                gl::BindVertexArray(vao);
+                gl::BindBuffer(GL_ARRAY_BUFFER, vbo);
+                gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(rv.size() * sizeof(float)), rv.data(), GL_STREAM_DRAW);
+                gl::UseProgram(prog);
+                gl::UniformMatrix4fv(uMVP, 1, GL_FALSE, libOrtho.m);
+                gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(rv.size() / 7));
+            }
+            auto blit = [&](const std::string& s, float tx, float ty) {
+                TextTex& tt = getTextTex(s);
+                if (!tt.tex) return;
+                float vtx[6][9] = {
+                    {tx,ty,0, 1,1,1,1, 0,0}, {tx+(float)tt.w,ty,0, 1,1,1,1, 1,0},
+                    {tx+(float)tt.w,ty+(float)tt.h,0, 1,1,1,1, 1,1},
+                    {tx,ty,0, 1,1,1,1, 0,0}, {tx+(float)tt.w,ty+(float)tt.h,0, 1,1,1,1, 1,1},
+                    {tx,ty+(float)tt.h,0, 1,1,1,1, 0,1},
+                };
+                gl::BindVertexArray(tvao);
+                gl::BindBuffer(GL_ARRAY_BUFFER, tvbo);
+                gl::BufferData(GL_ARRAY_BUFFER, sizeof(vtx), vtx, GL_STREAM_DRAW);
+                gl::UseProgram(tprog);
+                gl::UniformMatrix4fv(tuMVP, 1, GL_FALSE, libOrtho.m);
+                gl::BindTexture(GL_TEXTURE_2D, tt.tex);
+                gl::DrawArrays(GL_TRIANGLES, 0, 6);
+            };
+            auto center = [&](const std::string& s, float x, float y, float w, float h) {
+                TextTex& tt = getTextTex(s);
+                if (!tt.tex) return;
+                blit(s, x + (w - (float)tt.w) * 0.5f, y + (h - (float)tt.h) * 0.5f);
+            };
+            center("Animation Files", lg.px, lg.py + 12.0f, lg.pw, 28.0f);
+            if (animNames.empty())
+                center("No animation files", lg.lx, lg.ly, lg.lw, lg.lh);
+            else {
+                gl::Enable(GL_SCISSOR_TEST);
+                gl::Scissor((int)lg.lx, (int)((float)g_winH - (lg.ly + lg.lh)), (int)lg.lw, (int)lg.lh);
+                for (int row = 0; row < lg.vis; row++) {
+                    int idx = ed.animLibScroll + row;
+                    if (idx < 0 || idx >= (int)animNames.size()) break;
+                    TextTex& tt = getTextTex(animNames[idx]);
+                    if (!tt.tex) continue;
+                    float y = lg.ly + (float)row * lg.row;
+                    blit(animNames[idx], lg.lx + 10.0f, y + (lg.row - (float)tt.h) * 0.5f);
+                }
+                gl::Disable(GL_SCISSOR_TEST);
+            }
+            for (int i = 0; i < 5; i++) {
+                float x = lg.bx + (float)i * (lg.bw + lg.gap);
+                const char* lab = labs[i];
+                if (i == 3 && hasSel && ed.animLibConfirm == ed.animLibSel) lab = "Sure?";
+                center(lab, x, lg.by, lg.bw, lg.bh);
+            }
+            {
+                TextTex& ht = getTextTex("Enter opens. Del deletes. Esc returns.");
+                if (ht.tex) blit("Enter opens. Del deletes. Esc returns.", lg.px + 16.0f, lg.by - 22.0f);
+            }
+            gl::BindVertexArray(0);
+            gl::UseProgram(prog);
+            SetWindowTextA(g_hwnd, "Animation Files");
+            prevLmb = lmb; prevRmb = rmb; prevMmb = mmb;
+            SwapBuffers(g_hdc);
+            continue;
+        }
 
         // orthographic MVP for 2D
         Mat4 ortho;

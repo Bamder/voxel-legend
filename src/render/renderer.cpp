@@ -859,7 +859,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                                 AIR, AIR, AIR, true);
         }
 
-        drawGuardians(world, eye, vp, &sky);
+        drawGuardians(world, player, ui, eye, vp, &sky);
 
         if (ui.humidityMode) drawHumidity(world, eye, vp);
 
@@ -1929,19 +1929,40 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
     gl::Enable(GL_CULL_FACE);
 }
 
-void Renderer::drawGuardians(const World& world, const Vec3& eye, const Mat4& vp, const Sky* sun) {
+void Renderer::drawGuardians(const World& world, const Player& player, const UIState& ui,
+                             const Vec3& eye, const Mat4& vp, const Sky* sun) {
     std::vector<structure::GuardianSpan> guards;
     structure::collectGuardians(world, guards);
-    if (guards.empty()) return;
 
     static std::vector<pm::Part> parts[ritual::RelicCount];
     static bool loaded[ritual::RelicCount]{};
+    static anim::Clip attack;
+    static bool attackReady = false;
+    struct Swing { bool playing = false; bool inRange = false; float clock = 0.0f; };
+    static Swing swing[ritual::RelicCount];
+    if (!attackReady) {
+        attackReady = true;
+        attack = anim::load(pack::animationFile("guardian_attack").c_str());
+    }
+
+    const float reach2 = 3.6f * 3.6f;
+    float rdt = (ui.fps > 1.0f) ? (1.0f / ui.fps) : (1.0f / 60.0f);
+    bool seen[ritual::RelicCount]{};
+    if (guards.empty()) {
+        for (int i = 0; i < ritual::RelicCount; ++i) {
+            swing[i].inRange = false;
+            swing[i].playing = false;
+            swing[i].clock = 0.0f;
+        }
+        return;
+    }
 
     gl::Enable(GL_DEPTH_TEST);
     gl::DepthMask(GL_TRUE);
     gl::Disable(GL_CULL_FACE);
     for (const structure::GuardianSpan& g : guards) {
         if (g.relic < 0 || g.relic >= ritual::RelicCount) continue;
+        seen[g.relic] = true;
         if (!loaded[g.relic]) {
             loaded[g.relic] = true;
             const char* stem = structure::guardianAppearance(g.relic);
@@ -1951,6 +1972,43 @@ void Renderer::drawGuardians(const World& world, const Vec3& eye, const Mat4& vp
             }
         }
         if (parts[g.relic].empty()) continue;
+        auto closeTo = [&](const Vec3& feet) {
+            float dx = feet.x - g.feetX;
+            float dy = feet.y - (g.feetY + 1.1f);
+            float dz = feet.z - g.feetZ;
+            return dx * dx + dy * dy + dz * dz < reach2;
+        };
+        bool now = false;
+        if (!ui.menuWorld && !ui.playerDead && !player.noclip) now = closeTo(player.pos);
+        if (!now) {
+            for (const RemoteAvatar& rp : ui.remotes) {
+                if (rp.spectator || rp.dead) continue;
+                if (closeTo(rp.pos)) { now = true; break; }
+            }
+        }
+        Swing& sw = swing[g.relic];
+        if (now && !sw.inRange && !attack.bones.empty()) {
+            sw.playing = true;
+            sw.clock = 0.0f;
+        }
+        sw.inRange = now;
+        if (sw.playing) {
+            float fps = (attack.fps > 0.1f) ? attack.fps : 20.0f;
+            sw.clock += rdt * fps;
+            float end = (attack.length > 1) ? (float)(attack.length - 1) : 0.0f;
+            if (sw.clock >= end) {
+                sw.playing = false;
+                sw.clock = 0.0f;
+            }
+        }
+        const std::vector<pm::Part>* drawParts = &parts[g.relic];
+        std::vector<pm::Part> posed;
+        if (sw.playing) {
+            anim::Clip local = attack;
+            anim::rebindPivots(local, parts[g.relic]);
+            posed = anim::poseParts(parts[g.relic], local, sw.clock);
+            drawParts = &posed;
+        }
         Vec3 feet{ g.feetX, g.feetY, g.feetZ };
         auto xform = [&](const pm::Part& p, float lx, float ly, float lz) -> Vec3 {
             (void)p;
@@ -1959,7 +2017,7 @@ void Renderer::drawGuardians(const World& world, const Vec3& eye, const Mat4& vp
             return { feet.x + rx - eye.x, feet.y + ly - eye.y, feet.z + rz - eye.z };
         };
         pdraw::Mesh mesh;
-        pdraw::build(parts[g.relic], xform, [](const std::string&) { return false; }, false, false, mesh);
+        pdraw::build(*drawParts, xform, [](const std::string&) { return false; }, false, false, mesh);
         if (mesh.solid.empty()) continue;
         gl::UseProgram(progHum);
         if (sun) {
@@ -1978,6 +2036,12 @@ void Renderer::drawGuardians(const World& world, const Vec3& eye, const Mat4& vp
         gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(mesh.solid.size() * sizeof(float)), mesh.solid.data(), GL_STREAM_DRAW);
         gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(mesh.solid.size() / 7));
         gl::BindVertexArray(0);
+    }
+    for (int i = 0; i < ritual::RelicCount; ++i) {
+        if (seen[i]) continue;
+        swing[i].inRange = false;
+        swing[i].playing = false;
+        swing[i].clock = 0.0f;
     }
     gl::Enable(GL_CULL_FACE);
 }

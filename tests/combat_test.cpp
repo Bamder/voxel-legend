@@ -1,5 +1,6 @@
 #include "../src/world/combat.hpp"
 #include "../src/world/arcane.hpp"
+#include "../src/world/guardian_ai.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -193,7 +194,6 @@ int main() {
     for (uint32_t tick : {40u,60u,80u,100u}) if (arcane::takeBurnDamage(burning, tick)) ++burnTicks;
     check(burnTicks == 5 && !arcane::burning(burning, 105) && !arcane::takeBurnDamage(burning, 120),
           "refreshed burning has one cadence and expires naturally");
-
     arcane::Frozen frozen;
     arcane::freeze(frozen, 2, 9, 0);
     check(arcane::frozen(frozen, 0) && frozen.until == 100 && frozen.source == 2,
@@ -203,5 +203,207 @@ int main() {
           "repeat freeze refreshes one authoritative state");
     check(arcane::frozen(frozen, 149) && !arcane::frozen(frozen, 150),
           "refreshed freeze expires naturally");
+    using namespace guardian_ai;
+    auto foe = [](uint32_t id, float dist, float damage, float burst = 0.0f, float control = 0.0f) {
+        Sense s;
+        s.id = id;
+        s.alive = true;
+        s.distance = dist;
+        s.damage10s = damage;
+        s.burst10s = burst;
+        s.controlSeconds10s = control;
+        return s;
+    };
+    Body live;
+    Sense example = foe(1, 5.0f, 15000.0f, 8000.0f, 2.0f);
+    float exampleThreat = threat(example);
+    float distTerm = (15.0f / 20.0f) * 0.1f * 100.0f;
+    check(near(exampleThreat, 600.0f + 1600.0f + 0.3f + distTerm), "worked threat example");
+    check(exampleThreat > kBandHigh, "worked example is in the press band");
+    example.healing10s = 50000.0f;
+    example.taunt = true;
+    check(threat(example) == exampleThreat, "heal and taunt slots add nothing");
+    check(aggroSkill(SkillSlot::Taunt) && aggroSkill(SkillSlot::AggroTransfer) &&
+          !aggroSkill(SkillSlot::Melee), "aggro skills stay vacant slots");
+    check(threat(foe(1, 20.0f, 0.0f)) == 0.0f, "leash edge has no distance score");
+    Sense bad = foe(1, 5.0f, std::numeric_limits<float>::quiet_NaN(), -4.0f, -1.0f);
+    check(threat(bad) > 0.0f && threat(bad) < 20.0f, "invalid threat samples fail closed");
+
+    Brain brain;
+    check(think(brain, live, nullptr, 4, 0.05f).state == State::Idle, "no scan stays idle");
+    Sense far = foe(1, 25.0f, 999999.0f);
+    check(think(brain, live, &far, 1, 0.05f).state == State::Idle, "beyond leash is not a target");
+
+    brain = {};
+    Sense melee = foe(1, 3.0f, 50000.0f, 8000.0f);
+    Order order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Attack && order.target == 1 && order.move == Move::Approach &&
+          (order.skill == SkillSlot::Melee || order.skill == SkillSlot::SmallAoe) &&
+          !aggroSkill(order.skill), "melee high threat opens on a swing");
+    brain.cdSuppress = 100.0f;
+    bool leftCombo = false;
+    for (int i = 0; i < 20; ++i) {
+        order = think(brain, live, &melee, 1, 0.25f);
+        if (order.state != State::Attack) { leftCombo = true; break; }
+    }
+    check(leftCombo && order.state == State::Wander, "combo ends in wander while suppress is down");
+
+    int aoe = 0;
+    for (uint32_t seed = 1; seed <= 200; ++seed) {
+        Brain roll;
+        roll.rng = seed;
+        Order swing = think(roll, live, &melee, 1, 0.05f);
+        if (swing.skill == SkillSlot::SmallAoe) ++aoe;
+    }
+    check(aoe >= 20 && aoe <= 60, "about one swing in five is a small aoe");
+
+    brain = {};
+    Sense charging = foe(1, 12.0f, 50000.0f, 8000.0f);
+    order = think(brain, live, &charging, 1, 0.05f);
+    check(order.state == State::Charge && order.skill == SkillSlot::Charge &&
+          order.move == Move::Approach && !order.groupSuppress, "far high threat charges");
+    charging.distance = 3.0f;
+    order = think(brain, live, &charging, 1, 0.05f);
+    check(order.state == State::Attack && order.skill == SkillSlot::Melee, "charge connects into a melee");
+    charging.distance = 12.0f;
+    order = think(brain, live, &charging, 1, 0.05f);
+    check(order.state == State::Wander, "charge cooldown blocks an immediate recast");
+
+    brain = {};
+    order = think(brain, live, &charging, 1, 0.05f);
+    check(order.state == State::Charge, "charge can start once the cooldown is clear");
+    live.controlledSeconds = 0.2f;
+    order = think(brain, live, &charging, 1, 0.05f);
+    check(order.state == State::Evade && order.skill == SkillSlot::Dodge &&
+          order.move == Move::Retreat && near(order.invulnerable, kIFrame),
+          "control breaks a charge into a dodge");
+    live.controlledSeconds = 0.0f;
+
+    brain = {};
+    live.hp = 0.20f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Evade && order.skill == SkillSlot::Dodge, "low health opens on evade");
+    bool smoked = false;
+    for (int i = 0; i < 15 && !smoked; ++i) {
+        order = think(brain, live, &melee, 1, 0.40f);
+        if (order.skill == SkillSlot::Smoke) smoked = true;
+    }
+    check(smoked, "a chase after the dodge asks for smoke");
+    live.hp = 1.0f;
+
+    brain = {};
+    melee.windup = 0.60f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Evade, "a long windup is evaded");
+    melee.windup = 0.0f;
+
+    brain = {};
+    live.hp = 0.40f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Empower && order.skill == SkillSlot::SelfBuff &&
+          order.controlImmune && near(order.attackBonus, kAttackUp) &&
+          near(order.speedBonus, kSpeedUp), "half health empowers attack and speed");
+    live.hp = 1.0f;
+    melee.windup = 1.0f;
+    order = think(brain, live, &melee, 1, 1.0f);
+    check(order.state == State::Empower && order.controlImmune && order.skill == SkillSlot::None,
+          "empower ignores a windup");
+    live.focused = true;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Evade && !order.controlImmune, "focus fire ends empower early");
+    live.focused = false;
+    melee.windup = 0.0f;
+
+    brain = {};
+    live.hp = 0.20f;
+    live.combatSeconds = 300.0f;
+    melee.windup = 1.0f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.enraged && order.permanentBuff && order.controlImmune &&
+          order.state == State::Attack && near(order.attackBonus, kAttackUp),
+          "enrage keeps the buff and stops dodging");
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state != State::Evade && order.enraged, "enrage stays on the target");
+    live.hp = 1.0f;
+    live.combatSeconds = 0.0f;
+    melee.windup = 0.0f;
+
+    brain = {};
+    Sense pacing = foe(1, 10.0f, 35000.0f);
+    order = think(brain, {0.60f, 1.0f, 0.0f, false}, &pacing, 1, 0.05f);
+    check(order.state == State::Wander && !order.groupSuppress, "mid threat paces instead of charging");
+    for (int i = 0; i < 5; ++i)
+        order = think(brain, {0.60f, 1.0f, 0.0f, false}, &pacing, 1, 1.0f);
+    check(order.state == State::Wander, "five seconds of pacing does not cross the band yet");
+    order = think(brain, {0.60f, 1.0f, 0.0f, false}, &pacing, 1, 0.05f);
+    check(order.state == State::Charge, "lingering lowers the charge band");
+
+    brain = {};
+    Sense poke = foe(1, 10.0f, 2500.0f);
+    order = think(brain, {0.60f, 0.0f, 0.0f, false}, &poke, 1, 0.05f);
+    check(order.state == State::Wander, "low threat wanders");
+    bool poked = false;
+    for (int i = 0; i < 10 && !poked; ++i) {
+        order = think(brain, {0.60f, 0.0f, 0.0f, false}, &poke, 1, 0.50f);
+        if (order.skill == SkillSlot::Ranged) poked = true;
+        check(order.state == State::Wander, "a probe does not leave the orbit");
+    }
+    check(poked && (order.strafe == 1.0f || order.strafe == -1.0f), "orbit tries a ranged probe");
+
+    brain = {};
+    Sense grip = foe(1, 6.0f, 20000.0f);
+    order = think(brain, live, &grip, 1, 0.05f);
+    check(order.state == State::Suppress && order.skill == SkillSlot::Suppress, "healthy mid range suppresses");
+    reportSuppress(brain, true);
+    order = think(brain, live, &grip, 1, 0.05f);
+    check(order.state == State::Attack && order.skill == SkillSlot::Followup, "a landed suppress leads a follow-up");
+
+    brain = {};
+    think(brain, live, &grip, 1, 0.05f);
+    reportSuppress(brain, false);
+    order = think(brain, live, &grip, 1, 0.05f);
+    check(order.state == State::Wander, "a missed suppress returns to pacing");
+
+    brain = {};
+    think(brain, live, &grip, 1, 0.05f);
+    order = think(brain, live, &grip, 1, 0.50f);
+    check(order.state == State::Suppress, "suppress holds through its cast");
+    order = think(brain, live, &grip, 1, 0.50f);
+    check(order.state == State::Suppress, "suppress is still casting");
+    order = think(brain, live, &grip, 1, 0.50f);
+    check(order.state == State::Wander, "an unanswered suppress times out");
+
+    brain = {};
+    think(brain, live, &grip, 1, 0.05f);
+    live.controlledSeconds = 0.20f;
+    order = think(brain, live, &grip, 1, 0.05f);
+    check(order.state == State::Evade, "control breaks suppress");
+    live.controlledSeconds = 0.0f;
+
+    brain = {};
+    Sense pair[2] = { foe(1, 5.0f, 15000.0f, 8000.0f), foe(2, 6.0f, 80000.0f) };
+    order = think(brain, live, pair, 2, 0.05f);
+    check(order.target == 2 && order.groupSuppress, "highest threat is locked and a pair asks for group control");
+    pair[0].damage10s = 900000.0f;
+    order = think(brain, live, pair, 2, 0.05f);
+    check(order.target == 2 && !order.groupSuppress, "the lock holds and group control does not repeat");
+    pair[1].alive = false;
+    order = think(brain, live, pair, 2, 0.05f);
+    check(order.target == 1 && order.state != State::Idle, "a dead target is replaced");
+    pair[0].alive = false;
+    order = think(brain, live, pair, 2, 0.05f);
+    check(order.state == State::Idle && order.target == 0, "no living target returns to idle");
+
+    brain = {};
+    Sense decoy[2] = { foe(1, 4.0f, 10000.0f), foe(2, 40.0f, 999999.0f) };
+    decoy[0].healing10s = 1000000.0f;
+    decoy[0].taunt = true;
+    order = think(brain, live, decoy, 2, 0.05f);
+    check(order.target == 1, "out of range damage and vacant aggro do not steal the target");
+
+    live.hp = 0.0f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Idle && order.target == 0, "a dead guardian drops the fight");
+
     std::cout << "combat: " << checks << " checks passed\n";
 }
