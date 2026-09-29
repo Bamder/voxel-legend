@@ -97,6 +97,11 @@ void ensureTrialCore(World& world);
 
 bool inVolume(int x, int y, int z);
 bool paintFile(World& world, const std::string& path);
+// Paint ritual altar structure at world position (origin = center-bottom of altar)
+bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int altarIndex);
+// Number of available ritual altar variants
+inline constexpr int kRitualAltarCount = 6;
+const char* ritualAltarName(int altarIndex);
 bool saveFile(const World& world, const std::string& path);
 void clearVolume(World& world);
 

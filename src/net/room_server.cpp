@@ -19,6 +19,7 @@
 #include "../world/structure.hpp"
 #include "../world/world.hpp"
 #include "../world/matchmap.hpp"
+#include <filesystem>
 
 #include <algorithm>
 #include <chrono>
@@ -754,6 +755,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     // director. Until it does, no unbound ITEM_CLUE can advance progression.
     clue::Director clueDirector;
 
+    // Ritual altar placement: tracks which altars have been placed and team spawn info
+    bool ritualAltarsPlaced = false;
+    int ritualAltarTeamSpawns[matchmap::kCombatTeams][3] = {}; // [team][x, y, z]
+    bool ritualAltarUsedForTeam[matchmap::kCombatTeams] = {};   // whether team has an altar
+
     auto broadcastDeploy = [&]() {
         for (SClient& c : clients) {
             if (!c.sentWelcome || c.team < 1 || c.team > matchmap::kCombatTeams) continue;
@@ -856,6 +862,84 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     room_body::spawn(c.body, {c.x, c.y, c.z});
                     c.body.player.yaw = c.yaw;
                     c.body.player.pitch = c.pitch;
+                    // DEBUG: log spawn point to file
+                    snprintf(line, sizeof(line), "[DEBUG] Player %s spawned at team=%d, bx=%d, by=%d, bz=%d", c.name.c_str(), c.team, bx, by, bz);
+                    slog(log, line);
+                    // Place ritual altars near team spawn points (only once, when first player joins)
+                    if (!ritualAltarsPlaced && !c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams) {
+                        snprintf(line, sizeof(line), "[DEBUG] Entering altar placement for team=%d", c.team);
+                        slog(log, line);
+                        // Record this team's spawn point
+                        ritualAltarTeamSpawns[c.team - 1][0] = bx;
+                        ritualAltarTeamSpawns[c.team - 1][1] = by;
+                        ritualAltarTeamSpawns[c.team - 1][2] = bz;
+                        ritualAltarUsedForTeam[c.team - 1] = true;
+                        // Place altars when first player joins
+                        // Count active teams
+                        int activeTeams = 0;
+                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
+                            if (ritualAltarUsedForTeam[i]) activeTeams++;
+                        }
+                        // Use a simple seeded RNG based on server seed
+                        uint32_t rngSeed = seed ^ (uint32_t)(c.team * 7919);
+                        auto rng = [&]() {
+                            rngSeed = rngSeed * 1664525u + 1013904223u;
+                            return rngSeed >> 16;
+                        };
+                        // Assign altars to all active teams (one per team)
+                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
+                            if (!ritualAltarUsedForTeam[i]) continue;
+                            int altarIndex = i % structure::kRitualAltarCount;
+                            int wx = ritualAltarTeamSpawns[i][0];
+                            int wy = ritualAltarTeamSpawns[i][1];
+                            int wz = ritualAltarTeamSpawns[i][2];
+                            // Place altar 3-5 blocks away from spawn point
+                            int offsetX = (rng() % 5) - 2;
+                            int offsetZ = (rng() % 5) - 2;
+                            int finalX = wx + offsetX, finalZ = wz + offsetZ;
+                            // Ensure the column is loaded before placing altar
+                            int colX = finalX / cfg::CHUNK_X;
+                            int colZ = finalZ / cfg::CHUNK_Z;
+                            if (finalX < 0 && finalX % cfg::CHUNK_X != 0) colX--;
+                            if (finalZ < 0 && finalZ % cfg::CHUNK_Z != 0) colZ--;
+                            world.ensureColumn(colX, colZ);
+                            std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIndex)) + ".vlstruct";
+                            bool fileExists = std::filesystem::exists(altarPath);
+                            snprintf(line, sizeof(line), "[DEBUG] Placing altar %d (%s) for team %d at wx=%d, wy=%d, wz=%d col=(%d,%d) fileExists=%d",
+                                altarIndex, structure::ritualAltarName(altarIndex), i + 1, finalX, wy, finalZ, colX, colZ, fileExists ? 1 : 0);
+                            slog(log, line);
+                            structure::paintRitualAltar(world, finalX, wy, finalZ, altarIndex);
+                        }
+                        // Place remaining random altars to fill up to kRitualAltarCount (6)
+                        for (int extra = activeTeams; extra < structure::kRitualAltarCount; extra++) {
+                            // Pick a random team zone for the extra altar
+                            int zoneIdx = rng() % matchmap::kCombatTeams;
+                            matchmap::Zone zone = matchmap::combatZone(zoneIdx);
+                            int wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                            int wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                            int wy = world.surfaceHeight(wx, wz);
+                            if (wy < 1) wy = 1;
+                            // Offset from zone center
+                            int offsetX = (rng() % 8) - 4;
+                            int offsetZ = (rng() % 8) - 4;
+                            int finalX = wx + offsetX, finalZ = wz + offsetZ;
+                            // Ensure the column is loaded before placing altar
+                            int colX = finalX / cfg::CHUNK_X;
+                            int colZ = finalZ / cfg::CHUNK_Z;
+                            if (finalX < 0 && finalX % cfg::CHUNK_X != 0) colX--;
+                            if (finalZ < 0 && finalZ % cfg::CHUNK_Z != 0) colZ--;
+                            world.ensureColumn(colX, colZ);
+                            int altarIdx = extra % structure::kRitualAltarCount;
+                            std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIdx)) + ".vlstruct";
+                            bool fileExists = std::filesystem::exists(altarPath);
+                            snprintf(line, sizeof(line), "[DEBUG] Placing extra altar %d (%s) at wx=%d, wy=%d, wz=%d col=(%d,%d) fileExists=%d",
+                                altarIdx, structure::ritualAltarName(altarIdx), finalX, wy, finalZ, colX, colZ, fileExists ? 1 : 0);
+                            slog(log, line);
+                            structure::paintRitualAltar(world, finalX, wy, finalZ, altarIdx);
+                        }
+                        slog(log, "[DEBUG] All ritual altars placed!");
+                        ritualAltarsPlaced = true;
+                    }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
                     if (!decodePlayInput(p, end, in)) continue;

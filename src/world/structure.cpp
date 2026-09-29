@@ -786,4 +786,68 @@ bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, Guardia
     return any;
 }
 
+// Ritual altar file names
+const char* ritualAltarName(int altarIndex) {
+    switch (altarIndex) {
+        case 0: return "ritual_element";
+        case 1: return "ritual_god";
+        case 2: return "ritual_old_god";
+        case 3: return "ritual_outer";
+        case 4: return "ritual_time";
+        case 5: return "ritual_worldtree";
+        default: return "ritual_element";
+    }
+}
+
+bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int altarIndex) {
+    if (altarIndex < 0 || altarIndex >= kRitualAltarCount) altarIndex = 0;
+    std::string path = "assets/structures/";
+    path += ritualAltarName(altarIndex);
+    path += ".vlstruct";
+    // DEBUG: log path and file existence
+    bool fileExists = std::filesystem::exists(path);
+    Blueprint b;
+    if (!fileExists || !readBlueprint(path, b)) {
+        // Fallback: create a simple altar platform with stone and gold
+        for (int lz = -2; lz <= 2; lz++) {
+            for (int lx = -2; lx <= 2; lx++) {
+                int x = worldX + lx;
+                int y = worldY;
+                int z = worldZ + lz;
+                uint8_t block = (lx == 0 && lz == 0) ? (uint8_t)COBBLE : (uint8_t)STONE;
+                world.setBlock(x, y, z, block, true);
+            }
+        }
+        // Add a small pillar in the center
+        for (int y = worldY + 1; y <= worldY + 3; y++) {
+            world.setBlock(worldX, y, worldZ, (uint8_t)COBBLE, true);
+        }
+        world.setBlock(worldX, worldY + 4, worldZ, (uint8_t)PLANKS, true);
+        return true;
+    }
+    // Center the altar: place it so its center aligns with worldX, worldZ
+    int offsetX = worldX - b.sx / 2;
+    int offsetY = worldY;
+    int offsetZ = worldZ - b.sz / 2;
+    int placed = 0;
+    for (int ly = 0; ly < b.sy; ly++) {
+        for (int lz = 0; lz < b.sz; lz++) {
+            for (int lx = 0; lx < b.sx; lx++) {
+                uint8_t block = b.at(lx, ly, lz);
+                if (block == AIR) continue;
+                int x = offsetX + lx;
+                int y = offsetY + ly;
+                int z = offsetZ + lz;
+                if (y < 0 || y >= cfg::WORLD_H) continue;
+                world.setBlock(x, y, z, block, true);
+                placed++;
+            }
+        }
+    }
+    // Log for debugging
+    fprintf(stderr, "[DEBUG] Altar %s: placed %d blocks at (%d,%d,%d) offset=(%d,%d,%d) size=(%d,%d,%d)\n",
+        ritualAltarName(altarIndex), placed, worldX, worldY, worldZ, offsetX, offsetY, offsetZ, b.sx, b.sy, b.sz);
+    return true;
+}
+
 } // namespace structure
