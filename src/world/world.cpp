@@ -374,7 +374,6 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     uint8_t prevFlags = it->second.flagAt(lx, ly, lz);
     uint32_t prevBind = it->second.treeIdAt(lx, ly, lz);
     bool cutAliveWood = isTreeWood(prev) && (prevFlags & FLAG_ALIVE) && b != prev;
-    bool cutTallGrass = (prev == GRASS_TUFT && b != prev);
     it->second.set(lx, ly, lz, b);
     it->second.setFlag(lx, ly, lz, 0); // player / other placement is death
     if (cellFlags >= 0)
@@ -486,21 +485,23 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     }
 
     if (prev != b) {
-        plugin::BlockEvent ev{ this, x, y, z, b, prev };
+        plugin::BlockEvent ev{ this, x, y, z, b, prev, -1, markModified, updateMesh };
         if (prev != AIR) plugin::blockStrategy(prev)->onBreak(ev);
         if (b != AIR) plugin::blockStrategy(b)->onPlace(ev);
-        static const int kN[6][3] = { {0,1,0},{0,-1,0},{1,0,0},{-1,0,0},{0,0,1},{0,0,-1} };
-        for (int i = 0; i < 6; i++) {
-            int nx = x + kN[i][0], ny = y + kN[i][1], nz = z + kN[i][2];
-            uint8_t nb = getBlock(nx, ny, nz);
-            if (nb == AIR) continue;
-            plugin::BlockEvent nev{ this, nx, ny, nz, nb, nb };
-            plugin::blockStrategy(nb)->onNeighborChanged(nev);
+        // Breaking / replacing a cell: each of the six neighbors self-checks.
+        if (prev != AIR) {
+            for (int f = 0; f < 6; f++) {
+                const geo::FaceDef& F = geo::kFaces[f];
+                int nx = x + F.n[0], ny = y + F.n[1], nz = z + F.n[2];
+                uint8_t nb = getBlock(nx, ny, nz);
+                if (nb == AIR) continue;
+                // Neighbor's face toward this cell is the opposite of f.
+                plugin::BlockEvent nev{ this, nx, ny, nz, nb, nb, f ^ 1, markModified, updateMesh };
+                plugin::blockStrategy(nb)->onSelfCheck(nev);
+            }
         }
     }
 
-    if (cutTallGrass && getBlock(x, y + 1, z) == GRASS_TUFT)
-        setBlock(x, y + 1, z, AIR, markModified, updateMesh);
     if (cutAliveWood) detachAliveTree(x, y, z, prevBind);
 }
 

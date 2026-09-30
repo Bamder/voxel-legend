@@ -191,6 +191,14 @@ struct GrassTuftStrategy : BlockStrategy {
                                 u0, v0, u1, v1, hScale);
         return true;
     }
+    // Self-check from the cell below: without solid ground (or a lower tuft
+    // for the upper half of a 2-tall plant), this tuft breaks itself.
+    void onSelfCheck(BlockEvent& ev) override {
+        if (ev.face != 1 || !ev.world) return; // 1 = -Y (geo::kFaces)
+        uint8_t below = (ev.y > 0) ? ev.world->getBlock(ev.x, ev.y - 1, ev.z) : (uint8_t)AIR;
+        if (isSolid(below) || below == GRASS_TUFT) return;
+        ev.world->setBlock(ev.x, ev.y, ev.z, AIR, ev.markModified, ev.updateMesh);
+    }
 };
 struct PlayerStrategy : EntityStrategy {
     // Physics stays in Player::update. onTick picks idle / walk / run and

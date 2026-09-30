@@ -33,6 +33,12 @@ struct BlockEvent {
     int x = 0, y = 0, z = 0;
     uint8_t id = 0;
     uint8_t previous = 0;
+    // For onSelfCheck: which face of this cell touches the neighbor that
+    // changed (geo::kFaces order). -1 when the event is not a self-check.
+    int face = -1;
+    // Propagated from World::setBlock so cascaded breaks keep the same flags.
+    bool markModified = true;
+    bool updateMesh = true;
 };
 
 struct EntityEvent {
@@ -47,7 +53,9 @@ struct BlockStrategy {
     virtual void onPlace(BlockEvent&) {}
     virtual void onBreak(BlockEvent&) {}
     virtual void onRandomTick(BlockEvent&) {}
-    virtual void onNeighborChanged(BlockEvent&) {}
+    // Fired on the six neighbors after this cell is broken or replaced.
+    // `ev.face` is the side of the neighbor that touched the changed cell.
+    virtual void onSelfCheck(BlockEvent&) {}
     // Return true if the click was consumed (do not place a held block).
     virtual bool onInteract(BlockEvent&) { return false; }
     virtual bool canBreak(uint8_t) const { return true; }
