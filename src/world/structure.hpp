@@ -120,4 +120,9 @@ bool deleteFile(const std::string& name);
 
 void collectBuildBlocks(std::vector<uint8_t>& out);
 
+// Stonehenge structure
+inline constexpr int kStonehengeCount = 1;
+const char* stonehengeName(int index);
+bool paintStonehenge(World& world, int worldX, int& worldY, int worldZ, int stonehengeIndex);
+
 } // namespace structure

@@ -1007,6 +1007,33 @@ bool paintRitualAltar(World& world, int worldX, int& worldY, int worldZ, int alt
     return true;
 }
 
+// Stonehenge structure file names
+const char* stonehengeName(int stonehengeIndex) {
+    switch (stonehengeIndex) {
+        case 0: return "stonehenge";
+        default: return "stonehenge";
+    }
+}
+
+bool paintStonehenge(World& world, int worldX, int& worldY, int worldZ, int stonehengeIndex) {
+    if (stonehengeIndex < 0 || stonehengeIndex >= kStonehengeCount) stonehengeIndex = 0;
+    std::string path = "assets/structures/";
+    path += stonehengeName(stonehengeIndex);
+    path += ".vlstruct";
+    Blueprint b;
+    bool loaded = std::filesystem::exists(path) && readBlueprint(path, b);
+    if (!loaded) {
+        // Fallback: create a simple stonehenge-like structure
+        b.sx = 41; b.sy = 11; b.sz = 41;
+        b.blocks = std::vector<uint8_t>((size_t)b.sx * b.sy * b.sz, 0);
+    }
+    int placed = 0;
+    worldY = stampBlueprint(world, worldX, worldZ, b, placed);
+    fprintf(stderr, "[DEBUG] Stonehenge %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d) loaded=%d\n",
+        stonehengeName(stonehengeIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz, loaded ? 1 : 0);
+    return true;
+}
+
 // Room building file names (props, weapon, clue). The files are medieval
 // houses written by tools/stl2vlstruct/medieval_rooms.py.
 const char* roomBuildingName(int roomIndex) {

@@ -932,6 +932,46 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         }
                         slog(log, "[DEBUG] All ritual altars placed!");
 
+                        // Place 3 stonehenge structures
+                        // Stonehenge is ~41 blocks diameter, so halfSize = 21
+                        for (int shIdx = 0; shIdx < 3; shIdx++) {
+                            int wx, wz;
+                            if (shIdx == 0) {
+                                // First stonehenge: near team 1 spawn point (spawn point)
+                                wx = ritualAltarTeamSpawns[0][0];
+                                wz = ritualAltarTeamSpawns[0][2];
+                                // Offset 60-80 blocks from spawn, towards north-east to avoid conflicts
+                                wx += 70;
+                                wz -= 70;
+                            } else if (shIdx == 1) {
+                                // Second stonehenge: random zone, far from spawns
+                                int zoneIdx = (shIdx * 3) % matchmap::kCombatTeams;
+                                matchmap::Zone zone = matchmap::combatZone(zoneIdx);
+                                wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                                wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                                // Offset to corner of zone
+                                wx -= 50;
+                                wz += 50;
+                            } else {
+                                // Third stonehenge: another random zone
+                                int zoneIdx = (shIdx * 7) % matchmap::kCombatTeams;
+                                matchmap::Zone zone = matchmap::combatZone(zoneIdx);
+                                wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                                wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                                // Offset to opposite corner
+                                wx += 50;
+                                wz += 50;
+                            }
+                            int wy = 0;
+                            std::string stonehengePath = "assets/structures/" + std::string(structure::stonehengeName(0)) + ".vlstruct";
+                            bool fileExists = std::filesystem::exists(stonehengePath);
+                            structure::paintStonehenge(world, wx, wy, wz, 0);
+                            snprintf(line, sizeof(line), "[DEBUG] Placing stonehenge %d at wx=%d, wy=%d, wz=%d fileExists=%d",
+                                shIdx, wx, wy, wz, fileExists ? 1 : 0);
+                            slog(log, line);
+                        }
+                        slog(log, "[DEBUG] All stonehenge structures placed!");
+
                         // Place room buildings near team spawn points (3 types: props, weapon, clue)
                         // Record altar positions for spacing
                         struct PlacedBuilding {
