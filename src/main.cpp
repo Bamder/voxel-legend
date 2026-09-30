@@ -2803,11 +2803,7 @@ int main(int argc, char** argv) {
             ui.dummyActive = false;
             tickSpeed = 1.0f;
         }
-        if (structureEdit) {
-            player.privilegeMode = true;
-            player.flying = true;
-            player.dead = false;
-        }
+        if (structureEdit) player.dead = false;
         if (!player.privilegeMode || roomSession || structureEdit) ui.quickBreak = false;
         if (player.dead) targetPanel = -1;
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
@@ -4045,7 +4041,8 @@ int main(int argc, char** argv) {
                     IVec3 place = ui.placePreview;
                     if (world.getBlock(place.x, place.y, place.z) == AIR
                         && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
-                        world.setBlock(place.x, place.y, place.z, carry.block, true);
+                        world.setBlock(place.x, place.y, place.z, carry.block, true, true,
+                                       world.faceFromHitNormal(nrm));
                         noteRoomEdit(place.x, place.y, place.z, carry.block);
                         carry.clear();
                         ui.hasPlacePreview = false;
@@ -4085,7 +4082,8 @@ int main(int argc, char** argv) {
                     world.setBlock(hit.x, hit.y, hit.z, AIR, false, true);
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
-                    world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
+                    world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true,
+                                   world.faceFromHitNormal(nrm));
                 bool quickBroke = false;
                 if (ui.quickBreak && player.privilegeMode && !roomSession && !structureEdit
                     && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
@@ -4311,7 +4309,8 @@ int main(int argc, char** argv) {
                                 if (!sel.empty() && (offering || plugin::blockStrategy(sel.block)->canPlace(sel.block))) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
-                                        world.setBlock(place.x, place.y, place.z, sel.block, true);
+                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true,
+                                                       world.faceFromHitNormal(nrm));
                                         noteRoomEdit(place.x, place.y, place.z, sel.block);
                                         if (--sel.count == 0) sel.clear();
                                     }
@@ -4397,7 +4396,7 @@ int main(int argc, char** argv) {
                     if (roomSession)
                         vin.borderDrain = matchmap::vitalRate(matchmap::outwardT(player.pos.x, player.pos.z));
                     vitals::tick(player.vitals, player.fatigue, vin, cfg::FIXED_DT);
-                    if (vitals::isDead(player.vitals)) {
+                    if (vitals::isDead(player.vitals) && !structureEdit) {
                         player.dead = true;
                         player.vel = { 0, 0, 0 };
                         if (roomSession && !deploying) openDeploy(true);

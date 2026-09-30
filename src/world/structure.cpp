@@ -9,6 +9,7 @@
 #include "arcane.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -16,13 +17,32 @@
 namespace structure {
 namespace {
 
+// Named per-cell tags live after the block payload. Each set flag bit is one
+// tag from kCellFlagTag, so every marker round-trips without its own save code.
+struct CellTag {
+    int x = 0, y = 0, z = 0;
+    std::string name;
+};
+
 struct Blueprint {
     std::string name;
     int sx = 0, sy = 0, sz = 0;
     std::vector<uint8_t> blocks;
+    std::vector<CellTag> tags;
     uint8_t at(int x, int y, int z) const {
         if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) return AIR;
         return blocks[(size_t)((y * sz + z) * sx + x)];
+    }
+    uint8_t flagsAt(int x, int y, int z) const {
+        uint8_t flags = 0;
+        for (const CellTag& t : tags) {
+            if (t.x != x || t.y != y || t.z != z) continue;
+            for (int bit = 0; bit < 8; ++bit) {
+                if (t.name == kCellFlagTag[bit])
+                    flags = (uint8_t)(flags | (1u << bit));
+            }
+        }
+        return flags;
     }
 };
 
@@ -124,6 +144,19 @@ bool writeBlueprint(const std::string& path, const Blueprint& b) {
     f.write((const char*)&sz, 4);
     if (!b.blocks.empty())
         f.write((const char*)b.blocks.data(), (std::streamsize)b.blocks.size());
+    if (!b.tags.empty()) {
+        uint32_t n = (uint32_t)b.tags.size();
+        f.write((const char*)&n, 4);
+        for (const CellTag& t : b.tags) {
+            uint16_t x = (uint16_t)t.x, y = (uint16_t)t.y, z = (uint16_t)t.z;
+            uint8_t len = (uint8_t)std::min(t.name.size(), (size_t)32);
+            f.write((const char*)&x, 2);
+            f.write((const char*)&y, 2);
+            f.write((const char*)&z, 2);
+            f.write((const char*)&len, 1);
+            if (len) f.write(t.name.data(), len);
+        }
+    }
     return (bool)f;
 }
 
@@ -135,7 +168,8 @@ bool readBlueprint(const std::string& path, Blueprint& b) {
     if (std::memcmp(magic, "VLSTRUCT", 8) != 0) return false;
     uint16_t ver = 0;
     f.read((char*)&ver, 2);
-    if (ver != 1) return false;
+    // Version 2 stores the same sx/sy/sz block payload as version 1.
+    if (ver != 1 && ver != 2) return false;
     int32_t sx = 0, sy = 0, sz = 0;
     f.read((char*)&sx, 4);
     f.read((char*)&sy, 4);
@@ -150,7 +184,36 @@ bool readBlueprint(const std::string& path, Blueprint& b) {
     for (uint8_t& cell : b.blocks) {
         if (cell >= liveBlockCount()) cell = AIR;
     }
+    b.tags.clear();
     b.name = std::filesystem::path(path).stem().string();
+    // Reading the last block byte sets eof. Clear it before measuring a trailer.
+    // Older files end after the block array. A tag trailer is optional.
+    f.clear();
+    std::streampos mark = f.tellg();
+    if (mark == std::streampos(-1)) return true;
+    f.seekg(0, std::ios::end);
+    std::streampos end = f.tellg();
+    f.clear();
+    f.seekg(mark);
+    if (end == std::streampos(-1) || end - mark < 4) return true;
+    uint32_t n = 0;
+    f.read((char*)&n, 4);
+    size_t volume = (size_t)sx * (size_t)sy * (size_t)sz;
+    if (!f || n > volume * 4) return true;
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t x = 0, y = 0, z = 0;
+        uint8_t len = 0;
+        f.read((char*)&x, 2);
+        f.read((char*)&y, 2);
+        f.read((char*)&z, 2);
+        f.read((char*)&len, 1);
+        if (!f || len > 32) return true;
+        std::string name(len, '\0');
+        if (len) f.read(name.data(), len);
+        if (!f) return true;
+        if (x < sx && y < sy && z < sz && !name.empty())
+            b.tags.push_back(CellTag{ (int)x, (int)y, (int)z, name });
+    }
     return true;
 }
 
@@ -349,7 +412,8 @@ bool paintFile(World& world, const std::string& path) {
                 int y = kEditY + ly;
                 int z = kEditZ + lz;
                 if (!inVolume(x, y, z)) continue;
-                world.setBlock(x, y, z, b.at(lx, ly, lz), false, true);
+                uint8_t block = b.at(lx, ly, lz);
+                world.setBlock(x, y, z, block, false, true, -1, b.flagsAt(lx, ly, lz));
             }
         }
     }
@@ -386,7 +450,15 @@ bool saveFile(const World& world, const std::string& path) {
     for (int y = minY; y <= maxY; y++) {
         for (int z = minZ; z <= maxZ; z++) {
             for (int x = minX; x <= maxX; x++) {
-                b.blocks[(size_t)idxOf(b, x - minX, y - minY, z - minZ)] = world.getBlock(x, y, z);
+                int lx = x - minX, ly = y - minY, lz = z - minZ;
+                uint8_t block = world.getBlock(x, y, z);
+                b.blocks[(size_t)idxOf(b, lx, ly, lz)] = block;
+                if (block == AIR) continue;
+                uint8_t flags = world.getFlags(x, y, z);
+                for (int bit = 0; bit < 8; ++bit) {
+                    if (flags & (uint8_t)(1u << bit))
+                        b.tags.push_back(CellTag{ lx, ly, lz, kCellFlagTag[bit] });
+                }
             }
         }
     }
@@ -810,6 +882,113 @@ bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, Guardia
     return any;
 }
 
+namespace {
+
+void ensureSpan(World& world, int x0, int z0, int x1, int z1) {
+    if (x1 < x0 || z1 < z0) return;
+    int cx0 = floorDiv(x0, cfg::CHUNK_X);
+    int cx1 = floorDiv(x1, cfg::CHUNK_X);
+    int cz0 = floorDiv(z0, cfg::CHUNK_Z);
+    int cz1 = floorDiv(z1, cfg::CHUNK_Z);
+    for (int cz = cz0; cz <= cz1; ++cz) {
+        for (int cx = cx0; cx <= cx1; ++cx)
+            world.ensureColumn(cx, cz);
+    }
+}
+
+int footprintFloor(World& world, int x0, int z0, int x1, int z1, int height) {
+    int floorY = 1;
+    for (int z = z0; z <= z1; ++z) {
+        for (int x = x0; x <= x1; ++x) {
+            int h = world.surfaceHeight(x, z);
+            if (h > floorY) floorY = h;
+        }
+    }
+    if (height < 1) height = 1;
+    if (floorY > cfg::WORLD_H - height) floorY = cfg::WORLD_H - height;
+    if (floorY < 1) floorY = 1;
+    return floorY;
+}
+
+void putSolid(World& world, int x, int y, int z, uint8_t block, int placeFace = -1, int cellFlags = -1) {
+    if (y < 0 || y >= cfg::WORLD_H) return;
+    world.setBlock(x, y, z, block, true, false, placeFace, cellFlags);
+}
+
+// Bottom sits on the highest terrain under the box. Columns that have a solid
+// on the blueprint's bottom layer are filled up from the local surface.
+int stampBlueprint(World& world, int worldX, int worldZ, const Blueprint& b, int& placed) {
+    int x0 = worldX - b.sx / 2;
+    int z0 = worldZ - b.sz / 2;
+    int x1 = x0 + b.sx - 1;
+    int z1 = z0 + b.sz - 1;
+    ensureSpan(world, x0, z0, x1, z1);
+    int floorY = footprintFloor(world, x0, z0, x1, z1, b.sy);
+    for (int lz = 0; lz < b.sz; ++lz) {
+        for (int lx = 0; lx < b.sx; ++lx) {
+            uint8_t base = b.at(lx, 0, lz);
+            if (base == AIR) continue;
+            int x = x0 + lx;
+            int z = z0 + lz;
+            int ground = world.surfaceHeight(x, z);
+            for (int y = ground; y < floorY; ++y)
+                putSolid(world, x, y, z, base);
+        }
+    }
+    placed = 0;
+    for (int ly = 0; ly < b.sy; ++ly) {
+        for (int lz = 0; lz < b.sz; ++lz) {
+            for (int lx = 0; lx < b.sx; ++lx) {
+                uint8_t block = b.at(lx, ly, lz);
+                if (block == AIR) continue;
+                putSolid(world, x0 + lx, floorY + ly, z0 + lz, block, -1, b.flagsAt(lx, ly, lz));
+                placed++;
+            }
+        }
+    }
+    return floorY;
+}
+
+Blueprint fallbackAltar() {
+    Blueprint b;
+    b.sx = 5;
+    b.sy = 5;
+    b.sz = 5;
+    b.blocks.assign(125, (uint8_t)AIR);
+    auto set = [&](int x, int y, int z, uint8_t block) {
+        b.blocks[(size_t)((y * b.sz + z) * b.sx + x)] = block;
+    };
+    for (int z = 0; z < 5; ++z) {
+        for (int x = 0; x < 5; ++x)
+            set(x, 0, z, (x == 2 && z == 2) ? (uint8_t)COBBLE : (uint8_t)STONE);
+    }
+    for (int y = 1; y <= 3; ++y) set(2, y, 2, (uint8_t)COBBLE);
+    set(2, 4, 2, (uint8_t)PLANKS);
+    return b;
+}
+
+Blueprint fallbackRoom() {
+    Blueprint b;
+    b.sx = 7;
+    b.sy = 4;
+    b.sz = 7;
+    b.blocks.assign((size_t)b.sx * b.sy * b.sz, (uint8_t)AIR);
+    for (int y = 0; y < b.sy; ++y) {
+        for (int z = 0; z < b.sz; ++z) {
+            for (int x = 0; x < b.sx; ++x) {
+                bool shell = y == 0 || x == 0 || x == b.sx - 1 || z == 0 || z == b.sz - 1;
+                uint8_t block = AIR;
+                if (shell) block = (uint8_t)PLANKS;
+                else if (y == b.sy - 1) block = (uint8_t)WOOD;
+                b.blocks[(size_t)((y * b.sz + z) * b.sx + x)] = block;
+            }
+        }
+    }
+    return b;
+}
+
+} // namespace
+
 // Ritual altar file names
 const char* ritualAltarName(int altarIndex) {
     switch (altarIndex) {
@@ -823,54 +1002,18 @@ const char* ritualAltarName(int altarIndex) {
     }
 }
 
-bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int altarIndex) {
+bool paintRitualAltar(World& world, int worldX, int& worldY, int worldZ, int altarIndex) {
     if (altarIndex < 0 || altarIndex >= kRitualAltarCount) altarIndex = 0;
     std::string path = "assets/structures/";
     path += ritualAltarName(altarIndex);
     path += ".vlstruct";
-    // DEBUG: log path and file existence
-    bool fileExists = std::filesystem::exists(path);
     Blueprint b;
-    if (!fileExists || !readBlueprint(path, b)) {
-        // Fallback: create a simple altar platform with stone and gold
-        for (int lz = -2; lz <= 2; lz++) {
-            for (int lx = -2; lx <= 2; lx++) {
-                int x = worldX + lx;
-                int y = worldY;
-                int z = worldZ + lz;
-                uint8_t block = (lx == 0 && lz == 0) ? (uint8_t)COBBLE : (uint8_t)STONE;
-                world.setBlock(x, y, z, block, true, false);
-            }
-        }
-        // Add a small pillar in the center
-        for (int y = worldY + 1; y <= worldY + 3; y++) {
-            world.setBlock(worldX, y, worldZ, (uint8_t)COBBLE, true, false);
-        }
-        world.setBlock(worldX, worldY + 4, worldZ, (uint8_t)PLANKS, true, false);
-        return true;
-    }
-    // Center the altar: place it so its center aligns with worldX, worldZ
-    int offsetX = worldX - b.sx / 2;
-    int offsetY = worldY;
-    int offsetZ = worldZ - b.sz / 2;
+    bool loaded = std::filesystem::exists(path) && readBlueprint(path, b);
+    if (!loaded) b = fallbackAltar();
     int placed = 0;
-    for (int ly = 0; ly < b.sy; ly++) {
-        for (int lz = 0; lz < b.sz; lz++) {
-            for (int lx = 0; lx < b.sx; lx++) {
-                uint8_t block = b.at(lx, ly, lz);
-                if (block == AIR) continue;
-                int x = offsetX + lx;
-                int y = offsetY + ly;
-                int z = offsetZ + lz;
-                if (y < 0 || y >= cfg::WORLD_H) continue;
-                world.setBlock(x, y, z, block, true, false);
-                placed++;
-            }
-        }
-    }
-    // Log for debugging
-    fprintf(stderr, "[DEBUG] Altar %s: placed %d blocks at (%d,%d,%d) offset=(%d,%d,%d) size=(%d,%d,%d)\n",
-        ritualAltarName(altarIndex), placed, worldX, worldY, worldZ, offsetX, offsetY, offsetZ, b.sx, b.sy, b.sz);
+    worldY = stampBlueprint(world, worldX, worldZ, b, placed);
+    fprintf(stderr, "[DEBUG] Altar %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d) loaded=%d\n",
+        ritualAltarName(altarIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz, loaded ? 1 : 0);
     return true;
 }
 
@@ -881,8 +1024,11 @@ bool paintMatchRitualAltar(World& world, int ritual) {
     for (int cz = floorDiv(z - 21, cfg::CHUNK_Z); cz <= floorDiv(z + 21, cfg::CHUNK_Z); ++cz)
         for (int cx = floorDiv(x - 21, cfg::CHUNK_X); cx <= floorDiv(x + 21, cfg::CHUNK_X); ++cx)
             world.ensureColumn(cx, cz);
-    const int ground = altarGround(world, *site);
-    if (!paintRitualAltar(world, x, ground, z, ritual)) return false;
+    int blueprintFloor = altarGround(world, *site);
+    if (!paintRitualAltar(world, x, blueprintFloor, z, ritual)) return false;
+    // The new blueprints can have a raised center. The ritual rule reads the
+    // center surface, so place its offering triangle at that same height.
+    int ground = altarGround(world, *site);
     // Preserve the existing offering rule: three relics sit one cell above
     // the brick triangle at this seed-rolled site, on server and clients.
     for (int dz = -6; dz <= 3; ++dz) {
@@ -896,7 +1042,8 @@ bool paintMatchRitualAltar(World& world, int ritual) {
     return true;
 }
 
-// Room building file names (props room, weapon room, clue room)
+// Room building file names (props, weapon, clue). The files are medieval
+// houses written by tools/stl2vlstruct/medieval_rooms.py.
 const char* roomBuildingName(int roomIndex) {
     switch (roomIndex) {
         case 0: return "room_basic";
@@ -906,52 +1053,18 @@ const char* roomBuildingName(int roomIndex) {
     }
 }
 
-bool paintRoomBuilding(World& world, int worldX, int worldY, int worldZ, int roomIndex) {
+bool paintRoomBuilding(World& world, int worldX, int& worldY, int worldZ, int roomIndex) {
     if (roomIndex < 0 || roomIndex >= kRoomBuildingCount) roomIndex = 0;
     std::string path = "assets/structures/";
     path += roomBuildingName(roomIndex);
     path += ".vlstruct";
-    bool fileExists = std::filesystem::exists(path);
     Blueprint b;
-    if (!fileExists || !readBlueprint(path, b)) {
-        // Fallback: create a simple wooden room
-        for (int ly = 0; ly < 4; ly++) {
-            for (int lz = -3; lz <= 3; lz++) {
-                for (int lx = -3; lx <= 3; lx++) {
-                    int x = worldX + lx;
-                    int y = worldY + ly;
-                    int z = worldZ + lz;
-                    if (ly == 0 || lx == -3 || lx == 3 || lz == -3 || lz == 3) {
-                        world.setBlock(x, y, z, (uint8_t)PLANKS, true, false);
-                    } else if (ly == 3) {
-                        world.setBlock(x, y, z, (uint8_t)WOOD, true, false);
-                    }
-                }
-            }
-        }
-        return true;
-    }
-    // Center the building: place it so its center aligns with worldX, worldZ
-    int offsetX = worldX - b.sx / 2;
-    int offsetY = worldY;
-    int offsetZ = worldZ - b.sz / 2;
+    bool loaded = std::filesystem::exists(path) && readBlueprint(path, b);
+    if (!loaded) b = fallbackRoom();
     int placed = 0;
-    for (int ly = 0; ly < b.sy; ly++) {
-        for (int lz = 0; lz < b.sz; lz++) {
-            for (int lx = 0; lx < b.sx; lx++) {
-                uint8_t block = b.at(lx, ly, lz);
-                if (block == AIR) continue;
-                int x = offsetX + lx;
-                int y = offsetY + ly;
-                int z = offsetZ + lz;
-                if (y < 0 || y >= cfg::WORLD_H) continue;
-                world.setBlock(x, y, z, block, true, false);
-                placed++;
-            }
-        }
-    }
-    fprintf(stderr, "[DEBUG] Room %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d)\n",
-        roomBuildingName(roomIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz);
+    worldY = stampBlueprint(world, worldX, worldZ, b, placed);
+    fprintf(stderr, "[DEBUG] Room %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d) loaded=%d\n",
+        roomBuildingName(roomIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz, loaded ? 1 : 0);
     return true;
 }
 

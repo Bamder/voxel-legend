@@ -12,6 +12,7 @@ layout(location = 2) in vec3 aNormal;
 layout(location = 3) in float aFaceShade;
 layout(location = 4) in float aAO;
 layout(location = 5) in float aAlpha;
+layout(location = 6) in float aBlockLight;
 
 uniform mat4 uMVP;
 uniform vec3 uChunkOffset;   // chunkOriginWorld - cameraPos (camera-centered, small numbers)
@@ -23,6 +24,7 @@ out vec3 vNormal;
 out float vFaceShade;
 out float vAO;
 out float vAlpha;
+out float vBlockLight;
 
 void main() {
     vLocalPos = aPos * uBlockScale; // world-space position (chunk-local, world units)
@@ -31,6 +33,7 @@ void main() {
     vFaceShade = aFaceShade;
     vAO = aAO;
     vAlpha = aAlpha;
+    vBlockLight = aBlockLight;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )GLSL";
@@ -43,6 +46,7 @@ in vec3 vNormal;
 in float vFaceShade;
 in float vAO;
 in float vAlpha;
+in float vBlockLight;
 
 uniform sampler2D uAtlas;
 uniform vec3 uSunDir;        // world-space direction toward the sun
@@ -161,7 +165,7 @@ void main() {
         if (best > 0.0) discard;
         vec3 nrm = normalize(vNormal);
         float diff = max(dot(nrm, uSunDir), 0.0);
-        vec3 light = uAmbient + uSunColor * diff;
+        vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * vBlockLight;
         vec3 col = uCrackColor * light * vFaceShade;
         float dist = length(vLocalPos + uChunkOffset);
         float f = 1.0 - exp(-uFogDensity * dist);
@@ -184,7 +188,7 @@ void main() {
     }
     vec3 n = normalize(vNormal);
     float diff = max(dot(n, uSunDir), 0.0);
-    vec3 light = uAmbient + uSunColor * diff;
+    vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * vBlockLight;
     float ao = sodTile ? 1.0 : vAO;
     vec3 col = tex.rgb * light * vFaceShade * ao;
     float dist = length(vLocalPos + uChunkOffset);

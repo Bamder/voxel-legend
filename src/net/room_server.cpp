@@ -1323,6 +1323,38 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             }
                         }
                     }
+                    if (combat::takeMeleeHit(c.guardianMelee, serverTick)) {
+                        combat::Hand hand = c.guardianMelee.hand;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft
+                                                             : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t equipped = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        auto def = combat::weapon(c.guardianMelee.item);
+                        combat::Actor attacker{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (def && equipped == c.guardianMelee.item && attacker.active &&
+                            c.guardianRelic < ritual::RelicCount) {
+                            float guardianT = def->reach + .01f;
+                            structure::GuardianSpan guardian;
+                            int gx = 0, gy = 0, gz = 0;
+                            bool aimed = structure::raycastGuardian(world, c.body.player.eye(),
+                                c.body.player.lookDir(), def->reach, guardianT, guardian) &&
+                                guardian.relic == c.guardianRelic;
+                            if (aimed && guardian_fight::vulnerable(c.guardianRelic) &&
+                                structure::roomGuardianHit(world, c.body.player.eye(),
+                                    c.guardianRelic, def->reach, gx, gy, gz)) {
+                                int dmg = structure::guardianStrikeHurt(equipped, c.guardianRelic);
+                                guardian_fight::noteDamage(c.guardianRelic, c.id, dmg);
+                                if (structure::damageGuardian(world, c.guardianRelic, dmg, gx, gy, gz)) {
+                                    world.setBlock(gx, gy, gz, AIR, false, false);
+                                    uint8_t drop = (uint8_t)ritual::blockId(c.guardianRelic);
+                                    const float Sdrop = cfg::BLOCK_SCALE;
+                                    world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
+                                                      (gz + 0.5f) * Sdrop }, drop, 1, true);
+                                }
+                            }
+                        }
+                    }
                     if (auto def = combat::weapon(c.melee.item)) {
                         bool recovering = uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
                         if (c.melee.pending) {

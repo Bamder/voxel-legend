@@ -1,5 +1,3 @@
-u'qi'an
-
 # VOXEL LEGEND
 
 Windows 桌面程序。渲染使用 OpenGL 3.3 core，语言为 C++20，工具链为 MinGW-w64 g++。运行形态有两种：自由探索（本地存档），以及房间对局（大厅组队后切换到专用服务器）。

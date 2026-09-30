@@ -121,6 +121,190 @@ World::Chunk* World::getChunk(int cx, int cy, int cz) {
     return it == m_chunks.end() ? nullptr : &it->second;
 }
 
+namespace {
+
+bool chunkEmits(World::Chunk& ch) {
+    if (ch.emissionKnown) return ch.hasEmission;
+    ch.emissionKnown = true;
+    ch.hasEmission = false;
+    for (uint8_t b : ch.blocks) {
+        if (blockEmission(b) > 0) {
+            ch.hasEmission = true;
+            break;
+        }
+    }
+    return ch.hasEmission;
+}
+
+// True when a light source sits within BLOCK_LIGHT_MAX of the edited cell,
+// so the edit can change the flood (the source itself, or a solid that blocks it).
+bool emissionNear(World& world, int x, int y, int z) {
+    constexpr int R = BLOCK_LIGHT_MAX;
+    const int cx0 = floorDiv(x - R, cfg::CHUNK_X);
+    const int cx1 = floorDiv(x + R, cfg::CHUNK_X);
+    const int cy0 = floorDiv(y - R, cfg::CHUNK_Y);
+    const int cy1 = floorDiv(y + R, cfg::CHUNK_Y);
+    const int cz0 = floorDiv(z - R, cfg::CHUNK_Z);
+    const int cz1 = floorDiv(z + R, cfg::CHUNK_Z);
+    const int ncx = cx1 - cx0 + 1;
+    const int ncy = cy1 - cy0 + 1;
+    const int ncz = cz1 - cz0 + 1;
+    std::vector<World::Chunk*> grid((size_t)ncx * ncy * ncz, nullptr);
+    auto slot = [&](int cx, int cy, int cz) -> World::Chunk*& {
+        return grid[(size_t)((cy - cy0) * ncz + (cz - cz0)) * ncx + (cx - cx0)];
+    };
+    for (int cy = cy0; cy <= cy1; ++cy)
+        for (int cz = cz0; cz <= cz1; ++cz)
+            for (int cx = cx0; cx <= cx1; ++cx)
+                slot(cx, cy, cz) = world.getChunk(cx, cy, cz);
+
+    for (int wy = y - R; wy <= y + R; ++wy) {
+        if (wy < 0 || wy >= cfg::WORLD_H) continue;
+        int cy = floorDiv(wy, cfg::CHUNK_Y);
+        int ly = wy - cy * cfg::CHUNK_Y;
+        for (int wz = z - R; wz <= z + R; ++wz) {
+            int cz = floorDiv(wz, cfg::CHUNK_Z);
+            int lz = wz - cz * cfg::CHUNK_Z;
+            for (int wx = x - R; wx <= x + R; ++wx) {
+                int cx = floorDiv(wx, cfg::CHUNK_X);
+                World::Chunk* ch = slot(cx, cy, cz);
+                if (!ch) continue;
+                int lx = wx - cx * cfg::CHUNK_X;
+                if (blockEmission(ch->get(lx, ly, lz)) > 0) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Flood block light through air in all six directions, then bake it onto the mesh.
+// Each step loses 1, the same along +X -X +Y -Y +Z -Z, so the glow is round
+// rather than aimed at one face. Opaque cells stop the flood.
+void bakeBlockLight(World& world, World::Chunk& ch, int cx, int cy, int cz) {
+    bool any = chunkEmits(ch);
+    if (!any) {
+        for (int dy = -1; dy <= 1 && !any; ++dy)
+            for (int dz = -1; dz <= 1 && !any; ++dz)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    World::Chunk* n = world.getChunk(cx + dx, cy + dy, cz + dz);
+                    if (n && chunkEmits(*n)) { any = true; break; }
+                }
+    }
+    if (!any) return;
+
+    constexpr int R = BLOCK_LIGHT_MAX;
+    const int ox = cx * cfg::CHUNK_X - R;
+    const int oy = cy * cfg::CHUNK_Y - R;
+    const int oz = cz * cfg::CHUNK_Z - R;
+    const int sx = cfg::CHUNK_X + 2 * R;
+    const int sy = cfg::CHUNK_Y + 2 * R;
+    const int sz = cfg::CHUNK_Z + 2 * R;
+    const int gx0 = floorDiv(ox, cfg::CHUNK_X);
+    const int gy0 = floorDiv(oy, cfg::CHUNK_Y);
+    const int gz0 = floorDiv(oz, cfg::CHUNK_Z);
+    const int gx1 = floorDiv(ox + sx - 1, cfg::CHUNK_X);
+    const int gy1 = floorDiv(oy + sy - 1, cfg::CHUNK_Y);
+    const int gz1 = floorDiv(oz + sz - 1, cfg::CHUNK_Z);
+    const int ncx = gx1 - gx0 + 1;
+    const int ncy = gy1 - gy0 + 1;
+    const int ncz = gz1 - gz0 + 1;
+    std::vector<World::Chunk*> grid((size_t)ncx * ncy * ncz, nullptr);
+    auto slot = [&](int ccx, int ccy, int ccz) -> World::Chunk* {
+        return grid[(size_t)((ccy - gy0) * ncz + (ccz - gz0)) * ncx + (ccx - gx0)];
+    };
+    for (int ccy = gy0; ccy <= gy1; ++ccy)
+        for (int ccz = gz0; ccz <= gz1; ++ccz)
+            for (int ccx = gx0; ccx <= gx1; ++ccx)
+                grid[(size_t)((ccy - gy0) * ncz + (ccz - gz0)) * ncx + (ccx - gx0)] =
+                    world.getChunk(ccx, ccy, ccz);
+
+    auto at = [&](int wx, int wy, int wz) -> uint8_t {
+        if (wy < 0 || wy >= cfg::WORLD_H) return AIR;
+        int ccx = floorDiv(wx, cfg::CHUNK_X);
+        int ccy = floorDiv(wy, cfg::CHUNK_Y);
+        int ccz = floorDiv(wz, cfg::CHUNK_Z);
+        World::Chunk* src = slot(ccx, ccy, ccz);
+        if (!src) return AIR;
+        return src->get(wx - ccx * cfg::CHUNK_X, wy - ccy * cfg::CHUNK_Y, wz - ccz * cfg::CHUNK_Z);
+    };
+
+    std::vector<uint8_t> light((size_t)sx * sy * sz, 0);
+    auto idx = [&](int ix, int iy, int iz) {
+        return (iy * sz + iz) * sx + ix;
+    };
+    std::vector<int> q;
+    q.reserve(1024);
+    for (int iy = 0; iy < sy; ++iy) {
+        int wy = oy + iy;
+        for (int iz = 0; iz < sz; ++iz) {
+            int wz = oz + iz;
+            for (int ix = 0; ix < sx; ++ix) {
+                int e = blockEmission(at(ox + ix, wy, wz));
+                if (e <= 0) continue;
+                int i = idx(ix, iy, iz);
+                light[(size_t)i] = (uint8_t)e;
+                q.push_back(i);
+            }
+        }
+    }
+    if (q.empty()) return;
+
+    static const int kDir[6][3] = {
+        { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
+    };
+    size_t qh = 0;
+    while (qh < q.size()) {
+        int i = q[qh++];
+        int ix = i % sx;
+        int t = i / sx;
+        int iz = t % sz;
+        int iy = t / sz;
+        int lv = light[(size_t)i];
+        if (lv <= 1) continue;
+        for (int d = 0; d < 6; ++d) {
+            int nx = ix + kDir[d][0];
+            int ny = iy + kDir[d][1];
+            int nz = iz + kDir[d][2];
+            if ((unsigned)nx >= (unsigned)sx || (unsigned)ny >= (unsigned)sy || (unsigned)nz >= (unsigned)sz)
+                continue;
+            if (isOpaque(at(ox + nx, oy + ny, oz + nz))) continue;
+            int ni = idx(nx, ny, nz);
+            int nl = lv - 1;
+            if (nl > (int)light[(size_t)ni]) {
+                light[(size_t)ni] = (uint8_t)nl;
+                q.push_back(ni);
+            }
+        }
+    }
+
+    auto curve = [](int lv) {
+        if (lv <= 0) return 0.0f;
+        float t = (float)lv / (float)BLOCK_LIGHT_MAX;
+        return std::pow(t, 1.2f);
+    };
+    auto levelAt = [&](float wx, float wy, float wz) {
+        int ix = (int)std::floor(wx) - ox;
+        int iy = (int)std::floor(wy) - oy;
+        int iz = (int)std::floor(wz) - oz;
+        if ((unsigned)ix >= (unsigned)sx || (unsigned)iy >= (unsigned)sy || (unsigned)iz >= (unsigned)sz)
+            return 0;
+        return (int)light[(size_t)idx(ix, iy, iz)];
+    };
+    auto paint = [&](Vertex& v) {
+        float wx = (float)(cx * cfg::CHUNK_X) + v.px;
+        float wy = (float)(cy * cfg::CHUNK_Y) + v.py;
+        float wz = (float)(cz * cfg::CHUNK_Z) + v.pz;
+        int a = levelAt(wx, wy, wz);
+        int b = levelAt(wx + v.nx * 0.51f, wy + v.ny * 0.51f, wz + v.nz * 0.51f);
+        v.blockLight = curve(a > b ? a : b);
+    };
+    for (Vertex& v : ch.meshOpaque) paint(v);
+    for (Vertex& v : ch.meshTransparent) paint(v);
+}
+
+} // namespace
+
 bool World::chunkExists(int cx, int cy, int cz) const {
     return m_chunks.find(chunkKey(cx, cy, cz)) != m_chunks.end();
 }
@@ -144,7 +328,23 @@ World::Chunk* World::ensureLoadedSlice(int cx, int cy, int cz) {
     return &ins->second;
 }
 
-void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh) {
+static bool lanternAttachBlock(uint8_t b) {
+    return b != AIR && !isLiquid(b);
+}
+
+// Face 0 is the clicked top (sit). Face 1 is the clicked underside (hang).
+// Side faces, and an unknown face, sit when a block is below and hang only
+// when the cell below is empty and a block is above.
+static bool lanternHangs(const World& world, int x, int y, int z, int placeFace) {
+    if (placeFace == 0) return false;
+    if (placeFace == 1) return true;
+    if (lanternAttachBlock(world.getBlock(x, y - 1, z))) return false;
+    if (lanternAttachBlock(world.getBlock(x, y + 1, z))) return true;
+    return false;
+}
+
+void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh,
+                     int placeFace, int cellFlags) {
     CellLoc c;
     if (!cellLoc(x, y, z, c)) return;
     int cx = c.cx, cy = c.cy, cz = c.cz, lx = c.lx, ly = c.ly, lz = c.lz;
@@ -161,6 +361,10 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     bool cutTallGrass = (prev == GRASS_TUFT && b != prev);
     it->second.set(lx, ly, lz, b);
     it->second.setFlag(lx, ly, lz, 0); // player / other placement is death
+    if (cellFlags >= 0)
+        it->second.setFlag(lx, ly, lz, (uint8_t)cellFlags);
+    else if (b == LANTERN && lanternHangs(*this, x, y, z, placeFace))
+        it->second.setFlag(lx, ly, lz, FLAG_LANTERN_HANG);
     it->second.setTreeId(lx, ly, lz, 0);
     if (prev != b) clearBlockDur(-1, x, y, z);
 
@@ -204,6 +408,15 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     touchAuthSod(key);
     touchAuthBark(key);
 
+    if (blockEmission(b) > 0) {
+        it->second.hasEmission = true;
+        it->second.emissionKnown = true;
+    } else if (blockEmission(prev) > 0) {
+        it->second.emissionKnown = false;
+    }
+    const bool lightTouch = blockEmission(prev) > 0 || blockEmission(b) > 0
+        || (isOpaque(prev) != isOpaque(b) && emissionNear(*this, x, y, z));
+
     auto rebuildNow = [&](int ncx, int ncy, int ncz) {
         auto nit = m_chunks.find(chunkKey(ncx, ncy, ncz));
         if (nit != m_chunks.end()) {
@@ -211,14 +424,41 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
             nit->second.dirty = false;
         }
     };
+    auto touchBox = [&](bool immediate) {
+        constexpr int R = BLOCK_LIGHT_MAX;
+        int x0 = floorDiv(x - R, cfg::CHUNK_X);
+        int x1 = floorDiv(x + R, cfg::CHUNK_X);
+        int y0 = floorDiv(y - R, cfg::CHUNK_Y);
+        int y1 = floorDiv(y + R, cfg::CHUNK_Y);
+        int z0 = floorDiv(z - R, cfg::CHUNK_Z);
+        int z1 = floorDiv(z + R, cfg::CHUNK_Z);
+        for (int tz = z0; tz <= z1; ++tz)
+            for (int ty = y0; ty <= y1; ++ty)
+                for (int tx = x0; tx <= x1; ++tx) {
+                    if (immediate) {
+                        rebuildNow(tx, ty, tz);
+                    } else {
+                        auto nit = m_chunks.find(chunkKey(tx, ty, tz));
+                        if (nit == m_chunks.end()) continue;
+                        nit->second.dirty = true;
+                        m_meshQueue.push_back(nit->first);
+                    }
+                }
+    };
     if (updateMesh) {
-        rebuildNow(cx, cy, cz);
-        if (lx == 0) rebuildNow(cx - 1, cy, cz);
-        if (lx == cfg::CHUNK_X - 1) rebuildNow(cx + 1, cy, cz);
-        if (lz == 0) rebuildNow(cx, cy, cz - 1);
-        if (lz == cfg::CHUNK_Z - 1) rebuildNow(cx, cy, cz + 1);
-        if (ly == 0) rebuildNow(cx, cy - 1, cz);
-        if (ly == cfg::CHUNK_Y - 1) rebuildNow(cx, cy + 1, cz);
+        if (lightTouch) {
+            touchBox(true);
+        } else {
+            rebuildNow(cx, cy, cz);
+            if (lx == 0) rebuildNow(cx - 1, cy, cz);
+            if (lx == cfg::CHUNK_X - 1) rebuildNow(cx + 1, cy, cz);
+            if (lz == 0) rebuildNow(cx, cy, cz - 1);
+            if (lz == cfg::CHUNK_Z - 1) rebuildNow(cx, cy, cz + 1);
+            if (ly == 0) rebuildNow(cx, cy - 1, cz);
+            if (ly == cfg::CHUNK_Y - 1) rebuildNow(cx, cy + 1, cz);
+        }
+    } else if (lightTouch) {
+        touchBox(false);
     } else {
         it->second.dirty = true;
         m_meshQueue.push_back(key);
@@ -1011,6 +1251,8 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
         ch.meshOpaque.push_back(vv[0]); ch.meshOpaque.push_back(vv[1]); ch.meshOpaque.push_back(vv[2]);
         ch.meshOpaque.push_back(vv[0]); ch.meshOpaque.push_back(vv[2]); ch.meshOpaque.push_back(vv[3]);
     }
+
+    bakeBlockLight(*this, ch, cx, cy, cz);
 
     ch.hasMesh = true;
     ch.uploaded = false;

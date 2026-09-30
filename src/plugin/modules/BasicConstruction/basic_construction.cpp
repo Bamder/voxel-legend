@@ -1,6 +1,7 @@
 #include "basic_construction.hpp"
 #include "../../plugin.hpp"
 #include "../../../material/registry.hpp"
+#include "../../../material/model_mesh.hpp"
 #include "../../../material/blocks/grass_tuft_mat.hpp"
 #include "../../../render/textures.hpp"
 #include "../../../world/player.hpp"
@@ -71,6 +72,13 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "新手指南", false, false, false, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.30f, 0.42f, false, 0.0f, 0.0f },
     { "建筑线索", false, false, false, false, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, 0.08f, 0.30f, false, 0.0f, 0.0f },
     { "核心", true, false, true, false, TEX_CORE, TEX_CORE, TEX_CORE, TEX_CORE, 8.00f, 0.60f, false, 0.0f, 0.0f },
+    { "木梁", true, false, true, false, TEX_TIMBER, TEX_TIMBER, TEX_TIMBER, TEX_TIMBER, 9.00f, 0.50f, false, 0.0f, 0.0f },
+    { "白灰墙", true, false, true, false, TEX_PLASTER, TEX_PLASTER, TEX_PLASTER, TEX_PLASTER, 8.00f, 0.58f, false, 0.0f, 0.0f },
+    { "茅草", true, false, true, false, TEX_THATCH, TEX_THATCH, TEX_THATCH, TEX_THATCH, 3.00f, 0.46f, false, 0.0f, 0.0f },
+    { "陶瓦", true, false, true, false, TEX_CLAY_TILE, TEX_CLAY_TILE, TEX_CLAY_TILE, TEX_CLAY_TILE, 12.00f, 0.62f, false, 0.0f, 0.0f },
+    { "料石", true, false, true, false, TEX_ASHLAR, TEX_ASHLAR, TEX_ASHLAR, TEX_ASHLAR, 18.00f, 0.78f, false, 0.0f, 0.0f },
+    { "火把", false, false, false, false, TEX_FLAME, TEX_TORCH_WOOD, TEX_TORCH_WOOD, TEX_FLAME, 0.60f, 0.40f, false, 0.0f, 0.0f, 14 },
+    { "提灯", false, false, false, false, TEX_LANTERN_GLOW, TEX_LANTERN, TEX_LANTERN, TEX_LANTERN_GLOW, 1.40f, 0.45f, false, 0.0f, 0.0f, 15 },
 };
 static_assert(sizeof(kBlocks) / sizeof(kBlocks[0]) == BLOCK_COUNT, "BasicConstruction block table size mismatch");
 
@@ -89,11 +97,15 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "arcane_freeze", "arcane_heal",
     "guide_book", "clue",
     "guardian_core",
+    "timber", "plaster", "thatch", "clay_tile", "ashlar",
+    "torch", "lantern",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
 
 bool inCreative(uint8_t id) {
     if (id == ITEM_TARGET) return true;
+    if (id == TORCH || id == LANTERN) return true;
+    if (id >= TIMBER && id <= ASHLAR) return true;
     if (id >= ITEM_ELEM_CORE) return false;
     switch (id) {
         case AIR:
@@ -128,6 +140,41 @@ struct LogStrategy : BlockStrategy {
 };
 struct ShrubStemStrategy : BlockStrategy {
     uint8_t dropItem(uint8_t) const override { return STICK; }
+};
+struct LightPropStrategy : BlockStrategy {
+    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int) override {
+        uint8_t id = ch.get(lx, y, lz);
+        const mat::Model& model = mat::g_itemModels[id];
+        if (model.quads.empty() && !mat::modelHasSolidTex(model)) return false;
+        float dy = 0.0f;
+        if (id == LANTERN) {
+            float minY = 1.0f, maxY = 0.0f;
+            bool bounded = false;
+            for (const mat::Solid& s : model.solids) {
+                bounded = true;
+                float y0 = s.c[1] - s.h[1], y1 = s.c[1] + s.h[1];
+                if (y0 < minY) minY = y0;
+                if (y1 > maxY) maxY = y1;
+            }
+            for (const mat::Quad& q : model.quads) {
+                for (int c = 0; c < 4; ++c) {
+                    bounded = true;
+                    if (q.p[c][1] < minY) minY = q.p[c][1];
+                    if (q.p[c][1] > maxY) maxY = q.p[c][1];
+                }
+            }
+            if (bounded) {
+                bool hang = (ch.flagAt(lx, y, lz) & FLAG_LANTERN_HANG) != 0;
+                dy = hang ? (1.0f - maxY) : -minY;
+            }
+        }
+        // Names must not shadow the cell's y, or the prop is drawn at the
+        // bottom of the chunk instead of in the placed cell.
+        mat::emitModelMesh(model, ch.meshOpaque, [&](float mx, float my, float mz) {
+            return Vec3{ (float)lx + mx, (float)y + my + dy, (float)lz + mz };
+        }, blockOf(id).icon);
+        return true;
+    }
 };
 struct GrassTuftStrategy : BlockStrategy {
     bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int wx, int wz) override {
@@ -175,6 +222,7 @@ ShellStrategy g_shell;
 UnplaceableStrategy g_unplaceable;
 LogStrategy g_log;
 ShrubStemStrategy g_shrubStem;
+LightPropStrategy g_lightProp;
 GrassTuftStrategy g_grassTuft;
 PlayerStrategy g_player;
 
@@ -198,6 +246,8 @@ BlockStrategy* strategyFor(int id) {
         case LOG:        return &g_log;
         case SHRUB_STEM: return &g_shrubStem;
         case GRASS_TUFT: return &g_grassTuft;
+        case TORCH:
+        case LANTERN:    return &g_lightProp;
         default:         return nullptr; // host default
     }
 }
