@@ -1183,7 +1183,7 @@ void deployBlockColor(uint8_t b, int y, int& r, int& g, int& bl) {
     if (b == SAND || b == SANDSTONE) { r = 194; g = 174; bl = 108; return; }
     if (b == SNOW) { r = 226; g = 230; bl = 234; return; }
     if (b == STONE || b == COBBLE || b == GRAVEL || b == BEDROCK) { r = 112; g = 112; bl = 116; return; }
-    if (b == LOG || b == WOOD || b == PLANKS || b == BARK) { r = 122; g = 84; bl = 48; return; }
+    if (b == LOG || b == WOOD || b == PLANKS || b == BARK || b == BARK_BLOCK) { r = 122; g = 84; bl = 48; return; }
     if (b == LEAVES || b == SHRUB_LEAF || b == SHRUB_STEM) { r = 46; g = 108; bl = 44; return; }
     if (b == GRASS || b == DIRT || b == GRASS_TUFT) {
         float t = (float)(y - cfg::SEA_LEVEL) / 30.0f;
@@ -3326,6 +3326,15 @@ int main(int argc, char** argv) {
         ui.targetPhys = hitOk ? physHit : -1;
         ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
                          playing && !spectating) ? dropHit : -1;
+        ui.processLogReady = false;
+        if (hitOk && physHit < 0 && !player.dead && carry.empty() && lookLocked &&
+            !inventoryOpen && !paused && !guideOpen && !clueOpen && playing && !spectating &&
+            !structureEdit && ui.targetDrop < 0 && dummyAim < 0) {
+            uint8_t heldProc = inv[ui.selectedSlot].block;
+            bool stripTool = hasItemTags(heldProc, TAG_AXE | TAG_WOODWORKING | TAG_ONE_HAND);
+            if (stripTool && world.getBlock(hit.x, hit.y, hit.z) == LOG)
+                ui.processLogReady = true;
+        }
         // Air, a hostile player, or a guardian all start the same swing. The
         // server raycasts again at the damage frame, so the click itself does
         // not need a target. A block under the crosshair stays a mining swing.
@@ -3443,6 +3452,24 @@ int main(int argc, char** argv) {
                         } else if (left < (int)n) {
                             world.setDropCount(ui.targetDrop, (uint8_t)left);
                         }
+                    }
+                }
+            } else if (!inventoryOpen && ui.processLogReady && lookLocked) {
+                // Hand axe: strip LOG in place to WOOD (same axis), drop 4 BARK sheets.
+                IVec3 cell = ui.targetBlock;
+                if (physHit < 0 && world.getBlock(cell.x, cell.y, cell.z) == LOG) {
+                    uint8_t heldProc = inv[ui.selectedSlot].block;
+                    if (hasItemTags(heldProc, TAG_AXE | TAG_WOODWORKING | TAG_ONE_HAND)) {
+                        int axis = world.logAxisAt(cell.x, cell.y, cell.z);
+                        int placeFace = (axis == 0) ? 2 : ((axis == 2) ? 4 : 0);
+                        uint8_t keep = (uint8_t)(world.getFlags(cell.x, cell.y, cell.z)
+                                                 & (uint8_t)~(FLAG_ALIVE | FLAG_SETTLED));
+                        int overlayBark = world.takeAllBarkAt(cell.x, cell.y, cell.z);
+                        world.setBlock(cell.x, cell.y, cell.z, WOOD, true, true, placeFace, (int)keep);
+                        noteRoomEdit(cell.x, cell.y, cell.z, WOOD, placeFace);
+                        int barkN = 4 + overlayBark;
+                        world.spawnDrop(cellCenter(cell.x, cell.y, cell.z), BARK, barkN, true);
+                        ui.processLogReady = false;
                     }
                 }
             }

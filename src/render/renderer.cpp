@@ -3671,7 +3671,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
     const bool carrying = ui.carrySlot && !ui.carrySlot->empty();
     const bool leftSealed = ui.vitals && ui.vitals->limb[vitals::HandL].health <= vitals::kDeadEps;
     const bool rightSealed = ui.vitals && ui.vitals->limb[vitals::HandR].health <= vitals::kDeadEps;
-    const bool fPrompt = !ui.structureEdit && (carrying || ui.targetDrop >= 0 || ui.targetAim >= 0);
+    const bool fPrompt = !ui.structureEdit &&
+        (carrying || ui.targetDrop >= 0 || ui.targetAim >= 0 || ui.processLogReady);
 
     CrosshairPrompt promptItems[4];
     int promptCount = 0;
@@ -3679,6 +3680,8 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         const char* action = "拾取";
         if (ui.targetAim >= 0) action = "状态";
         else if (carrying) action = "放下";
+        else if (ui.targetDrop >= 0) action = "拾取";
+        else if (ui.processLogReady) action = "加工";
         promptItems[promptCount++] = { CrosshairKeyKind::Text, "F", action };
     }
     if (ui.hasPlacePreview || ui.targetPlaceReady)

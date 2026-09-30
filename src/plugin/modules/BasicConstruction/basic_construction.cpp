@@ -79,6 +79,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "料石", true, false, true, false, TEX_ASHLAR, TEX_ASHLAR, TEX_ASHLAR, TEX_ASHLAR, 18.00f, 0.78f, false, 0.0f, 0.0f },
     { "火把", false, false, false, false, TEX_FLAME, TEX_TORCH_WOOD, TEX_TORCH_WOOD, TEX_FLAME, 0.60f, 0.40f, false, 0.0f, 0.0f, 14 },
     { "提灯", false, false, false, false, TEX_LANTERN_GLOW, TEX_LANTERN, TEX_LANTERN, TEX_LANTERN_GLOW, 1.40f, 0.45f, false, 0.0f, 0.0f, 15 },
+    { "Bark Block",   true,  false, true,  false, TEX_BARK,     TEX_BARK,     TEX_BARK,     TEX_BARK,     6.00f, 0.50f, false, 0.0f, 0.0f },
 };
 static_assert(sizeof(kBlocks) / sizeof(kBlocks[0]) == BLOCK_COUNT, "BasicConstruction block table size mismatch");
 
@@ -99,12 +100,13 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "guardian_core",
     "timber", "plaster", "thatch", "clay_tile", "ashlar",
     "torch", "lantern",
+    "bark_block",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
 
 bool inCreative(uint8_t id) {
     if (id == ITEM_TARGET) return true;
-    if (id == TORCH || id == LANTERN) return true;
+    if (id == TORCH || id == LANTERN || id == BARK_BLOCK) return true;
     if (id >= TIMBER && id <= ASHLAR) return true;
     if (id >= ITEM_ELEM_CORE) return false;
     switch (id) {
@@ -131,12 +133,7 @@ struct UnplaceableStrategy : BlockStrategy {
     bool canPlace(uint8_t) const override { return false; }
 };
 struct LogStrategy : BlockStrategy {
-    uint8_t dropItem(uint8_t) const override { return WOOD; }
-    int extraDrops(uint8_t, uint8_t* out, int max) const override {
-        if (!out || max < 1) return 0;
-        out[0] = BARK;
-        return 1;
-    }
+    uint8_t dropItem(uint8_t) const override { return LOG; }
 };
 struct ShrubStemStrategy : BlockStrategy {
     uint8_t dropItem(uint8_t) const override { return STICK; }
@@ -235,6 +232,7 @@ BlockStrategy* strategyFor(int id) {
     switch (id) {
         case BEDROCK:    return &g_bedrock;
         case STICK:
+        case BARK:
         case HAND_AXE:
         case SHEARS:
         case HAND_PICK:

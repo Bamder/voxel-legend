@@ -101,6 +101,7 @@ struct UIState {
     int targetPanel = -1;        // open status panel, index into targets
     int targetBtnHover = -1;     // 0 dismantle, 1 reset health
     bool targetPlaceReady = false;
+    bool processLogReady = false; // hand axe on LOG: F to strip into WOOD
     int targetGuardian = -1; // relic index while the crosshair is on its guardian
     Vec3 guardianCenter{ 0, 0, 0 };
     Vec3 guardianSize{ 1, 1, 1 };
