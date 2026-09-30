@@ -1039,7 +1039,10 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
 }
 
 float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, int oy, int oz) const {
-    int cxp = wx + ox, cyp = wy + oy, czp = wz + oz;
+    // Sample from the empty cell the face looks into, then step ±1 on the two
+    // tangent axes. Using the vertex cell (wx+ox, ...) wrongly pulls in coplanar
+    // solid neighbors on -X/-Y/-Z faces, which paints a fake grid on flat walls.
+    int bx = wx + nx, by = wy + ny, bz = wz + nz;
     int ta[2]; int n = 0;
     if (nx == 0) ta[n++] = 0;
     if (ny == 0) ta[n++] = 1;
@@ -1048,9 +1051,9 @@ float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, in
     int d[3] = { 0, 0, 0 };
     for (int i = 0; i < n; i++) { int a = ta[i]; d[a] = (off[a] == 0) ? -1 : 1; }
     int a0 = ta[0], a1 = ta[1];
-    int s1[3] = { cxp, cyp, czp }; s1[a0] += d[a0];
-    int s2[3] = { cxp, cyp, czp }; s2[a1] += d[a1];
-    int s3[3] = { cxp, cyp, czp }; s3[a0] += d[a0]; s3[a1] += d[a1];
+    int s1[3] = { bx, by, bz }; s1[a0] += d[a0];
+    int s2[3] = { bx, by, bz }; s2[a1] += d[a1];
+    int s3[3] = { bx, by, bz }; s3[a0] += d[a0]; s3[a1] += d[a1];
     bool o1 = isOpaque(getBlock(s1[0], s1[1], s1[2]));
     bool o2 = isOpaque(getBlock(s2[0], s2[1], s2[2]));
     bool o3 = isOpaque(getBlock(s3[0], s3[1], s3[2]));
@@ -1164,8 +1167,15 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                     }
 
                     std::vector<Vertex>& dst = isTrans ? ch.meshTransparent : ch.meshOpaque;
-                    dst.push_back(vv[0]); dst.push_back(vv[1]); dst.push_back(vv[2]);
-                    dst.push_back(vv[0]); dst.push_back(vv[2]); dst.push_back(vv[3]);
+                    // Flip the split when the other diagonal is brighter so AO
+                    // does not leave a dark crease across an otherwise flat face.
+                    if (vv[0].ao + vv[2].ao > vv[1].ao + vv[3].ao) {
+                        dst.push_back(vv[1]); dst.push_back(vv[2]); dst.push_back(vv[3]);
+                        dst.push_back(vv[1]); dst.push_back(vv[3]); dst.push_back(vv[0]);
+                    } else {
+                        dst.push_back(vv[0]); dst.push_back(vv[1]); dst.push_back(vv[2]);
+                        dst.push_back(vv[0]); dst.push_back(vv[2]); dst.push_back(vv[3]);
+                    }
 
                     // Leaf frills: on air-facing faces, probabilistically add a
                     // crossed-quad "X" frill to smooth the crown/shrub silhouette.
