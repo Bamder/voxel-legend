@@ -3930,6 +3930,13 @@ int main(int argc, char** argv) {
                         timeOfDay = t * (float)cfg::TICKS_PER_DAY;
                     }
                 } else {
+                    if (structureEdit && lmb && ui.timeSliderW > 1.0f &&
+                        ui.mouseX >= ui.timeSliderX - 12.0f && ui.mouseX <= ui.timeSliderX + ui.timeSliderW + 12.0f &&
+                        ui.mouseY >= ui.timeSliderY - 12.0f && ui.mouseY <= ui.timeSliderY + ui.timeSliderH + 12.0f) {
+                        float t = (ui.mouseX - ui.timeSliderX) / ui.timeSliderW;
+                        t = clampf(t, 0.0f, 1.0f);
+                        timeOfDay = t * (float)cfg::TICKS_PER_DAY;
+                    }
                     if (lmb && !prevLmb) {
                         if (roomSession) {
                             if (ui.menuHover == 0) { paused = false; settingsOpen = false; debugMenuOpen = false; }
@@ -4441,8 +4448,10 @@ int main(int argc, char** argv) {
                 }
             }
 
-            timeOfDay += dt * ((float)cfg::TICKS_PER_DAY / cfg::DAY_LENGTH_SECONDS);
-            if (timeOfDay >= (float)cfg::TICKS_PER_DAY) timeOfDay -= (float)cfg::TICKS_PER_DAY;
+            if (!structureEdit) {
+                timeOfDay += dt * ((float)cfg::TICKS_PER_DAY / cfg::DAY_LENGTH_SECONDS);
+                if (timeOfDay >= (float)cfg::TICKS_PER_DAY) timeOfDay -= (float)cfg::TICKS_PER_DAY;
+            }
         } else if (!playing) {
             if (exploreScreen() || portraitScreen()) {
                 timeOfDay = 6000.0f;

@@ -2444,6 +2444,23 @@ void Renderer::drawMenu(UIState& ui) {
 
     quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.55f);
     const int nBtn = ui.roomSession ? 3 : 4;
+    ui.timeSliderW = 0.0f;
+    if (ui.structureEdit) {
+        const float sliderW = 380.0f, sliderH = 14.0f;
+        const float sliderX = (scrW - sliderW) * 0.5f;
+        const float timeY = scrH * 0.5f - 122.0f;
+        float frac = clampf(ui.timeOfDay / (float)cfg::TICKS_PER_DAY, 0.0f, 1.0f);
+        quad(sliderX - 3, timeY - 3, sliderW + 6, sliderH + 6, 0, 0, 0, 0, 0.12f, 0.12f, 0.12f, 1.0f);
+        quad(sliderX, timeY, sliderW, sliderH, 0, 0, 0, 0, 0.22f, 0.22f, 0.22f, 1.0f);
+        quad(sliderX, timeY, sliderW * frac, sliderH, 0, 0, 0, 0, 0.55f, 0.75f, 0.35f, 1.0f);
+        float hx = sliderX + sliderW * frac;
+        quad(hx - 8, timeY - 8, 16, sliderH + 16, 0, 0, 0, 0, 0.12f, 0.12f, 0.12f, 1.0f);
+        quad(hx - 6, timeY - 6, 12, sliderH + 12, 0, 0, 0, 0, 0.92f, 0.92f, 0.92f, 1.0f);
+        ui.timeSliderX = sliderX;
+        ui.timeSliderY = timeY;
+        ui.timeSliderW = sliderW;
+        ui.timeSliderH = sliderH;
+    }
     ui.menuHover = -1;
     for (int i = 0; i < nBtn; i++) {
         float y = by0 + i * (bh + gap);
@@ -2464,6 +2481,15 @@ void Renderer::drawMenu(UIState& ui) {
     flushUI(progUI, atlasTex);
 
     centeredText("VOXEL LEGEND", scrW * 0.5f, titleY, ts, 1, 1, 1, 1);
+    if (ui.structureEdit && ui.timeSliderW > 1.0f) {
+        centeredText("时间段（0:00 = 午夜）", scrW * 0.5f, ui.timeSliderY - 28.0f, 1.0f, 1, 1, 1, 1);
+        int ticks = ((int)ui.timeOfDay % cfg::TICKS_PER_DAY + cfg::TICKS_PER_DAY) % cfg::TICKS_PER_DAY;
+        int hours = ticks / 1000;
+        int mins = (ticks % 1000) * 60 / 1000;
+        char clock[16];
+        snprintf(clock, sizeof(clock), "%02d:%02d", hours, mins);
+        drawString(clock, ui.timeSliderX + ui.timeSliderW + 18.0f, ui.timeSliderY - 4.0f, 0.9f, 0.78f, 0.78f, 0.78f, 1.0f);
+    }
     const char* labelsFree[4] = { "继续游戏", "设置", "调试菜单", "返回菜单" };
     const char* labelsRoom[3] = { "继续游戏", "设置", "返回菜单" };
     for (int i = 0; i < nBtn; i++) {
