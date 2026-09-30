@@ -97,8 +97,9 @@ void ensureTrialCore(World& world);
 
 bool inVolume(int x, int y, int z);
 bool paintFile(World& world, const std::string& path);
-// Paint ritual altar structure at world position (origin = center-bottom of altar)
-bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int altarIndex);
+// Centers the altar on worldX/worldZ. Writes the floor Y back through worldY:
+// the highest terrain under the footprint, clamped so the roof stays in the world.
+bool paintRitualAltar(World& world, int worldX, int& worldY, int worldZ, int altarIndex);
 // Number of available ritual altar variants
 inline constexpr int kRitualAltarCount = 6;
 const char* ritualAltarName(int altarIndex);
@@ -106,7 +107,8 @@ const char* ritualAltarName(int altarIndex);
 // Room building count and names (for props room, weapon room, clue room)
 inline constexpr int kRoomBuildingCount = 3;
 const char* roomBuildingName(int roomIndex);
-bool paintRoomBuilding(World& world, int worldX, int worldY, int worldZ, int roomIndex);
+// Centers the room on worldX/worldZ and writes the floor Y back through worldY.
+bool paintRoomBuilding(World& world, int worldX, int& worldY, int worldZ, int roomIndex);
 bool saveFile(const World& world, const std::string& path);
 void clearVolume(World& world);
 

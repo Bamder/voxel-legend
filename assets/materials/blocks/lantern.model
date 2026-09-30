@@ -1,0 +1,9 @@
+# Lantern cage. The glow core sits in the opening so light reads from every side.
+part 0.36 0.42 0.36 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
+part 0.64 0.42 0.36 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
+part 0.36 0.42 0.64 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
+part 0.64 0.42 0.64 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
+part 0.50 0.60 0.50 0.16 0.025 0.16 0.40 0.28 0.16 tex lantern
+part 0.50 0.24 0.50 0.16 0.025 0.16 0.40 0.28 0.16 tex lantern
+part 0.50 0.72 0.50 0.02 0.07 0.02 0.40 0.28 0.16 tex lantern
+part 0.50 0.42 0.50 0.09 0.11 0.09 1.00 0.86 0.42 tex lantern_glow

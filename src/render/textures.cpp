@@ -515,6 +515,119 @@ static void pixelColor(int tile, int px, int py, uint8_t& r, uint8_t& g, uint8_t
             }
             break;
         }
+        case TEX_TIMBER: {
+            // Weathered oak frame: dark vertical grain, not tar-black.
+            float fx = (float)px / (float)(TILE - 1);
+            float ridge = 0.40f + 0.60f * std::sin(fx * 22.0f + 0.35f * std::sin((float)py * 0.11f));
+            float grain = 0.78f + 0.22f * rnd(px / TS, py / (2 * TS), 0x0A0Cu);
+            RGB dark{ 36.0f, 24.0f, 14.0f };
+            RGB mid{ 84.0f, 56.0f, 32.0f };
+            RGB c0 = mix(dark, mid, std::min(1.0f, ridge * grain));
+            if (rnd(px, py / (3 * TS), 0xB1B0u) > 0.965f)
+                c0 = mix(c0, RGB{ 22.0f, 14.0f, 8.0f }, 0.85f);
+            c = c0;
+            break;
+        }
+        case TEX_PLASTER: {
+            // Limewashed daub: warm off-white, hairline cracks, a few straw flecks.
+            float v = 0.94f + 0.08f * n;
+            RGB base{ 232.0f, 224.0f, 206.0f };
+            c = { base.r * v, base.g * v, base.b * v };
+            if (rnd(px / (2 * TS), py, 0xC1ACu) > 0.988f) c = { 168.0f, 158.0f, 140.0f };
+            if (rnd(px, py, 0x0DABu) > 0.975f) c = { 198.0f, 168.0f, 104.0f };
+            break;
+        }
+        case TEX_THATCH: {
+            int course = 5 * TS;
+            int row = py / course;
+            bool seam = (py % course) < 2;
+            float strand = 0.72f + 0.28f * rnd(px / 2, py, 0x51A0u + (uint32_t)row * 17u);
+            RGB straw{ 196.0f, 154.0f, 74.0f };
+            RGB dark{ 118.0f, 84.0f, 36.0f };
+            RGB c0 = mix(dark, straw, strand);
+            float speck = 0.92f + 0.10f * rnd(px, row, 0x71A7u);
+            c = { c0.r * speck, c0.g * speck, c0.b * speck };
+            if (seam) c = { 92.0f, 64.0f, 28.0f };
+            if (rnd(px, py / 3, 0x21C0u) > 0.93f) c = { 220.0f, 190.0f, 112.0f };
+            break;
+        }
+        case TEX_CLAY_TILE: {
+            int courseH = 10;
+            int tileW = 16;
+            int row = py / courseH;
+            int ly = py % courseH;
+            int off = (row & 1) * (tileW / 2);
+            int lx = (px + off) % tileW;
+            bool joint = (ly == 0) || (lx == 0);
+            float shade = 0.76f + 0.24f * ((float)ly / (float)courseH);
+            float vary = 0.90f + 0.14f * rnd((px + off) / tileW, row, 0xC1A7u);
+            RGB terra{ 176.0f, 78.0f, 52.0f };
+            c = { terra.r * shade * vary, terra.g * shade * vary, terra.b * shade * vary };
+            if (joint) c = { 96.0f, 46.0f, 34.0f };
+            if (ly > courseH - 3 && !joint) c = { c.r * 0.82f, c.g * 0.82f, c.b * 0.82f };
+            break;
+        }
+        case TEX_ASHLAR: {
+            int rh = 16;
+            int rw = 28;
+            int row = py / rh;
+            int ly = py % rh;
+            int off = (row & 1) * (rw / 2);
+            int lx = (px + off) % rw;
+            bool mortar = (ly == 0) || (lx == 0);
+            float v = 0.90f + 0.12f * rnd(px / 2, py / 2, 0xA511u + (uint32_t)row);
+            RGB stone{ 188.0f, 180.0f, 164.0f };
+            c = { stone.r * v, stone.g * v, stone.b * v };
+            if (mortar) c = { 128.0f, 122.0f, 110.0f };
+            if (!mortar && rnd(px / 3, py / 3, 0x55AAu + (uint32_t)row) > 0.92f)
+                c = { c.r * 0.90f, c.g * 0.90f, c.b * 0.88f };
+            break;
+        }
+        case TEX_TORCH_WOOD: {
+            float v = 0.78f + 0.28f * n;
+            RGB dark{ 62.0f, 36.0f, 18.0f };
+            RGB mid{ 122.0f, 74.0f, 36.0f };
+            c = mix(dark, mid, v);
+            if ((px / TS) % 5 == 0) c = { c.r * 0.72f, c.g * 0.72f, c.b * 0.72f };
+            break;
+        }
+        case TEX_FLAME: {
+            float u = (float)px / (float)(TILE - 1) - 0.5f;
+            float v = (float)py / (float)(TILE - 1) - 0.38f;
+            float d = std::sqrt(u * u * 3.4f + v * v * 1.5f);
+            float hot = 1.0f - std::min(1.0f, d / 0.42f);
+            RGB core{ 255.0f, 244.0f, 170.0f };
+            RGB body{ 255.0f, 132.0f, 28.0f };
+            RGB edge{ 168.0f, 36.0f, 6.0f };
+            c = mix(edge, body, std::min(1.0f, hot * 1.4f));
+            c = mix(c, core, hot * hot);
+            c.r *= 0.92f + 0.16f * n;
+            alpha = (d < 0.46f) ? 255.0f : 0.0f;
+            break;
+        }
+        case TEX_LANTERN: {
+            float v = 0.82f + 0.22f * n;
+            RGB bronze{ 92.0f, 64.0f, 36.0f };
+            RGB hi{ 168.0f, 124.0f, 62.0f };
+            bool rim = (px < 3 || py < 3 || px >= TILE - 3 || py >= TILE - 3);
+            c = rim ? hi : bronze;
+            c = { c.r * v, c.g * v, c.b * v };
+            if (!rim && rnd(px / 8, py / 8, 0x1A77u) > 0.82f)
+                c = { 210.0f, 170.0f, 90.0f };
+            break;
+        }
+        case TEX_LANTERN_GLOW: {
+            float u = (float)px / (float)(TILE - 1) - 0.5f;
+            float v = (float)py / (float)(TILE - 1) - 0.5f;
+            float d = std::sqrt(u * u + v * v);
+            float hot = 1.0f - std::min(1.0f, d / 0.55f);
+            RGB core{ 255.0f, 236.0f, 170.0f };
+            RGB body{ 255.0f, 176.0f, 64.0f };
+            c = mix(body, core, hot);
+            c.r *= 0.94f + 0.10f * n;
+            alpha = 255.0f;
+            break;
+        }
         case TEX_CORE: {
             float v = 0.35f + 0.25f * n;
             c = { 28.0f * v, 36.0f * v, 48.0f * v };

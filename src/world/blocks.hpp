@@ -20,6 +20,11 @@ enum Block : uint8_t {
     ITEM_GUIDE_BOOK,
     ITEM_CLUE,
     GUARDIAN_CORE,
+    // Medieval fabric. Appended so earlier save ids stay put.
+    // tools/stl2vlstruct/medieval_rooms.py stamps these into the resource rooms.
+    TIMBER, PLASTER, THATCH, CLAY_TILE, ASHLAR,
+    // Placeable lights. Appended so earlier save ids stay put.
+    TORCH, LANTERN,
     BLOCK_COUNT
 };
 
@@ -32,6 +37,8 @@ enum TexId : uint8_t {
     TEX_SHRUB_STEM, TEX_SHRUB_LEAF, TEX_GRASS_TUFT, TEX_LEAF_X, TEX_SHRUB_LEAF_X,
     TEX_BARK, TEX_HAND_AXE, TEX_WOOD_SIDE,
     TEX_SHEARS, TEX_HAND_PICK, TEX_HAND_SHOVEL, TEX_CRACK, TEX_CORE,
+    TEX_TIMBER, TEX_PLASTER, TEX_THATCH, TEX_CLAY_TILE, TEX_ASHLAR,
+    TEX_TORCH_WOOD, TEX_FLAME, TEX_LANTERN, TEX_LANTERN_GLOW,
     TEX_COUNT
 };
 
@@ -48,7 +55,12 @@ struct BlockInfo {
     bool passable;    // bodies move through; the block is a resisting medium
     float dragH;      // horizontal damping rate, 1/s (v *= exp(-drag * dt))
     float dragV;      // vertical damping rate, 1/s
+    // Block light 0..15. Spreads one step weaker along each of the six axes,
+    // so a source lights every direction the same way (not a single facing).
+    uint8_t emission = 0;
 };
+
+constexpr int BLOCK_LIGHT_MAX = 15;
 
 // enum Block values 0..BLOCK_COUNT-1 are the save/world-gen contract.
 // Built-in BlockInfo, strategies, and the player entity are registered by
@@ -64,6 +76,13 @@ inline const BlockInfo& blockOf(uint8_t b) {
         "?", false, false, false, false, 0, 0, 0, 0, 1.0f, 0.0f, false, 0.0f, 0.0f
     };
     return kMissing;
+}
+inline int blockEmission(uint8_t b) {
+    if (!validBlock(b)) return 0;
+    int e = (int)blockOf(b).emission;
+    if (e < 0) return 0;
+    if (e > BLOCK_LIGHT_MAX) return BLOCK_LIGHT_MAX;
+    return e;
 }
 inline bool isOpaque(uint8_t b) { return validBlock(b) && blockOf(b).opaque; }
 inline bool isTransparent(uint8_t b) { return validBlock(b) && blockOf(b).transparent; }
@@ -125,8 +144,18 @@ inline float blockFriction(uint8_t b) {
 constexpr uint8_t FLAG_ALIVE = 1;   // grown living tree wood and leaves
 constexpr uint8_t FLAG_HIDDEN = 2; // physics island: crushed leaf
 constexpr uint8_t FLAG_SETTLED = 2; // world log: written back from a fall
+// Lantern cells only. Same storage bit as FLAG_HIDDEN; read only when the block is LANTERN.
+constexpr uint8_t FLAG_LANTERN_HANG = 2;
 // bits 2..7 = cut faces (see log_appear.hpp flagCutFace)
 // Living wood/leaves of one generated tree share a unique treeId (0 = unbound).
+
+// One structure-file tag per flag bit. Save and load walk this table, so a new
+// bit is persisted as soon as it has a name here. Do not rename an entry.
+inline constexpr const char* kCellFlagTag[8] = {
+    "alive",
+    "hang",
+    "cut0", "cut1", "cut2", "cut3", "cut4", "cut5",
+};
 
 // A sod face treats plant foliage (passable cutout blocks like leaves, shrubs,
 // grass tufts) as air: plants sit on top of sod instead of withering it.

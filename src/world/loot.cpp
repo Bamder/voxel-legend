@@ -58,6 +58,8 @@ void fillBuiltin() {
     kind(ITEM_ARCANE_HEAL, Kind::Item, 8);
     kind(ITEM_GUIDE_BOOK, Kind::Item, 1);
     kind(ITEM_CLUE, Kind::Item, 1);
+    kind(TORCH, Kind::Block, (uint8_t)cfg::MAX_STACK);
+    kind(LANTERN, Kind::Block, (uint8_t)cfg::MAX_STACK);
 
     auto blk = [](uint8_t id, float h, float d) {
         g_block[id] = { h, d, 0.0f };
@@ -86,6 +88,13 @@ void fillBuiltin() {
     blk(GOLD_ORE, 5.0f, 36.0f);
     blk(DIAMOND_ORE, 6.0f, 45.0f);
     blk(BEDROCK, 100.0f, 10000.0f);
+    blk(TIMBER, 2.4f, 4.0f);
+    blk(THATCH, 1.4f, 3.5f);
+    blk(PLASTER, 2.2f, 8.0f);
+    blk(CLAY_TILE, 3.6f, 30.0f);
+    blk(ASHLAR, 4.0f, 36.0f);
+    blk(TORCH, 0.3f, 1.5f);
+    blk(LANTERN, 0.5f, 2.5f);
     for (int i = ITEM_ELEM_CORE; i <= ITEM_EYELESS; i++) {
         blk((uint8_t)i, 0.4f, 2.0f);
         HarvestRule relic;
@@ -139,6 +148,13 @@ void fillBuiltin() {
     rule(LOG, TAG_AXE, WOOD);
     rule(WOOD, TAG_AXE, WOOD);
     rule(PLANKS, TAG_AXE, PLANKS);
+    rule(TIMBER, TAG_AXE, TIMBER);
+    rule(THATCH, TAG_AXE, THATCH);
+    rule(PLASTER, TAG_PICK, PLASTER);
+    rule(CLAY_TILE, TAG_PICK, CLAY_TILE);
+    rule(ASHLAR, TAG_PICK, ASHLAR);
+    rule(TORCH, 0, TORCH);
+    rule(LANTERN, 0, LANTERN);
     rule(SHRUB_STEM, TAG_AXE, STICK);
     rule(GRASS_TUFT, TAG_SHEARS, GRASS_ITEM);
     rule(LEAVES, TAG_SHEARS, LEAVES);

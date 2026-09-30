@@ -106,6 +106,8 @@ void setVertexAttribs() {
     gl::EnableVertexAttribArray(4);
     gl::VertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, alpha));
     gl::EnableVertexAttribArray(5);
+    gl::VertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, blockLight));
+    gl::EnableVertexAttribArray(6);
 }
 
 Vec3 lerpVec(const Vec3& a, const Vec3& b, float t) {
@@ -1123,8 +1125,11 @@ void Renderer::drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const 
             };
             m_fallMesh.clear();
             const mat::Model& mdl = mat::itemModel(d.item);
-            if (!mdl.quads.empty())
+            if (!mdl.quads.empty() || mat::modelHasSolidTex(mdl))
                 mat::emitModelMesh(mdl, m_fallMesh, xform, blockOf(d.item).icon);
+            if (blockEmission(d.item) > 0) {
+                for (Vertex& v : m_fallMesh) v.blockLight = 1.0f;
+            }
             std::vector<float> solid;
             if (!mdl.solids.empty())
                 mat::emitSolidMesh(mdl.solids, solid, xform, false, 1.0f);
@@ -1881,6 +1886,9 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         std::vector<Vertex> held;
         emitHeldMesh(block, held, alpha, holdXform);
         for (Vertex& v : held) v.alpha = alpha;
+        if (blockEmission(block) > 0) {
+            for (Vertex& v : held) v.blockLight = 1.0f;
+        }
         std::vector<float> solid;
         const mat::Model& mdl = heldModel(block);
         if (!mdl.solids.empty())
@@ -3264,16 +3272,17 @@ void Renderer::drawDebugMenu(UIState& ui) {
     if (backHover) ui.debugHover = 0;
     buttonChrome(bx, backY, bw, bh, backHover);
 
-    const bool showRail = (ui.privilegeMode || ui.inTrial) && !ui.roomSession && !ui.structureEdit;
+    const bool showRail = (ui.privilegeMode || ui.inTrial) && !ui.roomSession;
+    const bool flightOnly = ui.structureEdit;
     const float aw = 46.0f;
     const float ax = bx + bw + 12.0f;
     const float ay = permY;
     const float colW = 280.0f;
     const float colX = ax + aw + 12.0f;
     const float spaceY = ay;
-    const float flyBtnY = spaceY + bh + gap;
+    const float flyBtnY = flightOnly ? spaceY : (spaceY + bh + gap);
     const float breakBtnY = flyBtnY + bh + gap;
-    const bool showQuick = ui.privilegeMode;
+    const bool showQuick = ui.privilegeMode && !flightOnly;
     const float railBottom = showQuick ? (breakBtnY + bh) : (flyBtnY + bh);
     const float ah = ui.railOpen ? (railBottom - ay) : bh;
     if (showRail) {
@@ -3281,12 +3290,14 @@ void Renderer::drawDebugMenu(UIState& ui) {
         if (arrowHover) ui.railHover = 0;
         buttonChrome(ax, ay, aw, ah, arrowHover);
         if (ui.railOpen) {
-            bool spaceHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= spaceY && ui.mouseY < spaceY + bh;
             bool flyHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= flyBtnY && ui.mouseY < flyBtnY + bh;
-            if (spaceHover) ui.railHover = 1;
             if (flyHover) ui.railHover = 2;
-            buttonChrome(colX, spaceY, colW, bh, spaceHover);
             buttonChrome(colX, flyBtnY, colW, bh, flyHover);
+            if (!flightOnly) {
+                bool spaceHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= spaceY && ui.mouseY < spaceY + bh;
+                if (spaceHover) ui.railHover = 1;
+                buttonChrome(colX, spaceY, colW, bh, spaceHover);
+            }
             if (showQuick) {
                 bool breakHover = ui.mouseX >= colX && ui.mouseX < colX + colW && ui.mouseY >= breakBtnY && ui.mouseY < breakBtnY + bh;
                 if (breakHover) ui.railHover = 3;
@@ -3311,10 +3322,12 @@ void Renderer::drawDebugMenu(UIState& ui) {
     if (showRail) {
         centeredText(ui.railOpen ? "▶" : "◀", ax + aw * 0.5f, ay + ah * 0.5f, 1.15f, 1, 1, 1, 1);
         if (ui.railOpen) {
-            const char* spaceLabel = ui.inTrial ? "退出守护者空间" : "进入守护者空间";
-            centeredText(spaceLabel, colX + colW * 0.5f, spaceY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
+            if (!flightOnly) {
+                const char* spaceLabel = ui.inTrial ? "退出守护者空间" : "进入守护者空间";
+                centeredText(spaceLabel, colX + colW * 0.5f, spaceY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
+            }
             centeredText(ui.flying ? "关闭飞行" : "开启飞行", colX + colW * 0.5f, flyBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
-            if (ui.privilegeMode)
+            if (showQuick)
                 centeredText(ui.quickBreak ? "快速破坏：开" : "快速破坏：关", colX + colW * 0.5f, breakBtnY + bh * 0.5f, 0.95f, 1, 1, 1, 1);
         }
     }

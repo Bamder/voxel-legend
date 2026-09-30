@@ -1,0 +1,19 @@
+# VOXEL LEGEND data pack entry
+id plaster
+display 白灰墙
+kind block
+max_stack 1
+hardness 2.2
+durability 8
+efficiency 0
+weight 8
+friction 0.58
+passable no
+drag_h 0
+drag_v 0
+wrong_tool_resist 0.2
+tags 
+harvest_need pick
+harvest_drop plaster 1
+crack_folds 2
+crack_color 18 16 14
