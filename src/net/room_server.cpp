@@ -916,11 +916,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             matchmap::Zone zone = matchmap::combatZone(zoneIdx);
                             int wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
                             int wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                            int wy = 0;
                             // Offset from zone center
                             int offsetX = (rng() % 8) - 4;
                             int offsetZ = (rng() % 8) - 4;
                             int finalX = wx + offsetX, finalZ = wz + offsetZ;
-                            int wy = 0;
                             int altarIdx = extra % structure::kRitualAltarCount;
                             std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIdx)) + ".vlstruct";
                             bool fileExists = std::filesystem::exists(altarPath);
@@ -1477,6 +1477,38 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 if (structure::damageGuardian(world, relic, dmg, gx, gy, gz)) {
                                     world.setBlock(gx, gy, gz, AIR, false, false);
                                     uint8_t drop = (uint8_t)ritual::blockId(relic);
+                                    const float Sdrop = cfg::BLOCK_SCALE;
+                                    world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
+                                                      (gz + 0.5f) * Sdrop }, drop, 1, true);
+                                }
+                            }
+                        }
+                    }
+                    if (combat::takeMeleeHit(c.guardianMelee, serverTick)) {
+                        combat::Hand hand = c.guardianMelee.hand;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft
+                                                             : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t equipped = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        auto def = combat::weapon(c.guardianMelee.item);
+                        combat::Actor attacker{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (def && equipped == c.guardianMelee.item && attacker.active &&
+                            c.guardianRelic < ritual::RelicCount) {
+                            float guardianT = def->reach + .01f;
+                            structure::GuardianSpan guardian;
+                            int gx = 0, gy = 0, gz = 0;
+                            bool aimed = structure::raycastGuardian(world, c.body.player.eye(),
+                                c.body.player.lookDir(), def->reach, guardianT, guardian) &&
+                                guardian.relic == c.guardianRelic;
+                            if (aimed && guardian_fight::vulnerable(c.guardianRelic) &&
+                                structure::roomGuardianHit(world, c.body.player.eye(),
+                                    c.guardianRelic, def->reach, gx, gy, gz)) {
+                                int dmg = structure::guardianStrikeHurt(equipped, c.guardianRelic);
+                                guardian_fight::noteDamage(c.guardianRelic, c.id, dmg);
+                                if (structure::damageGuardian(world, c.guardianRelic, dmg, gx, gy, gz)) {
+                                    world.setBlock(gx, gy, gz, AIR, false, false);
+                                    uint8_t drop = (uint8_t)ritual::blockId(c.guardianRelic);
                                     const float Sdrop = cfg::BLOCK_SCALE;
                                     world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
                                                       (gz + 0.5f) * Sdrop }, drop, 1, true);

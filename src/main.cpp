@@ -4138,7 +4138,6 @@ int main(int argc, char** argv) {
                     } else if (hasItemTags(heldMine, TAG_PICK)) {
                         need = player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec();
                         recover = anim::pickUpSec();
-                    }
                     if (player.mineCharge >= need) {
                         player.mineCharge = 0.0f;
                         player.mineCooldown = recover;
