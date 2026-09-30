@@ -57,7 +57,9 @@ class World {
 public:
     struct Chunk {
         std::vector<uint8_t> blocks;   // CHUNK_VOLUME bytes, index (y*Z + z)*X + x
-        std::vector<uint8_t> waterLevel; // 1..16 for dynamic water, 0 otherwise
+        // 1..16 dynamic water. Log and stripped wood may store 17 or 18 here
+        // as the placement axis (see log_appear.hpp). Not a water level.
+        std::vector<uint8_t> waterLevel;
         std::vector<uint8_t> flags;    // FLAG_ALIVE = grown tree wood/leaves
         std::vector<uint32_t> treeId;  // 0 = unbound; lazy, sized to CHUNK_VOLUME when used
         bool generated = false;
@@ -226,6 +228,9 @@ public:
     // diffuse horizontally, and evaporate in dry air.
     void waterTick(uint64_t tick);
     uint8_t getWaterLevel(int x, int y, int z) const;
+    // 0 = X, 1 = Y, 2 = Z. Living and settled logs report Y; their axis comes
+    // from the trunk, not from placement.
+    int logAxisAt(int x, int y, int z) const;
 
     // Authoritative chunk bytes for room sync: blocks, water, alive flags, sod.
     // Meshes and per-client render data are not included.

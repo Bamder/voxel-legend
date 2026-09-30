@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609290105u;
+constexpr uint32_t kRoomProto = 2609300001u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -71,6 +71,7 @@ struct RoomPlayerNet {
 struct BlockEditNet {
     int x = 0, y = 0, z = 0;
     uint8_t block = 0;
+    uint8_t face = 255; // clicked face 0..5; 255 = unknown (log stays upright)
 };
 
 // One player's visible state at a server tick.
@@ -469,6 +470,7 @@ inline std::vector<uint8_t> encodePlayInput(const PlayInputNet& in) {
         b.i32(in.edits[i].y);
         b.i32(in.edits[i].z);
         b.u8(in.edits[i].block);
+        b.u8(in.edits[i].face);
     }
     b.f32(in.bodyYaw);
     b.f32(in.vx);
@@ -540,7 +542,8 @@ inline bool decodePlayInput(const uint8_t* p, const uint8_t* end, PlayInputNet& 
     in.edits.resize(n);
     for (uint16_t i = 0; i < n; i++) {
         if (!Buf::i32(p, end, in.edits[i].x) || !Buf::i32(p, end, in.edits[i].y) ||
-            !Buf::i32(p, end, in.edits[i].z) || !Buf::u8(p, end, in.edits[i].block))
+            !Buf::i32(p, end, in.edits[i].z) || !Buf::u8(p, end, in.edits[i].block) ||
+            !Buf::u8(p, end, in.edits[i].face))
             return false;
     }
     if (!Buf::f32(p, end, in.bodyYaw) || !Buf::f32(p, end, in.vx) || !Buf::f32(p, end, in.vz) ||

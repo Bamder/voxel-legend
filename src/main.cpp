@@ -515,10 +515,16 @@ static std::vector<PlayInputNet::BarkEdit> g_roomBark;
 static std::vector<PlayInputNet::MineEdit> g_roomMines;
 static bool g_treeResync = false;
 
-static void noteRoomEdit(int x, int y, int z, uint8_t b) {
+static void noteRoomEdit(int x, int y, int z, uint8_t b, int face = -1) {
     if (!g_roomRecord || g_roomApplyNet) return;
     if (g_roomEdits.size() >= 256) g_roomEdits.erase(g_roomEdits.begin());
-    g_roomEdits.push_back(BlockEditNet{ x, y, z, b });
+    BlockEditNet e;
+    e.x = x;
+    e.y = y;
+    e.z = z;
+    e.block = b;
+    e.face = (face >= 0 && face < 6) ? (uint8_t)face : 255;
+    g_roomEdits.push_back(e);
 }
 
 static void noteRoomBark(int x, int y, int z, int face, bool place) {
@@ -4041,9 +4047,9 @@ int main(int argc, char** argv) {
                     IVec3 place = ui.placePreview;
                     if (world.getBlock(place.x, place.y, place.z) == AIR
                         && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
-                        world.setBlock(place.x, place.y, place.z, carry.block, true, true,
-                                       world.faceFromHitNormal(nrm));
-                        noteRoomEdit(place.x, place.y, place.z, carry.block);
+                        int face = world.faceFromHitNormal(nrm);
+                        world.setBlock(place.x, place.y, place.z, carry.block, true, true, face);
+                        noteRoomEdit(place.x, place.y, place.z, carry.block, face);
                         carry.clear();
                         ui.hasPlacePreview = false;
                     }
@@ -4308,9 +4314,9 @@ int main(int argc, char** argv) {
                                 if (!sel.empty() && (offering || plugin::blockStrategy(sel.block)->canPlace(sel.block))) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
-                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true,
-                                                       world.faceFromHitNormal(nrm));
-                                        noteRoomEdit(place.x, place.y, place.z, sel.block);
+                                        int face = world.faceFromHitNormal(nrm);
+                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true, face);
+                                        noteRoomEdit(place.x, place.y, place.z, sel.block, face);
                                         if (--sel.count == 0) sel.clear();
                                     }
                                 }
@@ -4496,6 +4502,7 @@ int main(int argc, char** argv) {
                     roomAttackVisualItem = AIR;
                 }
             }
+        }
         }
 
         if (g_resized) {

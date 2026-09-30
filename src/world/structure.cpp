@@ -44,6 +44,16 @@ struct Blueprint {
         }
         return flags;
     }
+    // Face whose normal is the stored placement axis. -1 means upright.
+    int axisFaceAt(int x, int y, int z) const {
+        int face = -1;
+        for (const CellTag& t : tags) {
+            if (t.x != x || t.y != y || t.z != z) continue;
+            if (t.name == "axisx") face = 2;
+            else if (t.name == "axisz") face = 4;
+        }
+        return face;
+    }
 };
 
 struct Site {
@@ -404,7 +414,7 @@ bool paintFile(World& world, const std::string& path) {
                 int z = kEditZ + lz;
                 if (!inVolume(x, y, z)) continue;
                 uint8_t block = b.at(lx, ly, lz);
-                world.setBlock(x, y, z, block, false, true, -1, b.flagsAt(lx, ly, lz));
+                world.setBlock(x, y, z, block, false, true, b.axisFaceAt(lx, ly, lz), b.flagsAt(lx, ly, lz));
             }
         }
     }
@@ -450,6 +460,9 @@ bool saveFile(const World& world, const std::string& path) {
                     if (flags & (uint8_t)(1u << bit))
                         b.tags.push_back(CellTag{ lx, ly, lz, kCellFlagTag[bit] });
                 }
+                int axis = world.logAxisAt(x, y, z);
+                if (axis == 0) b.tags.push_back(CellTag{ lx, ly, lz, "axisx" });
+                else if (axis == 2) b.tags.push_back(CellTag{ lx, ly, lz, "axisz" });
             }
         }
     }
@@ -917,7 +930,8 @@ int stampBlueprint(World& world, int worldX, int worldZ, const Blueprint& b, int
             for (int lx = 0; lx < b.sx; ++lx) {
                 uint8_t block = b.at(lx, ly, lz);
                 if (block == AIR) continue;
-                putSolid(world, x0 + lx, floorY + ly, z0 + lz, block, -1, b.flagsAt(lx, ly, lz));
+                putSolid(world, x0 + lx, floorY + ly, z0 + lz, block,
+                         b.axisFaceAt(lx, ly, lz), b.flagsAt(lx, ly, lz));
                 placed++;
             }
         }

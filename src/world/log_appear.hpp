@@ -19,6 +19,37 @@ inline int faceAxis(int face) {
     return (face < 2) ? 1 : (face < 4) ? 0 : 2;
 }
 
+// Placement axis for log and stripped wood, stored in the cell's water byte.
+// Real water only uses 1..WATER_MAX_LEVEL (16). 0 means upright (Y), which is
+// also every log saved before placement had a direction.
+constexpr uint8_t LOG_AXIS_X = 17;
+constexpr uint8_t LOG_AXIS_Z = 18;
+
+inline bool isOrientedWood(uint8_t b) { return b == LOG || b == WOOD; }
+
+inline uint8_t logAxisLevel(int axis) {
+    if (axis == 0) return LOG_AXIS_X;
+    if (axis == 2) return LOG_AXIS_Z;
+    return 0;
+}
+
+inline int logAxisFromLevel(uint8_t level) {
+    if (level == LOG_AXIS_X) return 0;
+    if (level == LOG_AXIS_Z) return 2;
+    return 1;
+}
+
+// Bark and stripped grain run along the trunk. Upright logs already do that
+// with the face's own UV, so those stay put.
+inline void orientLogSideUV(int face, int trunkAxis, float px, float py, float pz,
+                            float& tu, float& tv) {
+    if (trunkAxis == 1 || faceAxis(face) == trunkAxis) return;
+    int around = 3 - faceAxis(face) - trunkAxis;
+    float p[3] = { px, py, pz };
+    tu = p[around];
+    tv = p[trunkAxis];
+}
+
 inline int faceFromDir(const Vec3& n) {
     float ax = std::fabs(n.x), ay = std::fabs(n.y), az = std::fabs(n.z);
     if (ay >= ax && ay >= az) return n.y >= 0.0f ? 0 : 1;
@@ -214,11 +245,13 @@ struct LogFaceTex {
     int qa = 0, qb = 0;
 };
 
-// Uncut faces wrap bark. Rings only on faces opened by breaking a neighbor.
+// Living and settled logs keep bark on uncut faces; rings show where a neighbor
+// was opened. A placed log or stripped block puts rings on the trunk ends, so
+// the ring axis is the normal of the face it was set against.
 // Aligned 2x2: one ring. Edge overlap of 2: ring stretched to 2x1 then halved.
 // 1-cell junction: small ring.
 inline LogFaceTex logFaceTex(uint8_t flags, int face, int trunkAxis, int spliceKind,
-                            int qa, int qb, int longAxis) {
+                            int qa, int qb, int longAxis, uint8_t sideTile = TEX_LOG_SIDE) {
     LogFaceTex r;
     r.qa = qa;
     r.qb = qb;
@@ -230,8 +263,8 @@ inline LogFaceTex logFaceTex(uint8_t flags, int face, int trunkAxis, int spliceK
     bool cut = hasCutFace(flags, face);
     bool end = faceAxis(face) == trunkAxis;
     if (!cut) {
-        if (alive || settled || face > 1) {
-            r.tile = TEX_LOG_SIDE;
+        if (alive || settled || !end) {
+            r.tile = sideTile;
             return r;
         }
         r.tile = TEX_LOG_TOP;

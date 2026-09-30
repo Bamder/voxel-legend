@@ -180,7 +180,8 @@ void applyEdit(World& world, const BlockEditNet& e) {
     world.ensureColumn(cx, cz);
     if (!world.columnLoaded(cx, cz)) return;
     if (world.getBlock(e.x, e.y, e.z) == e.block) return;
-    world.setBlock(e.x, e.y, e.z, e.block, false, false);
+    int face = e.face < 6 ? (int)e.face : -1;
+    world.setBlock(e.x, e.y, e.z, e.block, false, false, face);
 }
 
 void applyBark(World& world, const PlayInputNet::BarkEdit& e) {

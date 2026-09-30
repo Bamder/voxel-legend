@@ -24,6 +24,9 @@
 
 namespace {
 
+static_assert(LOG_AXIS_X == (uint8_t)(cfg::WATER_MAX_LEVEL + 1), "log axis overlaps water");
+static_assert(LOG_AXIS_Z == (uint8_t)(cfg::WATER_MAX_LEVEL + 2), "log axis overlaps water");
+
 uint32_t fnv1a(const uint8_t* d, size_t n) {
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < n; i++) { h ^= d[i]; h *= 16777619u; }
@@ -109,7 +112,20 @@ uint8_t World::getWaterLevel(int x, int y, int z) const {
     if (!cellLoc(x, y, z, c)) return 0;
     auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0;
+    if (it->second.get(c.lx, c.ly, c.lz) != WATER) return 0;
     return it->second.levelAt(c.lx, c.ly, c.lz);
+}
+
+int World::logAxisAt(int x, int y, int z) const {
+    uint8_t b = getBlock(x, y, z);
+    if (!isOrientedWood(b)) return 1;
+    uint8_t fl = getFlags(x, y, z);
+    if (b == LOG && (fl & (FLAG_ALIVE | FLAG_SETTLED)) != 0) return 1;
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return 1;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
+    if (it == m_chunks.end()) return 1;
+    return logAxisFromLevel(it->second.levelAt(c.lx, c.ly, c.lz));
 }
 
 int World::humidityAt(int x, int y, int z) const {
@@ -387,9 +403,14 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
 
     // Water: placing water creates a temporary source (level 16); any other block
     // clears the dynamic-water level. Generated ocean water keeps level 0 (static).
+    // Log and stripped wood reuse that byte for the placement axis (17 = X, 18 = Z).
     if (b == WATER) {
         it->second.setLevel(lx, ly, lz, cfg::WATER_SOURCE_LEVEL);
         it->second.hasWater = true;
+    } else if (isOrientedWood(b) &&
+               (cellFlags < 0 || (cellFlags & (FLAG_ALIVE | FLAG_SETTLED)) == 0)) {
+        int axis = (placeFace >= 0 && placeFace < 6) ? faceAxis(placeFace) : 1;
+        it->second.setLevel(lx, ly, lz, logAxisLevel(axis));
     } else {
         it->second.setLevel(lx, ly, lz, 0);
     }
@@ -1074,7 +1095,9 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                 uint8_t fl = ch.flagAt(x, y, z);
                 int trunk = 1;
                 auto isWood = [&](int ix, int iy, int iz) { return isTreeWood(getBlock(ix, iy, iz)); };
-                if (b == LOG) trunk = logTrunkAxis(wx, wy, wz, fl, isWood);
+                bool grownLog = b == LOG && (fl & (FLAG_ALIVE | FLAG_SETTLED)) != 0;
+                if (grownLog) trunk = logTrunkAxis(wx, wy, wz, fl, isWood);
+                else if (isOrientedWood(b)) trunk = logAxisFromLevel(ch.levelAt(x, y, z));
 
                 for (int f = 0; f < 6; f++) {
                     const geo::FaceDef& F = geo::kFaces[f];
@@ -1101,10 +1124,13 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                         };
                         spliceKind = spliceEndRing(wx, wy, wz, f, trunk, qa, qb, longAxis, isWood, hasCut);
                     }
-                    LogFaceTex lf = (b == LOG)
-                        ? logFaceTex(fl, f, trunk, spliceKind, qa, qb, longAxis)
-                        : LogFaceTex{};
-                    if (b != LOG) {
+                    LogFaceTex lf;
+                    if (b == LOG) {
+                        lf = logFaceTex(fl, f, trunk, spliceKind, qa, qb, longAxis, TEX_LOG_SIDE);
+                    } else if (b == WOOD) {
+                        uint8_t wf = (uint8_t)(fl & (uint8_t)~(FLAG_ALIVE | FLAG_SETTLED));
+                        lf = logFaceTex(wf, f, trunk, 0, 0, 0, 0, TEX_WOOD_SIDE);
+                    } else {
                         lf.tile = (f == 0) ? info.texTop : (f == 1 ? info.texBottom : info.texSide);
                     }
                     float alpha = (b == WATER) ? 0.55f : (b == GLASS ? 0.4f : 1.0f);
@@ -1120,9 +1146,12 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                             py -= 0.14f; // recessed ocean surface
                         }
                         float u, v;
-                        if (b == LOG) logCornerUV(lf, F.t[c][0], F.t[c][1],
-                                                 F.p[c][0], F.p[c][1], F.p[c][2], u, v);
-                        else {
+                        if (b == LOG || b == WOOD) {
+                            float tu = F.t[c][0], tv = F.t[c][1];
+                            if (!grownLog && lf.tile != TEX_LOG_TOP)
+                                orientLogSideUV(f, trunk, F.p[c][0], F.p[c][1], F.p[c][2], tu, tv);
+                            logCornerUV(lf, tu, tv, F.p[c][0], F.p[c][1], F.p[c][2], u, v);
+                        } else {
                             float u0, v0, u1, v1;
                             tex::tileUV(lf.tile, u0, v0, u1, v1);
                             u = u0 + (u1 - u0) * F.t[c][0];
@@ -2573,8 +2602,8 @@ bool World::loadChunkFile(int cx, int cy, int cz, Chunk& ch) const {
     if (!f) return false;
     if (fnv1a(ch.waterLevel.data(), ch.waterLevel.size()) != wchk) return false;
     ch.hasWater = false;
-    for (uint8_t lvl : ch.waterLevel) {
-        if (lvl > 0) { ch.hasWater = true; break; }
+    for (size_t i = 0; i < ch.waterLevel.size(); i++) {
+        if (ch.blocks[i] == WATER && ch.waterLevel[i] > 0) { ch.hasWater = true; break; }
     }
 
     uint32_t fchk = 0;
@@ -3278,8 +3307,8 @@ void World::writeAuthChunk(int cx, int cy, int cz, const uint8_t* blocks, const 
     ch.generated = true;
     ch.modified = true;
     ch.hasWater = false;
-    for (uint8_t lvl : ch.waterLevel) {
-        if (lvl > 0) { ch.hasWater = true; break; }
+    for (size_t i = 0; i < ch.waterLevel.size() && i < ch.blocks.size(); i++) {
+        if (ch.blocks[i] == WATER && ch.waterLevel[i] > 0) { ch.hasWater = true; break; }
     }
     rememberEdited(cx, cz);
     remeshChunk(cx, cy, cz);
