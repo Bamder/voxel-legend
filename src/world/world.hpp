@@ -18,6 +18,7 @@ struct Vertex {
     float faceShade;
     float ao;
     float alpha;
+    float blockLight = 0.0f; // 0..1 baked fire light (six-direction flood)
 };
 
 #include "tree_fall.hpp"
@@ -65,6 +66,8 @@ public:
         bool hasMesh = false;
         bool uploaded = false;         // GL buffers are current (managed by renderer)
         bool hasWater = false;         // chunk contains dynamic water (skip scan otherwise)
+        bool emissionKnown = false;    // runtime: hasEmission has been scanned
+        bool hasEmission = false;      // runtime: chunk holds a block light
         std::vector<Vertex> meshOpaque;
         std::vector<Vertex> meshTransparent;
 
@@ -148,7 +151,10 @@ public:
     uint8_t getFlags(int x, int y, int z) const;
     uint32_t getTreeId(int x, int y, int z) const;
     bool isAlive(int x, int y, int z) const;
-    void setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh = true);
+    // placeFace is the clicked face (geo::kFaces). -1 means the face is unknown.
+    // cellFlags >= 0 writes that flag byte and skips placement inference.
+    void setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh = true,
+                  int placeFace = -1, int cellFlags = -1);
 
     void treeFallPhysics(float dt);
     void treeFallGameTick();

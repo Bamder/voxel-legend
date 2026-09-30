@@ -54,6 +54,8 @@ public:
     // Player-owned attempt clock (windup + recovery). Cooldown always ticks down; click-spam cannot skip it.
     float mineCooldown = 0.0f;
     float mineCharge = 0.0f;
+    // Sideways wish scale for this update. 0.5 while a tool swing is playing.
+    float swingStrafe = 1.0f;
 
     Vec3 eye() const;
     Vec3 forward() const { return { std::sin(yaw), 0.0f, -std::cos(yaw) }; }

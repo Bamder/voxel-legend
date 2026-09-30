@@ -1,5 +1,21 @@
 room server starting
-seed 2195831636 port 35535
+seed 2185314100 port 35535
 listening
 world ready
+[DEBUG] Player 玩家 spawned at team=1, bx=-32704, by=40, bz=-32704
+[DEBUG] Entering altar placement for team=1
+[DEBUG] Placing altar 0 (ritual_element) for team 1 at wx=-32702, wy=40, wz=-32705 col=(-1022,-1023) fileExists=1
+[DEBUG] Placing extra altar 1 (ritual_god) at wx=32705, wy=43, wz=32707 col=(1022,1022) fileExists=1
+[DEBUG] Placing extra altar 2 (ritual_old_god) at wx=-32706, wy=50, wz=32701 col=(-1023,1021) fileExists=1
+[DEBUG] Placing extra altar 3 (ritual_outer) at wx=32707, wy=49, wz=-32705 col=(1022,-1023) fileExists=1
+[DEBUG] Placing extra altar 4 (ritual_time) at wx=32704, wy=43, wz=32700 col=(1022,1021) fileExists=1
+[DEBUG] Placing extra altar 5 (ritual_worldtree) at wx=1, wy=53, wz=32701 col=(0,1021) fileExists=1
+[DEBUG] All ritual altars placed!
+[DEBUG] Placing room 0 (room_basic) for team 1 at wx=-32696, wy=40, wz=-32704
+[DEBUG] Spawned 8 loot items near room 0 for team 1 (weapons=purple/gold, arcane=fire/green, clues=blinking)
+[DEBUG] Placing room 1 (room_isometric) for team 1 at wx=-32704, wy=40, wz=-32696
+[DEBUG] Spawned 8 loot items near room 1 for team 1 (weapons=purple/gold, arcane=fire/green, clues=blinking)
+[DEBUG] Placing room 2 (room_japanese) for team 1 at wx=-32712, wy=40, wz=-32704
+[DEBUG] Spawned 8 loot items near room 2 for team 1 (weapons=purple/gold, arcane=fire/green, clues=blinking)
+[DEBUG] All room buildings placed with loot!
 welcome 1 玩家

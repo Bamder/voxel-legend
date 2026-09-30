@@ -2802,11 +2802,7 @@ int main(int argc, char** argv) {
             ui.dummyActive = false;
             tickSpeed = 1.0f;
         }
-        if (structureEdit) {
-            player.privilegeMode = true;
-            player.flying = true;
-            player.dead = false;
-        }
+        if (structureEdit) player.dead = false;
         if (!player.privilegeMode || roomSession || structureEdit) ui.quickBreak = false;
         if (player.dead) targetPanel = -1;
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
@@ -3324,8 +3320,11 @@ int main(int argc, char** argv) {
         ui.targetPhys = hitOk ? physHit : -1;
         ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
                          playing && !spectating) ? dropHit : -1;
-        bool emptyMeleeSpace = !hitOk && dropHit < 0 && guardianRelic < 0 && dummyAim < 0;
-        if (roomSession && playing && !structureEdit && (entityTarget || emptyMeleeSpace) && lmb && !prevLmb &&
+        // Air, a hostile player, or a guardian all start the same swing. The
+        // server raycasts again at the damage frame, so the click itself does
+        // not need a target. A block under the crosshair stays a mining swing.
+        bool canStartMelee = dummyAim < 0 && dropHit < 0 && (entityTarget || !hitOk);
+        if (roomSession && playing && !structureEdit && canStartMelee && lmb && !prevLmb &&
             !roomAttackPending && roomAttackVisualItem == AIR && lookLocked && !paused && !inventoryOpen && !deploying &&
             !storyOpen && !guideOpen && !clueOpen && !spectating && !player.dead && carry.empty()) {
             uint8_t attackItem = entityAttackItem;
@@ -3334,23 +3333,6 @@ int main(int argc, char** argv) {
             if (combat::weapon(attackItem)) {
                 if (!++roomAttackNext) ++roomAttackNext;
                 roomAttackPending = roomAttackNext;
-                roomAttackHand = attackHand;
-                roomAttackVisualItem = attackItem;
-                roomAttackVisualTime = 0.0001f;
-            }
-        }
-        if (roomSession && playing && !structureEdit && guardianRelic >= 0 && lmb && !prevLmb &&
-            !roomGuardianPending && roomAttackVisualItem == AIR && lookLocked && !paused &&
-            !inventoryOpen && !deploying && !storyOpen && !guideOpen && !clueOpen &&
-            !spectating && !player.dead && carry.empty()) {
-            uint8_t attackItem = AIR;
-            uint8_t attackHand = 1;
-            auto weapon = selectedCombatWeapon(attackItem, attackHand)
-                ? combat::weapon(attackItem) : std::nullopt;
-            if (weapon && guardianT <= weapon->reach) {
-                if (!++roomGuardianNext) ++roomGuardianNext;
-                roomGuardianPending = roomGuardianNext;
-                roomGuardianRelic = (uint8_t)guardianRelic;
                 roomAttackHand = attackHand;
                 roomAttackVisualItem = attackItem;
                 roomAttackVisualTime = 0.0001f;
@@ -4052,7 +4034,8 @@ int main(int argc, char** argv) {
                     IVec3 place = ui.placePreview;
                     if (world.getBlock(place.x, place.y, place.z) == AIR
                         && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
-                        world.setBlock(place.x, place.y, place.z, carry.block, true);
+                        world.setBlock(place.x, place.y, place.z, carry.block, true, true,
+                                       world.faceFromHitNormal(nrm));
                         noteRoomEdit(place.x, place.y, place.z, carry.block);
                         carry.clear();
                         ui.hasPlacePreview = false;
@@ -4077,11 +4060,7 @@ int main(int argc, char** argv) {
                 if (player.mineCharge <= 0.0f && player.mineCooldown <= 0.0f)
                     player.strikeName.clear();
 
-                bool canMine = false;
-                bool guardianSwing = false;
-                bool dummySwing = false;
-                uint8_t heldMine = AIR;
-                uint8_t heldDummy = AIR;
+                uint8_t heldMine = inv[ui.selectedSlot].block;
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 0)
                     saveCurrentStructure();
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 1)
@@ -4096,43 +4075,9 @@ int main(int argc, char** argv) {
                     world.setBlock(hit.x, hit.y, hit.z, AIR, false, true);
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
                     && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
-                    world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true);
-                if (!roomSession && !structureEdit && lmb && ui.targetGuardian >= 0 &&
-                    lookLocked && !player.dead && !spectating) {
-                    guardianSwing = true;
-                    heldMine = inv[ui.selectedSlot].block;
-                }
-                if (!structureEdit && lmb && !prevLmb && dummyAim >= 0 && roomAttackVisualItem == AIR &&
-                    lookLocked && !player.dead && !spectating) {
-                    uint8_t hand = 1;
-                    selectedCombatWeapon(heldDummy, hand);
-                    if (heldDummy != AIR) dummySwing = true;
-                }
-                if (!structureEdit && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
-                    heldMine = inv[ui.selectedSlot].block;
-                    canMine = !roomSession || combat::slotUsable(player.vitals, ui.selectedSlot);
-                    if (physHit < 0) {
-                        uint8_t b = world.getBlock(hit.x, hit.y, hit.z);
-                        if (!plugin::blockStrategy(b)->canBreak(b)) canMine = false;
-                        if (b == GRASS_TUFT && hit.y > 0
-                            && world.getBlock(hit.x, hit.y - 1, hit.z) == GRASS_TUFT)
-                            canMine = false;
-                    } else {
-                        uint8_t b = world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
-                        if (!plugin::blockStrategy(b)->canBreak(b)) canMine = false;
-                    }
-                    if (canMine) {
-                        int face = world.faceFromHitNormal(nrm);
-                        float dmg = 0.0f;
-                        if (physHit < 0 && world.hasSodFace(hit.x, hit.y, hit.z, face))
-                            dmg = loot::sodMineDamage(heldMine);
-                        else
-                            dmg = loot::mineDamage(physHit < 0
-                                ? world.getBlock(hit.x, hit.y, hit.z)
-                                : world.getPhysBlock(physHit, hit.x, hit.y, hit.z), heldMine);
-                        if (dmg <= 0.0f) canMine = false;
-                    }
-                }
+                    world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true,
+                                   world.faceFromHitNormal(nrm));
+                bool quickBroke = false;
                 if (ui.quickBreak && player.privilegeMode && !roomSession && !structureEdit
                     && lmb && hitOk && ui.targetDrop < 0 && lookLocked && !player.dead) {
                     uint8_t b = physHit < 0
@@ -4143,9 +4088,7 @@ int main(int argc, char** argv) {
                         player.mineCooldown = 0.0f;
                         player.strikeName.clear();
                         player.pickRaised = false;
-                        canMine = false;
-                        guardianSwing = false;
-                        dummySwing = false;
+                        quickBroke = true;
                         // A click stays down for several frames. Space the breaks so one
                         // click removes a single block; holding keeps breaking at this rate.
                         if (ui.quickBreakWait <= 0.0f) {
@@ -4154,89 +4097,29 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
-                if (!canMine && !guardianSwing && !dummySwing) {
-                    player.mineCharge = 0.0f;
-                } else if (player.mineCooldown > 0.0f) {
+                // Left click starts the swing with no target. Releasing does not
+                // cancel it. Damage and block cracks are applied only if the
+                // crosshair is on that object or block at the impact frame.
+                bool handOk = !roomSession || combat::slotUsable(player.vitals, ui.selectedSlot);
+                bool swingGate = !structureEdit && lookLocked && !player.dead && !spectating &&
+                    roomAttackVisualItem == AIR && handOk && !quickBroke;
+                bool beginSwing = swingGate && lmb && ui.targetDrop < 0 &&
+                    player.mineCharge <= 0.0f && player.mineCooldown <= 0.0f;
+                bool continueSwing = swingGate && player.mineCharge > 0.0f;
+                if (!beginSwing && !continueSwing) {
+                    if (player.mineCharge > 0.0f && !swingGate) player.mineCharge = 0.0f;
+                } else if (player.mineCooldown > 0.0f && player.mineCharge <= 0.0f) {
                     // Cooling down: holding or click-spam cannot skip this.
-                } else if (guardianSwing) {
-                    bool axe = heldMine != AIR && hasItemTags(heldMine, TAG_AXE);
-                    if (player.strikeName.empty()
-                        || (axe && player.strikeName != "axe_chop")
-                        || (!axe && player.strikeName != "punch")) {
-                        player.strikeName = axe ? "axe_chop" : "punch";
-                        player.pickRaised = false;
-                        player.strikeCharge = axe ? anim::axeChopSec() : 0.50f;
-                        player.strikeCool = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
-                    }
-                    player.mineCharge += dt;
-                    float need = axe ? anim::axeChopSec() : 0.50f;
-                    float recover = axe ? loot::mineCooldownSec(heldMine) : 0.40f;
-                    if (player.mineCharge >= need) {
-                        player.mineCharge = 0.0f;
-                        player.mineCooldown = recover;
-                        if (guardian_fight::vulnerable(ui.targetGuardian)) {
-                            int gx = 0, gy = 0, gz = 0;
-                            int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
-                            guardian_fight::noteDamage(ui.targetGuardian, 1, dmg);
-                            bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
-                            if (ui.bossRelic == ui.targetGuardian) {
-                                ui.bossHp -= dmg;
-                                if (ui.bossHp < 0) ui.bossHp = 0;
-                                if (ui.bossMaxHp > 0)
-                                    ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
-                                if (slain) ui.bossNear = false;
-                            }
-                            if (slain) {
-                                uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
-                                const dropgeom::Shape& sh = dropgeom::cached(item);
-                                const float S = cfg::BLOCK_SCALE;
-                                Vec3 dropPos{ (gx + 0.5f) * S, (gy + 1) * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
-                                world.spawnDrop(dropPos, item, 1, true);
-                            }
-                        }
-                    }
-                } else if (dummySwing) {
-                    auto def = combat::weapon(heldDummy);
-                    if (def) {
-                        roomAttackVisualItem = heldDummy;
-                        roomAttackVisualTime = 0.0001f;
-                        float obstruction = def->reach + 0.01f;
-                        IVec3 blockHit{}, prevHit{};
-                        Vec3 hitNormal{};
-                        float blockT = obstruction;
-                        if (world.raycast(player.eye(), player.lookDir(), def->reach,
-                                          blockHit, prevHit, hitNormal, nullptr, &blockT))
-                            obstruction = blockT;
-                        int best = -1;
-                        std::optional<combat::LimbHit> bestHit;
-                        for (int i = 0; i < (int)targets.size(); ++i) {
-                            auto hit = combat::rayPlayer(player.eye(), player.lookDir(),
-                                                         targets[(size_t)i].feet, targets[(size_t)i].yaw,
-                                                         def->reach, obstruction);
-                            if (hit && (!bestHit || hit->distance < bestHit->distance)) {
-                                bestHit = hit;
-                                best = i;
-                            }
-                        }
-                        if (best >= 0 && bestHit) {
-                            combat::DamageSource source{ 1, 1, def->item, combat::DamageCategory::Physical };
-                            auto result = combat::damagePlayer(targets[(size_t)best].vitals, source,
-                                                               def->damage, bestHit->limb);
-                            if (result.applied) hitMarker = 0.22f;
-                        }
-                    }
                 } else {
                     if (player.strikeName.empty()) {
-                        if (heldMine == AIR) player.strikeName = "punch";
-                        else if (hasItemTags(heldMine, TAG_AXE)) player.strikeName = "axe_chop";
+                        if (hasItemTags(heldMine, TAG_AXE)) player.strikeName = "axe_chop";
                         else if (hasItemTags(heldMine, TAG_PICK)) player.strikeName = "pick_mine";
+                        else if (heldMine == AIR || !loot::isTool(heldMine)) player.strikeName = "punch";
                         if (player.strikeName != "pick_mine") player.pickRaised = false;
-                        if (!player.strikeName.empty()) {
-                            player.strikeCharge = hasItemTags(heldMine, TAG_AXE)
-                                ? anim::axeChopSec()
-                                : loot::mineChargeSec(heldMine);
-                            player.strikeCool = loot::mineCooldownSec(heldMine);
-                        }
+                        player.strikeCharge = hasItemTags(heldMine, TAG_AXE)
+                            ? anim::axeChopSec()
+                            : loot::mineChargeSec(heldMine);
+                        player.strikeCool = loot::mineCooldownSec(heldMine);
                     }
                     player.mineCharge += dt;
                     float need = loot::mineChargeSec(heldMine);
@@ -4248,32 +4131,112 @@ int main(int argc, char** argv) {
                     } else if (hasItemTags(heldMine, TAG_PICK)) {
                         need = player.pickRaised ? anim::pickDownSec() : anim::pickFirstSec();
                         recover = anim::pickUpSec();
-                    }
                     if (player.mineCharge >= need) {
                         player.mineCharge = 0.0f;
                         player.mineCooldown = recover;
                         if (hasItemTags(heldMine, TAG_PICK)) player.pickRaised = true;
-                        int face = world.faceFromHitNormal(nrm);
-                        if (roomSession) {
-                            uint32_t tree = 0;
-                            if (physHit >= 0) {
-                                const std::vector<PhysicsIsland>& islands = world.physicsIslands();
-                                if (physHit < (int)islands.size()) tree = islands[(size_t)physHit].netId;
-                            }
-                            if (physHit < 0 || tree != 0)
-                                noteRoomMine(hit.x, hit.y, hit.z, face, heldMine, tree);
-                        }
-                        if (world.applyMineHit(physHit, hit.x, hit.y, hit.z, heldMine, face)) {
-                            if (roomSession && physHit >= 0) {
-                                uint8_t b = world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
-                                if (b != AIR && loot::isHarvestBreak(b, heldMine) &&
-                                    physHit < (int)world.physicsIslands().size()) {
-                                    Vec3 dropPos = tree_fall::worldOf(
-                                        world.physicsIslands()[(size_t)physHit], hit.x, hit.y, hit.z);
-                                    spawnHarvestDrops(world, dropPos, b, heldMine);
+                        bool connected = false;
+                        if (!roomSession && ui.targetGuardian >= 0) {
+                            connected = true;
+                            if (guardian_fight::vulnerable(ui.targetGuardian)) {
+                                int gx = 0, gy = 0, gz = 0;
+                                int dmg = structure::guardianStrikeHurt(heldMine, ui.targetGuardian);
+                                guardian_fight::noteDamage(ui.targetGuardian, 1, dmg);
+                                bool slain = structure::damageGuardian(world, ui.targetGuardian, dmg, gx, gy, gz);
+                                if (ui.bossRelic == ui.targetGuardian) {
+                                    ui.bossHp -= dmg;
+                                    if (ui.bossHp < 0) ui.bossHp = 0;
+                                    if (ui.bossMaxHp > 0)
+                                        ui.guardianHurt = 1.0f - (float)ui.bossHp / (float)ui.bossMaxHp;
+                                    if (slain) ui.bossNear = false;
                                 }
+                                if (slain) {
+                                    uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
+                                    const dropgeom::Shape& sh = dropgeom::cached(item);
+                                    const float S = cfg::BLOCK_SCALE;
+                                    Vec3 dropPos{ (gx + 0.5f) * S, (gy + 1) * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                                    world.spawnDrop(dropPos, item, 1, true);
+                                }
+                            }
+                        }
+                        if (!connected && dummyAim >= 0) {
+                            connected = true;
+                            uint8_t weaponItem = AIR;
+                            uint8_t weaponHand = 1;
+                            auto def = selectedCombatWeapon(weaponItem, weaponHand)
+                                ? combat::weapon(weaponItem) : std::nullopt;
+                            if (def) {
+                                float obstruction = def->reach + 0.01f;
+                                IVec3 blockHit{}, prevHit{};
+                                Vec3 hitNormal{};
+                                float blockT = obstruction;
+                                if (world.raycast(player.eye(), player.lookDir(), def->reach,
+                                                  blockHit, prevHit, hitNormal, nullptr, &blockT))
+                                    obstruction = blockT;
+                                int best = -1;
+                                std::optional<combat::LimbHit> bestHit;
+                                for (int i = 0; i < (int)targets.size(); ++i) {
+                                    auto limb = combat::rayPlayer(player.eye(), player.lookDir(),
+                                                                  targets[(size_t)i].feet, targets[(size_t)i].yaw,
+                                                                  def->reach, obstruction);
+                                    if (limb && (!bestHit || limb->distance < bestHit->distance)) {
+                                        bestHit = limb;
+                                        best = i;
+                                    }
+                                }
+                                if (best >= 0 && bestHit) {
+                                    combat::DamageSource source{ 1, 1, def->item, combat::DamageCategory::Physical };
+                                    auto result = combat::damagePlayer(targets[(size_t)best].vitals, source,
+                                                                       def->damage, bestHit->limb);
+                                    if (result.applied) hitMarker = 0.22f;
+                                }
+                            }
+                        }
+                        bool canBreak = false;
+                        if (!connected && hitOk && ui.targetDrop < 0) {
+                            if (physHit < 0) {
+                                uint8_t b = world.getBlock(hit.x, hit.y, hit.z);
+                                canBreak = plugin::blockStrategy(b)->canBreak(b);
+                                if (b == GRASS_TUFT && hit.y > 0
+                                    && world.getBlock(hit.x, hit.y - 1, hit.z) == GRASS_TUFT)
+                                    canBreak = false;
                             } else {
-                                finishMinedBlock(world, heldMine, physHit, hit);
+                                uint8_t b = world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
+                                canBreak = plugin::blockStrategy(b)->canBreak(b);
+                            }
+                            if (canBreak) {
+                                int face = world.faceFromHitNormal(nrm);
+                                float dmg = (physHit < 0 && world.hasSodFace(hit.x, hit.y, hit.z, face))
+                                    ? loot::sodMineDamage(heldMine)
+                                    : loot::mineDamage(physHit < 0
+                                        ? world.getBlock(hit.x, hit.y, hit.z)
+                                        : world.getPhysBlock(physHit, hit.x, hit.y, hit.z), heldMine);
+                                canBreak = dmg > 0.0f;
+                            }
+                        }
+                        if (canBreak) {
+                            int face = world.faceFromHitNormal(nrm);
+                            if (roomSession) {
+                                uint32_t tree = 0;
+                                if (physHit >= 0) {
+                                    const std::vector<PhysicsIsland>& islands = world.physicsIslands();
+                                    if (physHit < (int)islands.size()) tree = islands[(size_t)physHit].netId;
+                                }
+                                if (physHit < 0 || tree != 0)
+                                    noteRoomMine(hit.x, hit.y, hit.z, face, heldMine, tree);
+                            }
+                            if (world.applyMineHit(physHit, hit.x, hit.y, hit.z, heldMine, face)) {
+                                if (roomSession && physHit >= 0) {
+                                    uint8_t b = world.getPhysBlock(physHit, hit.x, hit.y, hit.z);
+                                    if (b != AIR && loot::isHarvestBreak(b, heldMine) &&
+                                        physHit < (int)world.physicsIslands().size()) {
+                                        Vec3 dropPos = tree_fall::worldOf(
+                                            world.physicsIslands()[(size_t)physHit], hit.x, hit.y, hit.z);
+                                        spawnHarvestDrops(world, dropPos, b, heldMine);
+                                    }
+                                } else {
+                                    finishMinedBlock(world, heldMine, physHit, hit);
+                                }
                             }
                         }
                     }
@@ -4338,7 +4301,8 @@ int main(int argc, char** argv) {
                                 if (!sel.empty() && (offering || plugin::blockStrategy(sel.block)->canPlace(sel.block))) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
-                                        world.setBlock(place.x, place.y, place.z, sel.block, true);
+                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true,
+                                                       world.faceFromHitNormal(nrm));
                                         noteRoomEdit(place.x, place.y, place.z, sel.block);
                                         if (--sel.count == 0) sel.clear();
                                     }
@@ -4385,6 +4349,11 @@ int main(int argc, char** argv) {
             player.vel = { 0, 0, 0 };
         }
         if (playing && !paused && !ui.matEditorOpen && (!player.dead || deploying || storyOpen)) {
+            uint8_t swingItem = roomAttackVisualItem != AIR ? roomAttackVisualItem
+                                                            : inv[ui.selectedSlot].block;
+            bool toolSwinging = loot::isTool(swingItem) &&
+                (player.mineCharge > 1e-4f || player.mineCooldown > 1e-4f || roomAttackVisualItem != AIR);
+            player.swingStrafe = toolSwinging ? 0.5f : 1.0f;
             if (deploying || storyOpen) accumulator = 0.0f;
             else accumulator += dt;
             int sub = 0;
@@ -4419,7 +4388,7 @@ int main(int argc, char** argv) {
                     if (roomSession)
                         vin.borderDrain = matchmap::vitalRate(matchmap::outwardT(player.pos.x, player.pos.z));
                     vitals::tick(player.vitals, player.fatigue, vin, cfg::FIXED_DT);
-                    if (vitals::isDead(player.vitals)) {
+                    if (vitals::isDead(player.vitals) && !structureEdit) {
                         player.dead = true;
                         player.vel = { 0, 0, 0 };
                         if (roomSession && !deploying) openDeploy(true);

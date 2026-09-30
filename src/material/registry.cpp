@@ -33,6 +33,8 @@ static const char* kTileNames[TEX_COUNT] = {
     "bark", "hand_axe", "wood_side",
     "shears", "hand_pick", "hand_shovel",
     "crack", "core",
+    "timber", "plaster", "thatch", "clay_tile", "ashlar",
+    "torch_wood", "flame", "lantern", "lantern_glow",
 };
 
 const char* tileName(int tile) {

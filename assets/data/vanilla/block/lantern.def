@@ -1,0 +1,19 @@
+# VOXEL LEGEND data pack entry
+id lantern
+display 提灯
+kind block
+max_stack 64
+hardness 0.5
+durability 2.5
+efficiency 0
+weight 1.4
+friction 0.45
+passable no
+drag_h 0
+drag_v 0
+wrong_tool_resist 1
+tags 
+harvest_need none
+harvest_drop lantern 1
+crack_folds 1
+crack_color 48 32 16

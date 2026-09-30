@@ -896,24 +896,18 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             if (!ritualAltarUsedForTeam[i]) continue;
                             int altarIndex = i % structure::kRitualAltarCount;
                             int wx = ritualAltarTeamSpawns[i][0];
-                            int wy = ritualAltarTeamSpawns[i][1];
                             int wz = ritualAltarTeamSpawns[i][2];
                             // Place altar 3-5 blocks away from spawn point
                             int offsetX = (rng() % 5) - 2;
                             int offsetZ = (rng() % 5) - 2;
                             int finalX = wx + offsetX, finalZ = wz + offsetZ;
-                            // Ensure the column is loaded before placing altar
-                            int colX = finalX / cfg::CHUNK_X;
-                            int colZ = finalZ / cfg::CHUNK_Z;
-                            if (finalX < 0 && finalX % cfg::CHUNK_X != 0) colX--;
-                            if (finalZ < 0 && finalZ % cfg::CHUNK_Z != 0) colZ--;
-                            world.ensureColumn(colX, colZ);
+                            int wy = 0;
                             std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIndex)) + ".vlstruct";
                             bool fileExists = std::filesystem::exists(altarPath);
-                            snprintf(line, sizeof(line), "[DEBUG] Placing altar %d (%s) for team %d at wx=%d, wy=%d, wz=%d col=(%d,%d) fileExists=%d",
-                                altarIndex, structure::ritualAltarName(altarIndex), i + 1, finalX, wy, finalZ, colX, colZ, fileExists ? 1 : 0);
-                            slog(log, line);
                             structure::paintRitualAltar(world, finalX, wy, finalZ, altarIndex);
+                            snprintf(line, sizeof(line), "[DEBUG] Placing altar %d (%s) for team %d at wx=%d, wy=%d, wz=%d fileExists=%d",
+                                altarIndex, structure::ritualAltarName(altarIndex), i + 1, finalX, wy, finalZ, fileExists ? 1 : 0);
+                            slog(log, line);
                         }
                         // Place remaining random altars to fill up to kRitualAltarCount (6)
                         for (int extra = activeTeams; extra < structure::kRitualAltarCount; extra++) {
@@ -922,25 +916,18 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             matchmap::Zone zone = matchmap::combatZone(zoneIdx);
                             int wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
                             int wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
-                            int wy = world.surfaceHeight(wx, wz);
-                            if (wy < 1) wy = 1;
+                            int wy = 0;
                             // Offset from zone center
                             int offsetX = (rng() % 8) - 4;
                             int offsetZ = (rng() % 8) - 4;
                             int finalX = wx + offsetX, finalZ = wz + offsetZ;
-                            // Ensure the column is loaded before placing altar
-                            int colX = finalX / cfg::CHUNK_X;
-                            int colZ = finalZ / cfg::CHUNK_Z;
-                            if (finalX < 0 && finalX % cfg::CHUNK_X != 0) colX--;
-                            if (finalZ < 0 && finalZ % cfg::CHUNK_Z != 0) colZ--;
-                            world.ensureColumn(colX, colZ);
                             int altarIdx = extra % structure::kRitualAltarCount;
                             std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIdx)) + ".vlstruct";
                             bool fileExists = std::filesystem::exists(altarPath);
-                            snprintf(line, sizeof(line), "[DEBUG] Placing extra altar %d (%s) at wx=%d, wy=%d, wz=%d col=(%d,%d) fileExists=%d",
-                                altarIdx, structure::ritualAltarName(altarIdx), finalX, wy, finalZ, colX, colZ, fileExists ? 1 : 0);
-                            slog(log, line);
                             structure::paintRitualAltar(world, finalX, wy, finalZ, altarIdx);
+                            snprintf(line, sizeof(line), "[DEBUG] Placing extra altar %d (%s) at wx=%d, wy=%d, wz=%d fileExists=%d",
+                                altarIdx, structure::ritualAltarName(altarIdx), finalX, wy, finalZ, fileExists ? 1 : 0);
+                            slog(log, line);
                         }
                         slog(log, "[DEBUG] All ritual altars placed!");
 
@@ -973,16 +960,17 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         for (int i = 0; i < matchmap::kCombatTeams; i++) {
                             if (!ritualAltarUsedForTeam[i]) continue;
                             int spawnX = ritualAltarTeamSpawns[i][0];
-                            int spawnY = ritualAltarTeamSpawns[i][1];
                             int spawnZ = ritualAltarTeamSpawns[i][2];
                             int teamId = i + 1;
 
-                            // Place 3 room types: 0=props, 1=weapon, 2=clue
-                            // Each room type gets a different offset direction from spawn
+                            // Props east, weapon south, clue west. The houses are 25–37 blocks
+                            // across; an 8-block offset planted them inside each other and
+                            // inside the ~40-block altar. 44 stays inside the 128-block zone
+                            // and leaves a gap around that altar.
                             const int roomOffsets[3][2] = {
-                                {8, 0},    // Props room: east
-                                {0, 8},    // Weapon room: south
-                                {-8, 0}    // Clue room: west
+                                {44, 0},
+                                {0, 44},
+                                {-44, 0}
                             };
 
                             for (int roomType = 0; roomType < 3; roomType++) {
@@ -990,19 +978,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 int offsetZ = roomOffsets[roomType][1];
                                 int finalX = spawnX + offsetX;
                                 int finalZ = spawnZ + offsetZ;
-                                int wy = spawnY;
-
-                                // Ensure column is loaded
-                                int colX = finalX / cfg::CHUNK_X;
-                                int colZ = finalZ / cfg::CHUNK_Z;
-                                if (finalX < 0 && finalX % cfg::CHUNK_X != 0) colX--;
-                                if (finalZ < 0 && finalZ % cfg::CHUNK_Z != 0) colZ--;
-                                world.ensureColumn(colX, colZ);
-
+                                int wy = 0;
+                                structure::paintRoomBuilding(world, finalX, wy, finalZ, roomType);
                                 snprintf(line, sizeof(line), "[DEBUG] Placing room %d (%s) for team %d at wx=%d, wy=%d, wz=%d",
                                     roomType, structure::roomBuildingName(roomType), teamId, finalX, wy, finalZ);
                                 slog(log, line);
-                                structure::paintRoomBuilding(world, finalX, wy, finalZ, roomType);
 
                                 // Spawn clues, weapons, and arcane items near each room building
                                 // Use a seeded RNG based on building position
@@ -1234,12 +1214,9 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         combat::Actor actor{c.id, c.team,
                             c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
                             combat::EntityCategory::Player};
-                        float guardianT = weapon ? weapon->reach + .01f : 0.0f;
-                        structure::GuardianSpan guardian;
-                        bool aimed = weapon && structure::raycastGuardian(world, c.body.player.eye(),
-                            c.body.player.lookDir(), weapon->reach, guardianT, guardian) &&
-                            guardian.relic == in.guardianRelic;
-                        bool blocked = combatBusy || attackAccepted || castAccepted || !aimed || in.carried != AIR;
+                        // Aim is not required to start the swing. The damage frame
+                        // raycasts again and misses unless the boss is still under the crosshair.
+                        bool blocked = combatBusy || attackAccepted || castAccepted || !weapon || in.carried != AIR;
                         if (combat::beginMelee(c.guardianMelee, in.guardianSequence, serverTick, actor,
                                               c.body.player.vitals, hand, held, blocked)) {
                             guardianAccepted = true;
@@ -1379,6 +1356,15 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                 for (SClient& c : clients) {
                     if (!c.sentWelcome) continue;
                     if (!c.spectator) {
+                        bool swingClock = c.mineCharge > 1e-4f || c.mineCooldown > 1e-4f ||
+                            c.melee.pending || c.guardianMelee.pending;
+                        uint8_t swingItem = c.heldR;
+                        if (c.melee.item != AIR && (c.melee.pending || c.melee.action))
+                            swingItem = c.melee.item;
+                        else if (c.guardianMelee.item != AIR &&
+                                 (c.guardianMelee.pending || c.guardianMelee.action))
+                            swingItem = c.guardianMelee.item;
+                        c.body.player.swingStrafe = (swingClock && loot::isTool(swingItem)) ? 0.5f : 1.0f;
                         room_body::tick(c.body, world, serverTick, c.landed, c.mineCharge > 0,
                                         arcane::frozen(c.frozen, serverTick));
                         const Player& p = c.body.player;
@@ -1418,7 +1404,14 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                     bestHit = hit; bestTarget = &target;
                                 }
                             }
-                            if (bestTarget && bestHit) {
+                            structure::GuardianSpan guardian;
+                            float guardianT = obstruction;
+                            bool guardianAimed = structure::raycastGuardian(
+                                world, origin, direction, def->reach, guardianT, guardian) &&
+                                guardianT <= obstruction;
+                            bool playerCloser = bestTarget && bestHit &&
+                                (!guardianAimed || bestHit->distance <= guardianT);
+                            if (playerCloser) {
                                 combat::DamageSource source{c.id, c.melee.action, c.melee.item,
                                                             combat::DamageCategory::Physical};
                                 auto result = combat::damagePlayer(bestTarget->body.player.vitals,
@@ -1437,6 +1430,56 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                     event.limb = (int8_t)result.limb;
                                     event.amount = (uint16_t)std::min(65535, (int)std::lround(result.amount * 10000));
                                     combatEvents.push_back({serverTick, event});
+                                }
+                            } else if (guardianAimed && guardian_fight::vulnerable(guardian.relic)) {
+                                int gx = 0, gy = 0, gz = 0;
+                                int relic = guardian.relic;
+                                if (structure::roomGuardianHit(world, origin, relic, def->reach, gx, gy, gz)) {
+                                    int dmg = structure::guardianStrikeHurt(equipped, relic);
+                                    guardian_fight::noteDamage(relic, c.id, dmg);
+                                    if (structure::damageGuardian(world, relic, dmg, gx, gy, gz)) {
+                                        world.setBlock(gx, gy, gz, AIR, false, false);
+                                        uint8_t drop = (uint8_t)ritual::blockId(relic);
+                                        const float Sdrop = cfg::BLOCK_SCALE;
+                                        world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
+                                                          (gz + 0.5f) * Sdrop }, drop, 1, true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (combat::takeMeleeHit(c.guardianMelee, serverTick)) {
+                        combat::Hand hand = c.guardianMelee.hand;
+                        int slot = hand == combat::Hand::Left ? c.selectedLeft
+                                                             : cfg::HAND_SLOTS + c.selectedRight;
+                        uint8_t equipped = room_inventory::held(c.inventory, c.body.player.vitals, slot);
+                        auto def = combat::weapon(c.guardianMelee.item);
+                        combat::Actor attacker{c.id, c.team,
+                            c.landed && c.fade <= 0 && !c.spectator && !c.body.player.dead,
+                            combat::EntityCategory::Player};
+                        if (def && equipped == c.guardianMelee.item && attacker.active) {
+                            float guardianT = def->reach + .01f;
+                            structure::GuardianSpan guardian;
+                            int gx = 0, gy = 0, gz = 0;
+                            IVec3 block{}, previous{}; Vec3 normal{};
+                            float obstruction = guardianT;
+                            world.raycast(c.body.player.eye(), c.body.player.lookDir(), def->reach,
+                                          block, previous, normal, nullptr, &obstruction);
+                            bool aimed = structure::raycastGuardian(world, c.body.player.eye(),
+                                c.body.player.lookDir(), def->reach, guardianT, guardian) &&
+                                guardianT <= obstruction;
+                            int relic = aimed ? guardian.relic : -1;
+                            if (aimed && guardian_fight::vulnerable(relic) &&
+                                structure::roomGuardianHit(world, c.body.player.eye(),
+                                    relic, def->reach, gx, gy, gz)) {
+                                int dmg = structure::guardianStrikeHurt(equipped, relic);
+                                guardian_fight::noteDamage(relic, c.id, dmg);
+                                if (structure::damageGuardian(world, relic, dmg, gx, gy, gz)) {
+                                    world.setBlock(gx, gy, gz, AIR, false, false);
+                                    uint8_t drop = (uint8_t)ritual::blockId(relic);
+                                    const float Sdrop = cfg::BLOCK_SCALE;
+                                    world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
+                                                      (gz + 0.5f) * Sdrop }, drop, 1, true);
                                 }
                             }
                         }

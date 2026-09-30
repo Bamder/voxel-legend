@@ -50,13 +50,23 @@ void Player::update(const World& world, const InputState& requested, float dt, M
                     accumPassableDrag(world.getBlock(bx, by, bz), dragH, dragV);
     }
 
-    Vec3 wish{ 0, 0, 0 };
-    if (in.forward) wish += forward();
-    if (in.back) wish -= forward();
-    if (in.right) wish += right();
-    if (in.left) wish -= right();
+    Vec3 ahead{ 0, 0, 0 };
+    Vec3 side{ 0, 0, 0 };
+    if (in.forward) ahead += forward();
+    if (in.back) ahead -= forward();
+    if (in.right) side += right();
+    if (in.left) side -= right();
+    float al = ahead.length();
+    float sl = side.length();
+    if (al > 1e-4f) ahead = ahead / al;
+    if (sl > 1e-4f) side = side / sl;
+    float strafe = swingStrafe;
+    if (!(strafe >= 0.0f)) strafe = 1.0f;
+    if (strafe > 1.0f) strafe = 1.0f;
+    side *= strafe;
+    Vec3 wish = ahead + side;
     float wl = wish.length();
-    if (wl > 1e-4f) wish = wish / wl;
+    if (wl > 1.0f) wish = wish / wl;
 
     float speed = flying ? (in.sprint ? cfg::FLY_SPRINT_SPEED : cfg::FLY_SPEED)
                  : inWater ? cfg::SWIM_SPEED
