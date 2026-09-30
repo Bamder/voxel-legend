@@ -38,7 +38,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "Shrub Stem",   false, false, false, false, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, 0.40f, 0.35f, true, 5.0f, 2.2f },
     { "Shrub Leaf",   false, false, false, false, TEX_SHRUB_LEAF, TEX_SHRUB_LEAF, TEX_SHRUB_LEAF, TEX_SHRUB_LEAF, 0.12f, 0.30f, true, 3.5f, 1.2f },
     { "Stick",        false, false, false, false, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, 0.20f, 0.40f, false, 0.0f, 0.0f },
-    { "Grass Tuft",   false, false, false, false, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, 0.08f, 0.45f, true, 1.8f, 0.25f },
+    { "Grass Tuft",   false, false, false, false, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, 0.08f, 0.45f, true, 0.3f, 0.25f },
     { "Wood",         true,  false, true,  false, TEX_LOG_TOP,  TEX_WOOD_SIDE, TEX_LOG_TOP,  TEX_WOOD_SIDE,  8.00f, 0.46f, false, 0.0f, 0.0f },
     { "Bark",         false, false, false, false, TEX_BARK,     TEX_BARK,     TEX_BARK,     TEX_BARK,     0.10f, 0.50f, false, 0.0f, 0.0f },
     { "Hand Axe",     false, false, false, false, TEX_HAND_AXE, TEX_HAND_AXE, TEX_HAND_AXE, TEX_HAND_AXE, 1.20f, 0.55f, false, 0.0f, 0.0f },
