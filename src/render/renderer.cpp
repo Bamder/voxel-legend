@@ -954,6 +954,7 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::ActiveTexture(GL_TEXTURE0);
     gl::BindTexture(GL_TEXTURE_2D, atlasTex);
     gl::Uniform1i(uAtlas, 0);
+    gl::Uniform1f(uBlockScale, cfg::BLOCK_SCALE);
     gl::Uniform3f(uSunDir, s.sunDir.x, s.sunDir.y, s.sunDir.z);
     gl::Uniform3f(uSunColor, s.sunColor.x, s.sunColor.y, s.sunColor.z);
     gl::Uniform3f(uAmbient, s.ambient.x, s.ambient.y, s.ambient.z);

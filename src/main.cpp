@@ -4439,7 +4439,7 @@ int main(int argc, char** argv) {
             }
             if (sub == cfg::MAX_SUBSTEPS) accumulator = 0.0f;
 
-            world.update(player.pos, 6);
+            world.update(player.pos, 16);
             if (deploying && deploySpan > 0) {
                 const float S = cfg::BLOCK_SCALE;
                 Vec3 zone{
@@ -4447,7 +4447,7 @@ int main(int argc, char** argv) {
                     player.pos.y,
                     (deployOz + deploySpan * 0.5f) * S
                 };
-                world.update(zone, 6);
+                world.update(zone, 12);
                 if (paintDeployColumns(world, deployOx, deployOz, deploySpan, deployPainted, deployPixels))
                     deployStamp++;
             }

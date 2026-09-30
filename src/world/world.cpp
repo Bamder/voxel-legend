@@ -990,15 +990,16 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
             addBorderSod(cx, cy, cz);
             m_meshQueue.push_back(it->first);
         }
+        // Remesh neighbors so AO / face culling / block light match across the
+        // new border. Push front so seams clear before deeper mesh work.
         for (int nz = -1; nz <= 1; nz++) {
             for (int nx = -1; nx <= 1; nx++) {
                 if (nx == 0 && nz == 0) continue;
                 for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
                     auto nit = m_chunks.find(chunkKey(cx + nx, cy, cz + nz));
-                    if (nit != m_chunks.end() && !nit->second.dirty) {
-                        nit->second.dirty = true;
-                        m_meshQueue.push_back(nit->first);
-                    }
+                    if (nit == m_chunks.end()) continue;
+                    nit->second.dirty = true;
+                    m_meshQueue.push_front(nit->first);
                 }
             }
         }
@@ -1026,15 +1027,39 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
         else ++it;
     }
 
+    // Hold mesh builds until orthogonal neighbor columns that should already be
+    // loaded are present. Meshing against missing neighbors treats them as air,
+    // which bakes a bright AO rim exactly on the chunk border.
+    auto columnWanted = [&](int cx, int cz) {
+        if (m_matchBounds && !matchmap::columnInside(cx, cz)) return false;
+        if (m_buildCanvas && (cx < -1 || cx > 1 || cz < -1 || cz > 1)) return false;
+        return nearAny(cx, cz, cfg::LOAD_RADIUS);
+    };
+    auto meshNeighborsReady = [&](int cx, int cz) {
+        static const int kOrth[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+        for (int i = 0; i < 4; i++) {
+            int nx = cx + kOrth[i][0], nz = cz + kOrth[i][1];
+            if (!columnWanted(nx, nz)) continue;
+            if (!columnLoaded(nx, nz)) return false;
+        }
+        return true;
+    };
+
     int budget = meshBudget;
-    while (budget-- > 0 && !m_meshQueue.empty()) {
+    size_t pass = m_meshQueue.size();
+    while (budget > 0 && pass-- > 0 && !m_meshQueue.empty()) {
         int64_t key = m_meshQueue.front();
         m_meshQueue.pop_front();
         auto it = m_chunks.find(key);
-        if (it != m_chunks.end() && it->second.dirty) {
-            buildMeshFor(it->second, chunkCX(key), chunkCY(key), chunkCZ(key));
-            it->second.dirty = false;
+        if (it == m_chunks.end() || !it->second.dirty) continue;
+        int cx = chunkCX(key), cz = chunkCZ(key);
+        if (!meshNeighborsReady(cx, cz)) {
+            m_meshQueue.push_back(key);
+            continue;
         }
+        buildMeshFor(it->second, cx, chunkCY(key), cz);
+        it->second.dirty = false;
+        --budget;
     }
 }
 
@@ -1058,7 +1083,9 @@ float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, in
     bool o2 = isOpaque(getBlock(s2[0], s2[1], s2[2]));
     bool o3 = isOpaque(getBlock(s3[0], s3[1], s3[2]));
     int ao = (o1 && o2) ? 3 : ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (o3 ? 1 : 0));
-    return 1.0f - 0.25f * (float)ao; // 1.0, 0.75, 0.5, 0.25
+    // Softer than the classic 0.25 step so adjacent blocks blend instead of
+    // reading as a hard brightness cut at every edge (and chunk border).
+    return 1.0f - 0.16f * (float)ao; // 1.0, 0.84, 0.68, 0.52
 }
 
 void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
@@ -3252,6 +3279,17 @@ void World::ensureColumn(int cx, int cz) {
         if (!it->second.sodValid) rebuildSod(it->second, cx, cy, cz);
         addBorderSod(cx, cy, cz);
         m_meshQueue.push_back(it->first);
+    }
+    for (int nz = -1; nz <= 1; nz++) {
+        for (int nx = -1; nx <= 1; nx++) {
+            if (nx == 0 && nz == 0) continue;
+            for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+                auto nit = m_chunks.find(chunkKey(cx + nx, cy, cz + nz));
+                if (nit == m_chunks.end()) continue;
+                nit->second.dirty = true;
+                m_meshQueue.push_front(nit->first);
+            }
+        }
     }
 }
 
