@@ -27,8 +27,8 @@ inline bool columnRim(int cx, int cz) {
     return columnInside(cx, cz) && !columnPlayable(cx, cz);
 }
 
-// Four combat teams. Each owns one 4×4 chunk-column corner of the playable field.
-inline constexpr int kCombatTeams = 4;
+// Six combat teams. Each owns one 4×4 chunk-column corner of the playable field.
+inline constexpr int kCombatTeams = 6;
 inline constexpr int kZoneChunks = 4;
 inline constexpr float kDeploySeconds = 10.0f;
 inline constexpr float kDeployDeathSeconds = 20.0f;
@@ -49,8 +49,20 @@ inline int blockToCol(int block, int chunk) {
 inline Zone combatZone(int index) {
     if (index < 0) index = 0;
     if (index >= kCombatTeams) index = kCombatTeams - 1;
-    int xSide = (index & 1) ? (playMax() - (kZoneChunks - 1)) : playMin();
-    int zSide = (index & 2) ? (playMax() - (kZoneChunks - 1)) : playMin();
+    // 6-team layout: 3 columns x 2 rows
+    // 2 | 4 | 3
+    //---+---+---
+    // 0 | 5 | 1
+    int cols = 3;  // number of columns
+    int col = index % cols;
+    int row = index / cols;
+    // Calculate x side: 0=left, 1=right, 2=center
+    int xSide;
+    if (col == 0) xSide = playMin();
+    else if (col == 2) xSide = playMax() - (kZoneChunks - 1);
+    else xSide = (playMin() + playMax() + 1 - kZoneChunks) / 2;
+    // Calculate z side: 0=bottom, 1=top
+    int zSide = row == 0 ? playMin() : (playMax() - (kZoneChunks - 1));
     return { xSide, zSide };
 }
 

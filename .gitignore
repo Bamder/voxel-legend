@@ -1,6 +1,5 @@
 # MinGW / MSVC intermediates. Built executables (*.exe) are kept on purpose.
 *.o
-*.obj
 *.d
 *.gch
 *.pch

@@ -6,6 +6,7 @@
 #include "loot.hpp"
 #include "player_model.hpp"
 #include "asset_pack.hpp"
+#include "arcane.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -561,10 +562,11 @@ void collectGuardians(const World& world, std::vector<GuardianSpan>& out) {
 }
 
 bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, float maxDist,
-                     float& tHit, GuardianSpan& hit) {
+                     float& tHit, GuardianSpan& hit, float radius) {
     Vec3 nd = dir;
     float len = nd.length();
-    if (len < 1e-8f) return false;
+    if (len < 1e-8f || !std::isfinite(maxDist) || maxDist <= 0.0f ||
+        !std::isfinite(radius) || radius < 0.0f || radius > 1.0f) return false;
     nd = nd / len;
     tHit = maxDist + 1.0f;
     bool any = false;
@@ -572,8 +574,8 @@ bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, fl
         GuardianSpan g;
         if (!spanOf(world, s, g)) continue;
         float t = 0.0f;
-        Vec3 mn{ g.minX, g.minY, g.minZ };
-        Vec3 mx{ g.maxX, g.maxY, g.maxZ };
+        Vec3 mn{ g.minX - radius, g.minY - radius, g.minZ - radius };
+        Vec3 mx{ g.maxX + radius, g.maxY + radius, g.maxZ + radius };
         if (!loot::rayAabb(origin, nd, mn, mx, t)) continue;
         if (t < 0.0f || t > maxDist || t >= tHit) continue;
         tHit = t;
@@ -636,6 +638,16 @@ int guardianStrikeHurt(uint8_t held, int relic) {
     float hurt = phys * (baseAtk + strAmp + physVuln) + occult * (baseAtk + physVuln);
     if (hurt <= 0.0f) return 0;
     return (int)std::lround(hurt);
+}
+
+int guardianArcaneHurt(uint8_t item, int relic, float distance) {
+    if (relic < 0 || relic >= ritual::RelicCount || !std::isfinite(distance) || distance < 0.0f)
+        return 0;
+    float fraction = 0.0f;
+    if (item == ITEM_ARCANE_FIREBALL) fraction = arcane::explosionDamage(distance);
+    else if (item == ITEM_ARCANE_FREEZE) fraction = arcane::kFreezeDamage;
+    if (!(fraction > 0.0f)) return 0;
+    return std::max(1, (int)std::lround(fraction * (float)kGuardianHp[relic]));
 }
 
 void collectRoomGuardians(std::vector<GuardianSync>& out) {
@@ -772,6 +784,129 @@ bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, Guardia
         any = true;
     }
     return any;
+}
+
+// Ritual altar file names
+const char* ritualAltarName(int altarIndex) {
+    switch (altarIndex) {
+        case 0: return "ritual_element";
+        case 1: return "ritual_god";
+        case 2: return "ritual_old_god";
+        case 3: return "ritual_outer";
+        case 4: return "ritual_time";
+        case 5: return "ritual_worldtree";
+        default: return "ritual_element";
+    }
+}
+
+bool paintRitualAltar(World& world, int worldX, int worldY, int worldZ, int altarIndex) {
+    if (altarIndex < 0 || altarIndex >= kRitualAltarCount) altarIndex = 0;
+    std::string path = "assets/structures/";
+    path += ritualAltarName(altarIndex);
+    path += ".vlstruct";
+    // DEBUG: log path and file existence
+    bool fileExists = std::filesystem::exists(path);
+    Blueprint b;
+    if (!fileExists || !readBlueprint(path, b)) {
+        // Fallback: create a simple altar platform with stone and gold
+        for (int lz = -2; lz <= 2; lz++) {
+            for (int lx = -2; lx <= 2; lx++) {
+                int x = worldX + lx;
+                int y = worldY;
+                int z = worldZ + lz;
+                uint8_t block = (lx == 0 && lz == 0) ? (uint8_t)COBBLE : (uint8_t)STONE;
+                world.setBlock(x, y, z, block, true);
+            }
+        }
+        // Add a small pillar in the center
+        for (int y = worldY + 1; y <= worldY + 3; y++) {
+            world.setBlock(worldX, y, worldZ, (uint8_t)COBBLE, true);
+        }
+        world.setBlock(worldX, worldY + 4, worldZ, (uint8_t)PLANKS, true);
+        return true;
+    }
+    // Center the altar: place it so its center aligns with worldX, worldZ
+    int offsetX = worldX - b.sx / 2;
+    int offsetY = worldY;
+    int offsetZ = worldZ - b.sz / 2;
+    int placed = 0;
+    for (int ly = 0; ly < b.sy; ly++) {
+        for (int lz = 0; lz < b.sz; lz++) {
+            for (int lx = 0; lx < b.sx; lx++) {
+                uint8_t block = b.at(lx, ly, lz);
+                if (block == AIR) continue;
+                int x = offsetX + lx;
+                int y = offsetY + ly;
+                int z = offsetZ + lz;
+                if (y < 0 || y >= cfg::WORLD_H) continue;
+                world.setBlock(x, y, z, block, true);
+                placed++;
+            }
+        }
+    }
+    // Log for debugging
+    fprintf(stderr, "[DEBUG] Altar %s: placed %d blocks at (%d,%d,%d) offset=(%d,%d,%d) size=(%d,%d,%d)\n",
+        ritualAltarName(altarIndex), placed, worldX, worldY, worldZ, offsetX, offsetY, offsetZ, b.sx, b.sy, b.sz);
+    return true;
+}
+
+// Room building file names (props room, weapon room, clue room)
+const char* roomBuildingName(int roomIndex) {
+    switch (roomIndex) {
+        case 0: return "room_basic";
+        case 1: return "room_isometric";
+        case 2: return "room_japanese";
+        default: return "room_basic";
+    }
+}
+
+bool paintRoomBuilding(World& world, int worldX, int worldY, int worldZ, int roomIndex) {
+    if (roomIndex < 0 || roomIndex >= kRoomBuildingCount) roomIndex = 0;
+    std::string path = "assets/structures/";
+    path += roomBuildingName(roomIndex);
+    path += ".vlstruct";
+    bool fileExists = std::filesystem::exists(path);
+    Blueprint b;
+    if (!fileExists || !readBlueprint(path, b)) {
+        // Fallback: create a simple wooden room
+        for (int ly = 0; ly < 4; ly++) {
+            for (int lz = -3; lz <= 3; lz++) {
+                for (int lx = -3; lx <= 3; lx++) {
+                    int x = worldX + lx;
+                    int y = worldY + ly;
+                    int z = worldZ + lz;
+                    if (ly == 0 || lx == -3 || lx == 3 || lz == -3 || lz == 3) {
+                        world.setBlock(x, y, z, (uint8_t)PLANKS, true);
+                    } else if (ly == 3) {
+                        world.setBlock(x, y, z, (uint8_t)WOOD, true);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    // Center the building: place it so its center aligns with worldX, worldZ
+    int offsetX = worldX - b.sx / 2;
+    int offsetY = worldY;
+    int offsetZ = worldZ - b.sz / 2;
+    int placed = 0;
+    for (int ly = 0; ly < b.sy; ly++) {
+        for (int lz = 0; lz < b.sz; lz++) {
+            for (int lx = 0; lx < b.sx; lx++) {
+                uint8_t block = b.at(lx, ly, lz);
+                if (block == AIR) continue;
+                int x = offsetX + lx;
+                int y = offsetY + ly;
+                int z = offsetZ + lz;
+                if (y < 0 || y >= cfg::WORLD_H) continue;
+                world.setBlock(x, y, z, block, true);
+                placed++;
+            }
+        }
+    }
+    fprintf(stderr, "[DEBUG] Room %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d)\n",
+        roomBuildingName(roomIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz);
+    return true;
 }
 
 } // namespace structure

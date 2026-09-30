@@ -46,6 +46,7 @@ int main() {
     check(near(damageFor(pick.damage, EntityCategory::Player), .14f), "pick player damage");
     check(near(damageFor(pick.damage, EntityCategory::Boss), .049f), "pick boss adapter");
     check(near(damageFor(axe.damage, EntityCategory::Boss), .25f), "axe boss adapter");
+    check(near(pick.reach, 4.5f) && near(axe.reach, 4.5f), "melee weapons use expanded reach");
     for (int part = 0; part < vitals::Count; ++part) {
         vitals::Vitals body;
         auto result = damagePlayer(body, source, pick.damage, part);
@@ -78,9 +79,13 @@ int main() {
     check(near(body.limb[vitals::HandL].health, .25f) && near(body.limb[vitals::FootR].health, .25f), "heal adds quarter maximum to every limb");
     check(near(body.limb[vitals::Head].health, 1.f), "heal capped at maximum");
     check(slotUsable(body, 0), "healing restores hand use");
+    check(canHealPlayer(body), "partially injured living player is a valid heal target");
     check(!mobility(body, false, true, false, true).canMove, "frozen movement blocked");
     body.limb[vitals::Head].health = 0;
-    check(!healPlayer(body) && body.limb[vitals::Head].health == 0, "heal cannot resurrect");
+    check(!canHealPlayer(body) && !healPlayer(body) && body.limb[vitals::Head].health == 0,
+          "heal cannot target or resurrect the dead");
+    body = {};
+    check(!canHealPlayer(body), "full-health player is not a heal target");
 
     body = {};
     auto result = damagePlayer(body, source, {.12f, 1.f, true}, -1);
@@ -129,6 +134,14 @@ int main() {
     check(!rayPlayer({0,1.6f,-2}, {0,0,1}, feet, 0, 1, 4), "reach limit enforced");
     check(!rayPlayer({0,1.6f,-2}, {}, feet, 0, 3, 4), "zero direction rejected");
     check(!rayPlayer({nan,1.6f,-2}, {0,0,1}, feet, 0, 3, 4), "invalid ray rejected");
+    check(!rayPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4),
+          "thin interaction ray can miss beside the body");
+    auto swept = sweepPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4,
+                             arcane::kFireballHitRadius);
+    check(swept && swept->distance < 2.0f, "fireball volume catches a visible grazing hit");
+    check(!sweepPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4, -0.1f) &&
+          !sweepPlayer({.60f,1.3f,-2}, {0,0,1}, feet, 0, 3, 4, nan),
+          "invalid projectile radii rejected");
 
     arcane::CastState cast;
     body = {};
@@ -149,11 +162,42 @@ int main() {
     check(!arcane::beginFireball(cast, 5, 120, attacker, body, Hand::Right, ITEM_PRIM_FIRE),
           "ritual fire is not a fireball item");
 
+    arcane::CastState freezeCast;
+    body = {};
+    check(arcane::beginFreeze(freezeCast, 1, 0, attacker, body, Hand::Right, ITEM_ARCANE_FREEZE),
+          "freeze cast accepted from authoritative item");
+    check(freezeCast.readyAt == 200, "freeze cooldown is ten seconds");
+    check(!arcane::beginFreeze(freezeCast, 1, 200, attacker, body, Hand::Right, ITEM_ARCANE_FREEZE),
+          "freeze sequence cannot replay");
+    check(!arcane::beginFreeze(freezeCast, 2, 199, attacker, body, Hand::Right, ITEM_ARCANE_FREEZE),
+          "freeze cooldown blocks early cast");
+    check(arcane::beginFreeze(freezeCast, 3, 200, attacker, body, Hand::Left, ITEM_ARCANE_FREEZE),
+          "freeze resumes after cooldown");
+    body.limb[vitals::HandL].health = 0;
+    check(!arcane::beginFreeze(freezeCast, 4, 400, attacker, body, Hand::Left, ITEM_ARCANE_FREEZE),
+          "sealed hand cannot cast freeze");
+
+    arcane::CastState healCast;
+    body = {};
+    check(arcane::beginHeal(healCast, 1, 0, attacker, body, Hand::Right, ITEM_ARCANE_HEAL),
+          "heal cast accepted from authoritative item");
+    check(healCast.readyAt == 240, "heal cooldown is twelve seconds");
+    check(!arcane::beginHeal(healCast, 2, 239, attacker, body, Hand::Right, ITEM_ARCANE_HEAL),
+          "heal cooldown blocks early cast");
+    check(!arcane::beginHeal(healCast, 3, 240, attacker, body, Hand::Right, ITEM_ARCANE_FREEZE),
+          "another arcane item cannot be consumed as heal");
+    check(arcane::beginHeal(healCast, 4, 240, attacker, body, Hand::Left, ITEM_ARCANE_HEAL),
+          "heal resumes after cooldown");
+
     auto projectile = arcane::makeFireball(7, 1, 3, 1, {1,2,3}, {0,0,2}, 10);
     check(projectile.id == 7 && near(projectile.vel.length(), arcane::kFireballSpeed) &&
           projectile.expireAt == 110, "authoritative fireball spawn normalizes direction and sets ttl");
     check(!arcane::makeFireball(0, 1, 1, 1, {}, {0,0,1}, 0).id,
           "invalid projectile identity rejected");
+    auto freezeProjectile = arcane::makeFreeze(8, 1, 3, 1, {1,2,3}, {0,0,3}, 10);
+    check(freezeProjectile.id == 8 && freezeProjectile.kind == arcane::ProjectileKind::Freeze &&
+          near(freezeProjectile.vel.length(), arcane::kFreezeSpeed) && freezeProjectile.expireAt == 110,
+          "authoritative freeze projectile normalizes direction and sets ttl");
     check(near(arcane::explosionDamage(0), .12f), "fireball center damage");
     check(near(arcane::explosionDamage(1.5f), .084f), "fireball linear falloff");
     check(near(arcane::explosionDamage(3), .048f), "fireball edge minimum damage");
@@ -173,6 +217,15 @@ int main() {
     for (uint32_t tick : {40u,60u,80u,100u}) if (arcane::takeBurnDamage(burning, tick)) ++burnTicks;
     check(burnTicks == 5 && !arcane::burning(burning, 105) && !arcane::takeBurnDamage(burning, 120),
           "refreshed burning has one cadence and expires naturally");
+    arcane::Frozen frozen;
+    arcane::freeze(frozen, 2, 9, 0);
+    check(arcane::frozen(frozen, 0) && frozen.until == 100 && frozen.source == 2,
+          "frozen begins for five seconds");
+    arcane::freeze(frozen, 3, 10, 50);
+    check(frozen.until == 150 && frozen.source == 3 && frozen.action == 10,
+          "repeat freeze refreshes one authoritative state");
+    check(arcane::frozen(frozen, 149) && !arcane::frozen(frozen, 150),
+          "refreshed freeze expires naturally");
     using namespace guardian_ai;
     auto foe = [](uint32_t id, float dist, float damage, float burst = 0.0f, float control = 0.0f) {
         Sense s;

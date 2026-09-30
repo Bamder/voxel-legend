@@ -73,12 +73,18 @@ float damageFor(const DamageSpec& spec, EntityCategory target);
 DamageResult damagePlayer(vitals::Vitals& body, const DamageSource& source,
                           const DamageSpec& spec, int limb);
 bool healPlayer(vitals::Vitals& body, float fraction = 0.25f);
+bool canHealPlayer(const vitals::Vitals& body);
 
 struct LimbHit { int limb = -1; float distance = 0.0f; };
 // Fixed gameplay hit volumes, independent of editable clothing/hair/model assets.
 // Directions are normalized internally; obstructionDistance is world-units.
 std::optional<LimbHit> rayPlayer(const Vec3& origin, const Vec3& direction,
     const Vec3& feet, float bodyYaw, float reach, float obstructionDistance);
+// Sweeps a sphere along the same authoritative ray. Projectile visuals have
+// real width, so their hit volume must not collapse to an infinitely thin line.
+std::optional<LimbHit> sweepPlayer(const Vec3& origin, const Vec3& direction,
+    const Vec3& feet, float bodyYaw, float reach, float obstructionDistance,
+    float radius);
 
 struct MeleeState {
     uint32_t lastSequence = 0;

@@ -1,5 +1,6 @@
 #pragma once
 #include "blocks.hpp"
+#include "clue.hpp"
 #include "../core/math.hpp"
 #include <cstdint>
 #include <random>
@@ -29,6 +30,9 @@ public:
     Spawner& operator=(const Spawner&) = delete;
     bool spawnItemAt(Vec3 position, ItemSlot item);
     bool spawnRandomLootAt(Vec3 position, std::span<const Entry> table);
+    // Clues must use this overload so their drop id remains bound to the
+    // server-owned route. Generic loot tables deliberately reject ITEM_CLUE.
+    uint32_t spawnClueAt(Vec3 position, clue::Director& director, const clue::Link& link);
 
 private:
     bool validPosition(Vec3 position) const;
