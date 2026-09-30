@@ -1113,7 +1113,9 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                 int wx = cx * cfg::CHUNK_X + x;
                 int wz = cz * cfg::CHUNK_Z + z;
                 if (structure::isGuardianToken(wx, wy, wz, b)) continue;
-                if (plugin::blockStrategy(b)->emitMesh(ch, x, y, z, wx, wz))
+                uint8_t below = (wy > 0) ? getBlock(wx, wy - 1, wz) : (uint8_t)AIR;
+                uint8_t above = (wy + 1 < cfg::WORLD_H) ? getBlock(wx, wy + 1, wz) : (uint8_t)AIR;
+                if (plugin::blockStrategy(b)->emitMesh(ch, x, y, z, wx, wz, below, above))
                     continue;
 
                 const BlockInfo& info = blockOf(b);

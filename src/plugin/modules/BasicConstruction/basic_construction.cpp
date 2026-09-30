@@ -139,7 +139,7 @@ struct ShrubStemStrategy : BlockStrategy {
     uint8_t dropItem(uint8_t) const override { return STICK; }
 };
 struct LightPropStrategy : BlockStrategy {
-    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int) override {
+    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int, uint8_t, uint8_t) override {
         uint8_t id = ch.get(lx, y, lz);
         const mat::Model& model = mat::g_itemModels[id];
         if (model.quads.empty() && !mat::modelHasSolidTex(model)) return false;
@@ -174,12 +174,14 @@ struct LightPropStrategy : BlockStrategy {
     }
 };
 struct GrassTuftStrategy : BlockStrategy {
-    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int wx, int wz) override {
+    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int wx, int wz,
+                  uint8_t below, uint8_t above) override {
         // Upper half of a 2-tall tuft is drawn by the lower cell.
-        if (y > 0 && ch.get(lx, y - 1, lz) == GRASS_TUFT) return true;
+        // below/above come from world coords so CHUNK_Y seams stay correct.
+        if (below == GRASS_TUFT) return true;
         float u0, v0, u1, v1;
         tex::tileUV(TEX_GRASS_TUFT, u0, v0, u1, v1);
-        bool twoHigh = (y + 1 < cfg::CHUNK_Y && ch.get(lx, y + 1, lz) == GRASS_TUFT);
+        bool twoHigh = (above == GRASS_TUFT);
         // Two-cell tufts must reach 75% into the second cell (world height 1.75).
         float unitMax = mat::g_grassTuft.rand.get("tall_base", 0.375f)
                       + mat::g_grassTuft.rand.get("tall_range", 0.375f);

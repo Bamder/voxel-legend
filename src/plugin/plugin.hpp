@@ -56,7 +56,10 @@ struct BlockStrategy {
     // Extra items besides dropItem. Returns how many were written to `out`.
     virtual int extraDrops(uint8_t /*id*/, uint8_t* /*out*/, int /*max*/) const { return 0; }
     // Return true if this strategy filled the chunk mesh for this cell.
-    virtual bool emitMesh(World::Chunk&, int /*lx*/, int /*y*/, int /*lz*/, int /*wx*/, int /*wz*/) {
+    // `below` / `above` are world-neighbor block ids (AIR if out of world),
+    // so vertical stacks that cross a CHUNK_Y seam stay consistent.
+    virtual bool emitMesh(World::Chunk&, int /*lx*/, int /*y*/, int /*lz*/,
+                          int /*wx*/, int /*wz*/, uint8_t /*below*/, uint8_t /*above*/) {
         return false;
     }
 };
