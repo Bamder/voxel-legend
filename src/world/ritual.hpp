@@ -34,7 +34,7 @@ inline int blockId(int relic) {
 
 const char* ritualName(int index);
 const char* relicName(int relic);
-int assignedRitual(int team); // combat team 1..4, or -1
+int assignedRitual(int team); // combat team 1..matchmap::kCombatTeams, or -1
 void recipeRelics(int ritual, int out[3]);
 bool recipeReady(int ritual, const ItemSlot* inv, int slots);
 int storyLineCount(int ritual);

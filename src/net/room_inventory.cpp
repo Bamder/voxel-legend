@@ -15,6 +15,33 @@ std::array<int,256> totals(const Slots& slots) {
     for (auto slot : slots) if (!slot.empty()) out[slot.block] += slot.count;
     return out;
 }
+
+bool reachable(const World& world, const loot::Drop& drop, Vec3 eye, Vec3 feet) {
+    if (!std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z) ||
+        !std::isfinite(feet.x) || !std::isfinite(feet.y) || !std::isfinite(feet.z)) return false;
+    Vec3 delta = drop.pos - eye;
+    float distance = delta.length();
+    if (!std::isfinite(distance) || distance > cfg::REACH ||
+        std::fabs(drop.pos.x - feet.x) > cfg::REACH ||
+        std::fabs(drop.pos.z - feet.z) > cfg::REACH) return false;
+    if (distance <= 1e-6f) return true;
+
+    Vec3 direction = delta / distance;
+    float traveled = 0.0f;
+    // World::raycast selects decorative grass/water too. They can cover a
+    // floor drop visually but must not count as a solid pickup wall.
+    for (int i = 0; i < 32 && traveled < distance; ++i) {
+        IVec3 hit{}, prev{}; Vec3 normal{};
+        int phys = -1;
+        float wall = distance - traveled + 1.0f;
+        if (!world.raycast(eye + direction * traveled, direction, distance - traveled,
+                           hit, prev, normal, &phys, &wall) ||
+            traveled + wall + .05f >= distance) return true;
+        if (phys >= 0 || blocksMotion(world.getBlock(hit.x, hit.y, hit.z))) return false;
+        traveled += wall + .002f;
+    }
+    return false;
+}
 }
 
 bool validSlot(ItemSlot slot) {
@@ -72,19 +99,32 @@ uint8_t held(const State& state, const vitals::Vitals& body, int slot) {
     return item.empty() ? (uint8_t)AIR : item.block;
 }
 
+int nearbyDrop(const World& world, Vec3 eye, Vec3 feet, float radius) {
+    if (!std::isfinite(radius) || radius <= 0.0f || radius > cfg::REACH) return -1;
+    int best = -1;
+    float bestDistSq = radius * radius;
+    const auto& drops = world.drops();
+    for (int i = 0; i < (int)drops.size(); ++i) {
+        const loot::Drop& drop = drops[(size_t)i];
+        if (!drop.netId || drop.item == AIR || !drop.count) continue;
+        float dx = drop.pos.x - feet.x, dz = drop.pos.z - feet.z;
+        float distSq = dx * dx + dz * dz;
+        if (distSq >= bestDistSq || std::fabs(drop.pos.y - feet.y) > 2.2f ||
+            !reachable(world, drop, eye, feet)) continue;
+        best = i;
+        bestDistSq = distSq;
+    }
+    return best;
+}
+
 bool pickup(State& state, uint32_t sequence, World& world, uint32_t dropId,
             Vec3 eye, Vec3 feet) {
     if (!newer(sequence, state.lastPickupSequence)) return false;
     state.lastPickupSequence = sequence;
     const loot::Drop* found = world.dropById(dropId);
-    if (!found || !std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z)) return false;
+    if (!found) return false;
     loot::Drop drop = *found;
-    Vec3 delta = drop.pos - eye;
-    float distance = delta.length();
-    if (!std::isfinite(distance) || distance > cfg::REACH ||
-        std::fabs(drop.pos.x - feet.x) > cfg::REACH || std::fabs(drop.pos.z - feet.z) > cfg::REACH) return false;
-    IVec3 hit{}, prev{}; Vec3 normal{}; float wall = cfg::REACH + 1;
-    if (world.raycast(eye, delta, distance, hit, prev, normal, nullptr, &wall) && wall + .05f < distance) return false;
+    if (!reachable(world, drop, eye, feet)) return false;
     State next = state;
     int left = add(next, drop.item, drop.count);
     int taken = (int)drop.count - left;

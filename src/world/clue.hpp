@@ -1,6 +1,7 @@
 #pragma once
 #include "blocks.hpp"
 #include "../core/math.hpp"
+#include "matchmap.hpp"
 #include <array>
 #include <cstdint>
 #include <unordered_map>
@@ -62,7 +63,7 @@ private:
         Target target{};
         uint32_t completedEncounter = 0;
     };
-    std::array<TeamState, 5> teams_{};
+    std::array<TeamState, matchmap::kCombatTeams + 1> teams_{};
     std::unordered_map<uint32_t, Link> drops_;
 };
 

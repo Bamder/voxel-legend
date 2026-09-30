@@ -23,6 +23,8 @@ bool consume(State& state, int slot, uint8_t expectedItem, int count = 1);
 bool acceptLayout(State& state, uint32_t sequence, uint32_t baseRevision,
                   const Slots& requested);
 uint8_t held(const State& state, const vitals::Vitals& body, int slot);
+// Client hint only; the server rechecks reach and line of sight in pickup().
+int nearbyDrop(const World& world, Vec3 eye, Vec3 feet, float radius = 1.8f);
 bool pickup(State& state, uint32_t sequence, World& world, uint32_t dropId,
             Vec3 eye, Vec3 feet);
 }

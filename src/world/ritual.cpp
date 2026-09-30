@@ -1,4 +1,5 @@
 #include "ritual.hpp"
+#include "matchmap.hpp"
 
 namespace ritual {
 namespace {
@@ -54,7 +55,7 @@ const Recipe kRecipes[kRitualCount] = {
     } },
 };
 
-int g_teamRitual[4] = { -1, -1, -1, -1 };
+int g_teamRitual[matchmap::kCombatTeams]{};
 bool g_rolled = false;
 
 bool holds(const ItemSlot* inv, int slots, int relic) {
@@ -78,7 +79,7 @@ const char* relicName(int relic) {
 }
 
 int assignedRitual(int team) {
-    if (!g_rolled || team < 1 || team > 4) return -1;
+    if (!g_rolled || team < 1 || team > matchmap::kCombatTeams) return -1;
     return g_teamRitual[team - 1];
 }
 
@@ -110,6 +111,7 @@ const char* storyLine(int ritual, int line) {
 }
 
 void roll(uint32_t seed) {
+    static_assert(matchmap::kCombatTeams <= kRitualCount);
     uint32_t rng = seed ? seed : 1u;
     int order[kRitualCount];
     for (int i = 0; i < kRitualCount; i++) order[i] = i;
@@ -120,7 +122,7 @@ void roll(uint32_t seed) {
         order[i] = order[j];
         order[j] = tmp;
     }
-    for (int i = 0; i < 4; i++) g_teamRitual[i] = order[i];
+    for (int i = 0; i < matchmap::kCombatTeams; i++) g_teamRitual[i] = order[i];
     g_rolled = true;
 }
 

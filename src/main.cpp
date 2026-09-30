@@ -26,6 +26,7 @@
 #include "plugin/plugin.hpp"
 #include "net/room_net.hpp"
 #include "net/room_body.hpp"
+#include "net/room_inventory.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -3324,6 +3325,12 @@ int main(int argc, char** argv) {
         ui.targetPhys = hitOk ? physHit : -1;
         ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
                          playing && !spectating) ? dropHit : -1;
+        // Small rotating item meshes are hard to hit precisely with the
+        // crosshair. In a room, F may also pick a nearby visible floor drop;
+        // the dedicated server validates the same ID again before transfer.
+        if (roomSession && ui.targetDrop < 0 && playing && !spectating && !player.dead &&
+            !inventoryOpen && !paused && !guideOpen && !clueOpen && !structureEdit)
+            ui.targetDrop = room_inventory::nearbyDrop(world, player.eye(), player.pos);
         // Air, a hostile player, or a guardian all start the same swing. The
         // server raycasts again at the damage frame, so the click itself does
         // not need a target. A block under the crosshair stays a mining swing.

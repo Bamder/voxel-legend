@@ -1,4 +1,5 @@
 #include "clue.hpp"
+#include "matchmap.hpp"
 #include "world.hpp"
 #include <cmath>
 
@@ -11,7 +12,7 @@ bool finitePosition(Vec3 position) {
         std::fabs(position.z) <= 100000.0f;
 }
 
-bool combatTeam(int team) { return team >= 1 && team <= 4; }
+bool combatTeam(int team) { return team >= 1 && team <= matchmap::kCombatTeams; }
 bool relic(uint8_t item) { return item >= ITEM_ELEM_CORE && item <= ITEM_EYELESS; }
 
 } // namespace
