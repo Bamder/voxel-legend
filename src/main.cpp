@@ -2716,8 +2716,19 @@ int main(int argc, char** argv) {
                 for (const DeployPinNet& pin : deployPins) {
                     if (pin.id != gameClient.selfId() || pin.phase != 2) continue;
                     const float S = cfg::BLOCK_SCALE;
-                    int by = world.surfaceHeight(pin.bx, pin.bz);
-                    player.setSpawn({ (pin.bx + 0.5f) * S, (float)(by + 3) * S, (pin.bz + 0.5f) * S });
+                    // Mirror the server's building-aware landing so the
+                    // prediction never starts inside a structure. Columns not
+                    // streamed yet keep the terrain guess; the authoritative
+                    // snapshot corrects any remaining miss.
+                    int by = -1;
+                    if (world.columnLoaded(floorDiv(pin.bx, cfg::CHUNK_X),
+                                           floorDiv(pin.bz, cfg::CHUNK_Z))) {
+                        by = world.standHeight(pin.bx, pin.bz,
+                                               world.surfaceHeight(pin.bx, pin.bz) + 10);
+                        if (by < 0) by = world.standHeight(pin.bx, pin.bz, cfg::WORLD_H);
+                    }
+                    if (by < 0) by = world.surfaceHeight(pin.bx, pin.bz) + 3;
+                    player.setSpawn({ (pin.bx + 0.5f) * S, by * S + 0.02f, (pin.bz + 0.5f) * S });
                     player.vel = { 0, 0, 0 };
                     player.flying = spectating;
                     player.noclip = spectating;
@@ -3640,9 +3651,10 @@ int main(int argc, char** argv) {
             if (stripTool && world.getBlock(hit.x, hit.y, hit.z) == LOG)
                 ui.processLogReady = true;
         }
-        // Air, a hostile player, or a guardian all start the same swing. The
-        // server raycasts again at the damage frame, so the click itself does
-        // not need a target. A block under the crosshair stays a mining swing.
+        // Same as free explore: the click starts the tool swing below, with
+        // no block or entity required. This packet only arms the server hit.
+        // The server raycasts again at its damage frame. The short combat
+        // clock must not replace that swing, or an unaimed click never plays.
         bool canStartMelee = dummyAim < 0 && dropHit < 0 && (entityTarget || !hitOk);
         if (roomSession && playing && !structureEdit && canStartMelee && lmb && !prevLmb &&
             !roomAttackPending && roomAttackVisualItem == AIR && lookLocked && !paused && !inventoryOpen && !deploying &&
@@ -3654,8 +3666,6 @@ int main(int argc, char** argv) {
                 if (!++roomAttackNext) ++roomAttackNext;
                 roomAttackPending = roomAttackNext;
                 roomAttackHand = attackHand;
-                roomAttackVisualItem = attackItem;
-                roomAttackVisualTime = 0.0001f;
             }
         }
         if (roomSession && rmb && !prevRmb && lookLocked && !paused && !inventoryOpen &&
@@ -4420,7 +4430,19 @@ int main(int argc, char** argv) {
                 if (player.mineCharge <= 0.0f && player.mineCooldown <= 0.0f)
                     player.strikeName.clear();
 
-                uint8_t heldMine = inv[ui.selectedSlot].block;
+                // Slots 4–6 are the right hand. A tool that landed in the selected
+                // left slot (match pickup fills from slot 1) still digs, and the
+                // swing below follows that hand.
+                uint8_t rightItem = inv[ui.selectedSlot].block;
+                uint8_t leftItem = AIR;
+                if (ui.selectedLeft >= 0 && ui.selectedLeft < cfg::HAND_SLOTS)
+                    leftItem = inv[ui.selectedLeft].block;
+                int mineSlot = ui.selectedSlot;
+                uint8_t heldMine = rightItem;
+                if (!loot::isTool(rightItem) && loot::isTool(leftItem)) {
+                    heldMine = leftItem;
+                    mineSlot = ui.selectedLeft;
+                }
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 0)
                     saveCurrentStructure();
                 if (structureEdit && blockBarOpen && lmb && !prevLmb && ui.structureOpHover == 1)
@@ -4460,7 +4482,7 @@ int main(int argc, char** argv) {
                 // Left click starts the swing with no target. Releasing does not
                 // cancel it. Damage and block cracks are applied only if the
                 // crosshair is on that object or block at the impact frame.
-                bool handOk = !roomSession || combat::slotUsable(player.vitals, ui.selectedSlot);
+                bool handOk = !roomSession || combat::slotUsable(player.vitals, mineSlot);
                 bool swingGate = !structureEdit && lookLocked && !player.dead && !spectating &&
                     roomAttackVisualItem == AIR && handOk && !quickBroke;
                 bool beginSwing = swingGate && lmb && ui.targetDrop < 0 &&
@@ -5090,6 +5112,21 @@ int main(int argc, char** argv) {
             ui.netYaw = selfShown.yaw;
             ui.netPitch = selfShown.pitch;
             ui.netBodyYaw = selfShown.bodyYaw;
+        }
+        // The hotbar picks the hand. Right bar (4–6) is Tool R. Left bar (1–3)
+        // is Tool L. A right-bar tool wins when both bars hold one.
+        ui.strikeFromLeft = false;
+        {
+            uint8_t rightItem = (ui.selectedSlot >= 0 && ui.selectedSlot < cfg::HOTBAR_SLOTS)
+                ? inv[ui.selectedSlot].block : (uint8_t)AIR;
+            uint8_t leftItem = (ui.selectedLeft >= 0 && ui.selectedLeft < cfg::HAND_SLOTS)
+                ? inv[ui.selectedLeft].block : (uint8_t)AIR;
+            bool leftTool = loot::isTool(leftItem);
+            bool rightTool = loot::isTool(rightItem);
+            if (roomAttackVisualItem != AIR)
+                ui.strikeFromLeft = roomAttackHand == 0;
+            else if (!player.strikeName.empty())
+                ui.strikeFromLeft = leftTool && !rightTool;
         }
         ui.spectating = spectating && playing;
         ui.menuWorld = exploreScreen();

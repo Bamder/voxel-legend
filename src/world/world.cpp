@@ -578,6 +578,33 @@ int World::computeHeight(int wx, int wz) const {
 
 int World::surfaceHeight(int x, int z) { return computeHeight(x, z); }
 
+int World::standHeight(int x, int z, int maxY) const {
+    const float S = cfg::BLOCK_SCALE;
+    const float px = (x + 0.5f) * S;
+    const float pz = (z + 0.5f) * S;
+    const float hw = cfg::PLAYER_HALF_WIDTH;
+    const int x0 = (int)std::floor((px - hw) / S);
+    const int x1 = (int)std::floor((px + hw - 1e-6f) / S);
+    const int z0 = (int)std::floor((pz - hw) / S);
+    const int z1 = (int)std::floor((pz + hw - 1e-6f) / S);
+    // Descend through open air first so pits and flattened ground left by
+    // edits still find the real surface instead of the noise height.
+    int y = computeHeight(x, z) + 1;
+    while (y > 1 && !blocksMotion(getBlock(x, y - 1, z)) && !blocksMotion(getBlock(x, y, z))) --y;
+    int top = maxY < cfg::WORLD_H - 6 ? maxY : cfg::WORLD_H - 6;
+    for (; y <= top; ++y) {
+        if (!blocksMotion(getBlock(x, y - 1, z))) continue; // solid footing required
+        const int y1 = (int)std::floor((y * S + cfg::PLAYER_HEIGHT - 1e-6f) / S);
+        bool clear = true;
+        for (int bx = x0; bx <= x1 && clear; ++bx)
+            for (int by = y; by <= y1 && clear; ++by)
+                for (int bz = z0; bz <= z1 && clear; ++bz)
+                    if (blocksMotion(getBlock(bx, by, bz))) clear = false;
+        if (clear) return y;
+    }
+    return -1;
+}
+
 void World::reset(uint32_t seed) {
     m_seed = seed;
     m_chunks.clear();

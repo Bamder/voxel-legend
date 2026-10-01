@@ -268,6 +268,7 @@ struct UIState {
     bool matEditorOpen = false;
     int camMode = 0;                  // 0 first-person, 1 third-person (over-shoulder), 2 second-person (front)
     bool netAnim = false;             // third person uses the server tick's frame id
+    bool strikeFromLeft = false;      // active swing is the left hotbar (Tool L)
     uint8_t netClip = 1;
     uint8_t netStrike = 0;
     float netFrame = 0.0f;
@@ -455,7 +456,8 @@ private:
                          const anim::Clip* strike = nullptr, float strikeAt = 0.0f,
                          const Sky* sun = nullptr,
                          uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR,
-                         bool bare = false, bool trackHeldLight = false);
+                         bool bare = false, bool trackHeldLight = false,
+                         bool strikeFromLeft = false);
     void drawGuardians(const World& world, const Player& player, const UIState& ui,
                        const Vec3& eye, const Mat4& vp, const Sky* sun);
     void drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,

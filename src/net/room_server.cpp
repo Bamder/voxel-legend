@@ -810,6 +810,43 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
         return false;
     };
 
+    // A deploy pin names a column on a map that does not show buildings, so
+    // the landing must step around or above any structure standing on it.
+    // Try the pinned column first, then spiral outward for a clear spot near
+    // ground level; as a last resort ride up the pinned column, even onto a
+    // roof — anywhere is better than embedded inside a wall.
+    auto deployStandSpot = [&](int pinX, int pinZ, Vec3& out) {
+        const int kRise = 10;  // ground-level spots may sit this far above terrain
+        const int kRadius = 8; // spiral search radius around the pin
+        auto tryColumn = [&](int x, int z) {
+            world.ensureColumn(floorDiv(x, cfg::CHUNK_X), floorDiv(z, cfg::CHUNK_Z));
+            return world.standHeight(x, z, world.surfaceHeight(x, z) + kRise);
+        };
+        int sx = pinX, sz = pinZ;
+        int y = tryColumn(sx, sz);
+        for (int radius = 1; radius <= kRadius && y < 0; ++radius) {
+            for (int dz = -radius; dz <= radius && y < 0; ++dz) {
+                for (int dx = -radius; dx <= radius && y < 0; ++dx) {
+                    if (std::max(std::abs(dx), std::abs(dz)) != radius) continue;
+                    const int x = pinX + dx, z = pinZ + dz;
+                    if (!matchmap::columnPlayable(floorDiv(x, cfg::CHUNK_X),
+                                                  floorDiv(z, cfg::CHUNK_Z))) continue;
+                    y = tryColumn(x, z);
+                    if (y >= 0) { sx = x; sz = z; }
+                }
+            }
+        }
+        if (y < 0) { // last resort: above the pinned column, even a roof
+            sx = pinX;
+            sz = pinZ;
+            world.ensureColumn(floorDiv(sx, cfg::CHUNK_X), floorDiv(sz, cfg::CHUNK_Z));
+            y = world.standHeight(sx, sz, cfg::WORLD_H);
+        }
+        if (y < 0) return false;
+        out = { (sx + 0.5f) * S, y * S + 0.02f, (sz + 0.5f) * S };
+        return true;
+    };
+
     // Building loot spawner for clues, weapons, and arcane items near buildings
     building_loot::Spawner lootSpawner(world, seed);
 
@@ -1091,14 +1128,15 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                         uint32_t(c.guardianMelee.readyAt - serverTick) < 0x80000000u;
                     bool combatBusy = guardianBusy || c.melee.pending ||
                         uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
-                    if (!combatBusy) {
-                        c.strikeKind = in.strikeKind;
-                        c.strikeCharge = in.strikeCharge;
-                        c.strikeCool = in.strikeCool;
-                        c.mineCharge = in.mineCharge;
-                        c.mineCooldown = in.mineCooldown;
-                        c.pickRaised = in.pickRaised;
-                    }
+                    // The swing the client is playing is the one everyone sees,
+                    // including a click that was not aimed at a block. Damage
+                    // still waits for the melee timer below.
+                    c.strikeKind = in.strikeKind;
+                    c.strikeCharge = in.strikeCharge;
+                    c.strikeCool = in.strikeCool;
+                    c.mineCharge = in.mineCharge;
+                    c.mineCooldown = in.mineCooldown;
+                    c.pickRaised = in.pickRaised;
                     bool attackAccepted = false;
                     if (in.attackSequence) {
                         combat::Hand hand = in.attackHand ? combat::Hand::Right : combat::Hand::Left;
@@ -1111,8 +1149,6 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                                                c.body.player.vitals, hand, owned, guardianBusy)) {
                             attackAccepted = true;
                             c.attackStartedAt = serverTick;
-                            c.strikeKind = owned == HAND_AXE ? kStrikeAxe : kStrikePick;
-                            c.pickRaised = false;
                         }
                     }
                     bool castAccepted = false;
@@ -1216,16 +1252,19 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                             guardianAccepted = true;
                             c.guardianRelic = in.guardianRelic;
                             c.attackStartedAt = serverTick;
-                            c.strikeKind = held == HAND_AXE ? kStrikeAxe : kStrikePick;
-                            c.pickRaised = false;
                         }
                     }
                     c.hasInput = true;
+                    if (!c.spectator && c.landed && !c.body.player.dead && !castAccepted) {
+                        // Impact-frame digs follow the swing, even when the click
+                        // also armed a hit. Aim is checked by the client at that
+                        // frame, the same way free explore does it.
+                        for (const PlayInputNet::MineEdit& e : in.mines)
+                            if (e.tool == c.heldR || e.tool == c.heldL) applyMine(world, e);
+                    }
                     if (!c.spectator && c.landed && !c.body.player.dead &&
                         !attackAccepted && !castAccepted && !guardianAccepted && !combatBusy &&
                         !c.melee.pending && !c.guardianMelee.pending) {
-                        for (const PlayInputNet::MineEdit& e : in.mines)
-                            if (e.tool == c.heldR) applyMine(world, e);
                         for (const BlockEditNet& e : in.edits) applyEdit(world, e);
                         for (const PlayInputNet::BarkEdit& e : in.bark) applyBark(world, e);
                     }
@@ -1428,10 +1467,18 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                                 c.landed = true;
                                 c.deathDeploy = false;
                                 c.fade = 1.0f;
-                                int by = world.surfaceHeight(c.dbx, c.dbz);
-                                c.landX = (c.dbx + 0.5f) * S;
-                                c.landY = (float)(by + 3) * S;
-                                c.landZ = (c.dbz + 0.5f) * S;
+                                // Never land inside a building: the pin only
+                                // names a column, so resolve a clear standing
+                                // spot around it before spawning the body.
+                                Vec3 spot{};
+                                if (!deployStandSpot(c.dbx, c.dbz, spot)) {
+                                    int by = world.surfaceHeight(c.dbx, c.dbz);
+                                    spot = { (c.dbx + 0.5f) * S, (float)(by + 3) * S,
+                                             (c.dbz + 0.5f) * S };
+                                }
+                                c.landX = spot.x;
+                                c.landY = spot.y;
+                                c.landZ = spot.z;
                                 c.x = c.landX;
                                 c.y = c.landY;
                                 c.z = c.landZ;
@@ -1577,36 +1624,16 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                             }
                         }
                     }
-                    if (auto def = combat::weapon(c.melee.item)) {
+                    if (combat::weapon(c.melee.item)) {
                         bool recovering = uint32_t(c.melee.readyAt - serverTick) < 0x80000000u;
-                        if (c.melee.pending) {
-                            c.strikeCharge = def->windup;
-                            c.strikeCool = def->recovery;
-                            c.mineCharge = (float)uint32_t(serverTick - c.attackStartedAt) / cfg::TICKS_PER_SECOND;
-                            c.mineCooldown = 0;
-                        } else if (recovering) {
-                            c.mineCharge = 0;
-                            c.mineCooldown = (float)uint32_t(c.melee.readyAt - serverTick) / cfg::TICKS_PER_SECOND;
-                        } else if (c.melee.action) {
-                            c.strikeKind = kStrikeNone; c.mineCharge = c.mineCooldown = 0;
-                            c.melee.item = AIR; c.melee.action = 0;
+                        if (!c.melee.pending && !recovering && c.melee.action) {
+                            c.melee.item = AIR;
+                            c.melee.action = 0;
                         }
                     }
-                    if (auto def = combat::weapon(c.guardianMelee.item)) {
+                    if (combat::weapon(c.guardianMelee.item)) {
                         bool recovering = uint32_t(c.guardianMelee.readyAt - serverTick) < 0x80000000u;
-                        if (c.guardianMelee.pending) {
-                            c.strikeCharge = def->windup;
-                            c.strikeCool = def->recovery;
-                            c.mineCharge = (float)uint32_t(serverTick - c.attackStartedAt) /
-                                           cfg::TICKS_PER_SECOND;
-                            c.mineCooldown = 0;
-                        } else if (recovering) {
-                            c.mineCharge = 0;
-                            c.mineCooldown = (float)uint32_t(c.guardianMelee.readyAt - serverTick) /
-                                             cfg::TICKS_PER_SECOND;
-                        } else if (c.guardianMelee.action) {
-                            c.strikeKind = kStrikeNone;
-                            c.mineCharge = c.mineCooldown = 0;
+                        if (!c.guardianMelee.pending && !recovering && c.guardianMelee.action) {
                             c.guardianMelee.item = AIR;
                             c.guardianMelee.action = 0;
                             c.guardianRelic = 255;

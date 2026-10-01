@@ -861,21 +861,37 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             shownStrike = anim::strikeFromNet(ui.netStrike);
             shownStrikeAt = ui.netStrikeFrame;
         }
+        // Right hotbar swings Tool R. Left hotbar swings Tool L. Same in a
+        // match and in free play: the bar the tool sits in picks the hand.
+        auto ownsStrike = [](const anim::Clip* s, uint8_t item) {
+            if (!s || item == AIR) return false;
+            const std::string& n = s->name;
+            if (n == "axe_chop") return item == HAND_AXE;
+            if (n == "mine_down" || n == "mine_up" || n == "pick_raise" || n == "two_hand_ready")
+                return item == HAND_PICK;
+            return false;
+        };
+        bool localStrikeLeft = ui.strikeFromLeft;
+        if (shownStrike && ownsStrike(shownStrike, heldR))
+            localStrikeLeft = false;
+        else if (shownStrike && ownsStrike(shownStrike, heldL) && !ownsStrike(shownStrike, heldR))
+            localStrikeLeft = true;
         if (!ui.spectating && !ui.hideAvatar) {
             drawPlayerModel(player.pos, shownBody, shownYaw, shownPitch, eye, vp, firstPerson,
                             &shownClip, shownFrame, heldR, heldL, carried,
                             nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes,
-                            false, true);
+                            false, true, localStrikeLeft);
         }
         for (const RemoteAvatar& rp : ui.remotes) {
             if (rp.spectator || rp.dead) continue;
             const anim::Clip& clip = anim::clipFromNet(rp.clip);
             const anim::Clip* overlay = anim::strikeFromNet(rp.strike);
+            bool remoteLeft = ownsStrike(overlay, rp.heldL) && !ownsStrike(overlay, rp.heldR);
             Vec3 reacted = rp.pos;
             if (rp.hitFlash) reacted.y += 0.045f;
             drawPlayerModel(reacted, rp.bodyYaw, rp.yaw, rp.pitch, eye, vp, false, &clip, rp.frame,
                             rp.heldR, rp.heldL, rp.carried, &rp.vitals, overlay, rp.strikeFrame, &sky,
-                            rp.wearU, rp.wearL, rp.wearS);
+                            rp.wearU, rp.wearL, rp.wearS, false, false, remoteLeft);
         }
         drawArcaneEffects(eye, vp, player, ui, firstPerson);
         drawTorchFlames(world, eye, vp, ui);
@@ -1877,9 +1893,18 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
                                uint8_t heldLeft, uint8_t carried, const vitals::Vitals* tint,
                                const anim::Clip* strike, float strikeAt, const Sky* sun,
                                uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes, bool bare,
-                               bool trackHeldLight) {
+                               bool trackHeldLight, bool strikeFromLeft) {
     const anim::PlayerClips& lib = anim::playerClips();
     const bool hugging = hold::isCarrying(carried);
+    // Authored strikes are Tool R. The left hotbar is Tool L: the same clip
+    // with the arms exchanged, plus the editor's palm mirror on the grip.
+    const bool mirrorStrike = strikeFromLeft && strike && !strike->tracks.empty() && !hugging;
+    anim::Clip mirroredStrike;
+    const anim::Clip* strikePose = strike;
+    if (mirrorStrike) {
+        mirroredStrike = anim::mirrorArmClip(*strike);
+        strikePose = &mirroredStrike;
+    }
     std::vector<anim::BoneXform> pose;
     std::vector<pm::Part> parts;
     if (clip && !clip->bones.empty()) {
@@ -1890,10 +1915,10 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         const bool raiseL = !hugging && hold::isHandLight(heldLeft);
         if (hugging) {
             layers[nLayers++] = &lib.holdBlock;
-        } else if (strike && !strike->tracks.empty()) {
+        } else if (strikePose && !strikePose->tracks.empty()) {
             // Strikes replace the raise pose; off-hand light still raises.
-            if (raiseL) layers[nLayers++] = &lib.raiseL;
-            layers[nLayers++] = strike;
+            if (raiseL && !mirrorStrike) layers[nLayers++] = &lib.raiseL;
+            layers[nLayers++] = strikePose;
             layerFrame = strikeAt;
         } else {
             if (raiseR) layers[nLayers++] = &lib.raiseR;
@@ -1902,13 +1927,16 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         pose = (nLayers > 0)
             ? anim::evalPoseLayered(*clip, frame, layers, nLayers, layerFrame)
             : anim::evalPose(*clip, frame);
-        if (strike && !strike->tracks.empty() && !hugging && heldRight != AIR) {
-            hold::Spec spec = hold::resolveBlock(hold::playerHold(), heldRight, strike->name, "right");
-            const anim::Clip* layers[1] = { strike };
-            hold::applyToolAxis(*strike, pose, strikeAt, spec, [&](float f) {
+        uint8_t strikeItem = mirrorStrike ? heldLeft : heldRight;
+        if (strikePose && !strikePose->tracks.empty() && !hugging && strikeItem != AIR) {
+            const char* strikeSide = mirrorStrike ? "left" : "right";
+            hold::Spec spec = hold::resolveBlock(hold::playerHold(), strikeItem, strike->name, strikeSide);
+            if (mirrorStrike) hold::mirrorPalmX(spec);
+            const anim::Clip* layers[1] = { strikePose };
+            hold::applyToolAxis(*strikePose, pose, strikeAt, spec, [&](float f) {
                 return anim::evalPoseLayered(*clip, frame, layers, 1, f);
             });
-            hold::keepToolContact(*clip, pose, *strike, strikeAt, spec);
+            hold::keepToolContact(*clip, pose, *strikePose, strikeAt, spec);
         }
         parts = anim::poseParts(lib.rest, *clip, pose);
     } else {
@@ -2075,6 +2103,8 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
     auto drawBound = [&](uint8_t block, const char* side, const std::string& clipName, float alpha = 1.0f) {
         if (block == AIR || !validBlock(block)) return;
         hold::Spec spec = hold::resolveBlock(holds, block, clipName, side);
+        // Left hotbar matches editor Tool L. Right hotbar is the authored grip.
+        if (std::strcmp(side, "left") == 0) hold::mirrorPalmX(spec);
         if (strike && !strike->name.empty() && strike->name == clipName) {
             // Grip comes from the per-item hold Spec (not shared clip hold_grip).
             hold::composeFace(spec, anim::evalFace(*strike, strikeAt), anim::evalFaceOff(*strike, strikeAt));
@@ -2175,8 +2205,9 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
     };
     std::string rightClip = locClip;
     std::string leftClip = locClip;
-    if (strike && !hugging && !strike->name.empty()) rightClip = strike->name;
+    if (strike && !hugging && !strike->name.empty() && !mirrorStrike) rightClip = strike->name;
     else if (!hugging && hold::isHandLight(heldRight)) rightClip = "raise_r";
+    if (mirrorStrike) leftClip = strike->name;
     if (!hugging && hold::isHandLight(heldLeft)) leftClip = "raise_r";
     drawBound(heldRight, "right", rightClip);
     drawBound(heldLeft, "left", leftClip);

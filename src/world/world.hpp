@@ -334,6 +334,14 @@ public:
 
     int surfaceHeight(int x, int z);
 
+    // Feet block-Y of the lowest spot in column (x, z) where a player-sized
+    // AABB stands clear of motion-blocking blocks with solid footing beneath,
+    // scanning up from the real surface. Unlike surfaceHeight(), placed blocks
+    // such as buildings are accounted for, so a deploy never embeds the player
+    // inside a structure. Reads loaded chunks only; call ensureColumn() first
+    // when the column may be missing. Returns -1 when no spot fits below maxY.
+    int standHeight(int x, int z, int maxY) const;
+
     void saveAll();
     bool saveChunkFile(int cx, int cy, int cz, const Chunk& ch) const;
     bool loadChunkFile(int cx, int cy, int cz, Chunk& ch) const;

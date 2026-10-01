@@ -359,6 +359,38 @@ int main() {
                 blocks[(y * cfg::CHUNK_Z + 10) * cfg::CHUNK_X + x] = STONE;
         }
     world.writeAuthChunk(0, 0, 0, blocks.data(), zeros.data(), zeros.data(), {}, {});
+    // Deploy stand height accounts for placed blocks, unlike surfaceHeight.
+    // A fully authored column at (1,0) gives these checks a deterministic
+    // volume: solid up to y=100 (above any noise terrain, which never exceeds
+    // y=98), open air higher up — so scans never touch generated geometry.
+    std::vector<uint8_t> solidSlice(cfg::CHUNK_VOLUME, STONE);
+    std::vector<uint8_t> airSlice(cfg::CHUNK_VOLUME, AIR);
+    std::vector<uint8_t> topSlice(cfg::CHUNK_VOLUME, AIR);
+    for (int z = 0; z < cfg::CHUNK_Z; ++z)
+        for (int x = 0; x < cfg::CHUNK_X; ++x)
+            for (int y = 0; y <= 4; ++y) // world y 96..100
+                topSlice[(y * cfg::CHUNK_Z + z) * cfg::CHUNK_X + x] = STONE;
+    for (int cy = 0; cy <= 5; ++cy)
+        world.writeAuthChunk(1, cy, 0, solidSlice.data(), zeros.data(), zeros.data(), {}, {});
+    world.writeAuthChunk(1, 6, 0, topSlice.data(), zeros.data(), zeros.data(), {}, {});
+    world.writeAuthChunk(1, 7, 0, airSlice.data(), zeros.data(), zeros.data(), {}, {});
+    check(world.standHeight(36, 4, 120) == 101, "clear column deploys on the surface");
+    for (int bx = 39; bx <= 41; ++bx)
+        for (int bz = 9; bz <= 11; ++bz)
+            for (int y = 101; y <= 110; ++y)
+                world.setBlock(bx, y, bz, STONE, true, false);
+    check(world.standHeight(40, 10, 110) < 0,
+          "column solid through the height window reports failure");
+    check(world.standHeight(40, 10, cfg::WORLD_H) == 111,
+          "solid column lifts the deploy above the structure");
+    // A roofed room on the authored floor: the deploy must fit under the
+    // roof instead of embedding in it.
+    for (int bx = 43; bx <= 45; ++bx)
+        for (int bz = 7; bz <= 9; ++bz)
+            world.setBlock(bx, 105, bz, STONE, true, false); // roof slab
+    check(world.standHeight(44, 8, 120) == 101,
+          "a roofed column still deploys inside at floor level");
+    check(world.standHeight(1000, 1000, 200) < 0, "unloaded column reports failure");
     building_loot::Spawner lootSpawner(world, 17);
     check(world.drops().empty(), "creating building spawner never scatters items");
     check(guide::kPageCount == 8 && guide::pageLineCount(0) > 0 && guide::pageLineCount(7) > 0,
