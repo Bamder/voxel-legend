@@ -537,6 +537,7 @@ void GameClient::close() {
     deployFresh = false;
     id = 0;
     playSpan = 0;
+    rosterMask = 0;
 }
 
 bool GameClient::connecting() const {
@@ -564,7 +565,7 @@ void GameClient::pumpWelcome() {
         const uint8_t* p = payload.data();
         const uint8_t* e = p + payload.size();
         if (type == (uint16_t)RoomMsg::PlayWelcome && !haveWelcome) {
-            if (!decodePlayWelcome(p, e, id, worldSeed, sx, sy, sz, spec, teamId, playSpan)) {
+            if (!decodePlayWelcome(p, e, id, worldSeed, sx, sy, sz, spec, teamId, playSpan, rosterMask)) {
                 fail("服务器协议不匹配");
                 return;
             }

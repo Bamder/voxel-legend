@@ -1761,6 +1761,7 @@ int main(int argc, char** argv) {
         roomSession = false;
         roomTeams.clear();
         roomPlayers.clear();
+        matchmap::setMatchRoster(0x3F, 6, 0);
         matchmap::setSpan(matchmap::kFullSpan);
         world.reset(seed);
         world.setSaveEnabled(false);
@@ -2148,6 +2149,10 @@ int main(int argc, char** argv) {
             if (!loadSeedApplied) {
                 uint32_t s = gameClient.seed();
                 if (s == 0) s = 1;
+                int rosterTeams = 0;
+                for (int bit = 0; bit < 6; ++bit)
+                    if (gameClient.teamMask() & (uint8_t)(1u << bit)) ++rosterTeams;
+                matchmap::setMatchRoster(gameClient.teamMask(), rosterTeams, 0);
                 matchmap::setSpan(gameClient.span());
                 world.reset(s);
                 world.setSaveEnabled(false);

@@ -12,8 +12,23 @@ namespace matchmap {
 inline constexpr int kFullSpan = 2048;
 inline constexpr int kRim = 1;
 inline int g_span = kFullSpan;
+// Bit 0 is combat team 1. Default keeps every slot so a match that has not
+// announced its roster still has a site for each team.
+inline uint8_t g_activeTeams = 0x3F;
+inline int g_rosterTeams = 6;
+inline int g_rosterPlayers = 0;
 
 inline int span() { return g_span; }
+inline void setMatchRoster(uint8_t teamMask, int combatTeams, int combatPlayers) {
+    g_activeTeams = teamMask;
+    if (combatTeams < 0) combatTeams = 0;
+    if (combatPlayers < 0) combatPlayers = 0;
+    g_rosterTeams = combatTeams;
+    g_rosterPlayers = combatPlayers;
+}
+inline uint8_t activeTeamMask() { return g_activeTeams; }
+inline int rosterTeams() { return g_rosterTeams; }
+inline int rosterPlayers() { return g_rosterPlayers; }
 inline void setSpan(int chunkColumns) {
     if (chunkColumns < 1) chunkColumns = 1;
     if (chunkColumns > kFullSpan) chunkColumns = kFullSpan;
@@ -55,6 +70,11 @@ inline bool columnRim(int cx, int cz) {
 // Six combat team slots. The first four each own one corner square whose side
 // is 40% of the playable field. The last two use the central gap.
 inline constexpr int kCombatTeams = 6;
+
+inline bool teamInMatch(int team) {
+    if (team < 1 || team > kCombatTeams) return false;
+    return (g_activeTeams & (uint8_t)(1u << (team - 1))) != 0;
+}
 inline constexpr double kZoneSide = 0.40;
 inline constexpr int kDeployPreview = 512;
 inline constexpr float kDeploySeconds = 10.0f;
