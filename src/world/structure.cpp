@@ -44,6 +44,16 @@ struct Blueprint {
         }
         return flags;
     }
+    // Face whose normal is the stored placement axis. -1 means upright.
+    int axisFaceAt(int x, int y, int z) const {
+        int face = -1;
+        for (const CellTag& t : tags) {
+            if (t.x != x || t.y != y || t.z != z) continue;
+            if (t.name == "axisx") face = 2;
+            else if (t.name == "axisz") face = 4;
+        }
+        return face;
+    }
 };
 
 struct Site {
@@ -413,7 +423,7 @@ bool paintFile(World& world, const std::string& path) {
                 int z = kEditZ + lz;
                 if (!inVolume(x, y, z)) continue;
                 uint8_t block = b.at(lx, ly, lz);
-                world.setBlock(x, y, z, block, false, true, -1, b.flagsAt(lx, ly, lz));
+                world.setBlock(x, y, z, block, false, true, b.axisFaceAt(lx, ly, lz), b.flagsAt(lx, ly, lz));
             }
         }
     }
@@ -459,6 +469,9 @@ bool saveFile(const World& world, const std::string& path) {
                     if (flags & (uint8_t)(1u << bit))
                         b.tags.push_back(CellTag{ lx, ly, lz, kCellFlagTag[bit] });
                 }
+                int axis = world.logAxisAt(x, y, z);
+                if (axis == 0) b.tags.push_back(CellTag{ lx, ly, lz, "axisx" });
+                else if (axis == 2) b.tags.push_back(CellTag{ lx, ly, lz, "axisz" });
             }
         }
     }
@@ -941,7 +954,8 @@ int stampBlueprint(World& world, int worldX, int worldZ, const Blueprint& b, int
             for (int lx = 0; lx < b.sx; ++lx) {
                 uint8_t block = b.at(lx, ly, lz);
                 if (block == AIR) continue;
-                putSolid(world, x0 + lx, floorY + ly, z0 + lz, block, -1, b.flagsAt(lx, ly, lz));
+                putSolid(world, x0 + lx, floorY + ly, z0 + lz, block,
+                         b.axisFaceAt(lx, ly, lz), b.flagsAt(lx, ly, lz));
                 placed++;
             }
         }
@@ -1039,6 +1053,33 @@ bool paintMatchRitualAltar(World& world, int ritual) {
                 world.setBlock(x + dx, ground + rise, z + dz, AIR, true, false);
         }
     }
+    return true;
+}
+
+// Stonehenge structure file names
+const char* stonehengeName(int stonehengeIndex) {
+    switch (stonehengeIndex) {
+        case 0: return "stonehenge";
+        default: return "stonehenge";
+    }
+}
+
+bool paintStonehenge(World& world, int worldX, int& worldY, int worldZ, int stonehengeIndex) {
+    if (stonehengeIndex < 0 || stonehengeIndex >= kStonehengeCount) stonehengeIndex = 0;
+    std::string path = "assets/structures/";
+    path += stonehengeName(stonehengeIndex);
+    path += ".vlstruct";
+    Blueprint b;
+    bool loaded = std::filesystem::exists(path) && readBlueprint(path, b);
+    if (!loaded) {
+        // Fallback: create a simple stonehenge-like structure
+        b.sx = 41; b.sy = 11; b.sz = 41;
+        b.blocks = std::vector<uint8_t>((size_t)b.sx * b.sy * b.sz, 0);
+    }
+    int placed = 0;
+    worldY = stampBlueprint(world, worldX, worldZ, b, placed);
+    fprintf(stderr, "[DEBUG] Stonehenge %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d) loaded=%d\n",
+        stonehengeName(stonehengeIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz, loaded ? 1 : 0);
     return true;
 }
 

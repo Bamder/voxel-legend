@@ -79,6 +79,7 @@ void fillBuiltin() {
     blk(PLANKS, 2.4f, 4.0f);  // 空手公式约 40s（前摇+后摇各 0.5s）
     blk(WOOD, 2.4f, 4.0f);
     blk(LOG, 2.4f, 4.0f);
+    blk(BARK_BLOCK, 2.4f, 4.0f);
     blk(SANDSTONE, 3.8f, 36.0f);
     blk(BRICK, 3.8f, 36.0f);
     blk(COBBLE, 3.5f, 42.0f);
@@ -145,8 +146,9 @@ void fillBuiltin() {
     rule(BRICK, TAG_PICK, BRICK);
     rule(SANDSTONE, TAG_PICK, SANDSTONE);
     rule(GLASS, TAG_PICK, GLASS);
-    rule(LOG, TAG_AXE, WOOD);
+    rule(LOG, TAG_AXE, LOG);
     rule(WOOD, TAG_AXE, WOOD);
+    rule(BARK_BLOCK, TAG_AXE, BARK_BLOCK);
     rule(PLANKS, TAG_AXE, PLANKS);
     rule(TIMBER, TAG_AXE, TIMBER);
     rule(THATCH, TAG_AXE, THATCH);

@@ -25,6 +25,9 @@ enum Block : uint8_t {
     TIMBER, PLASTER, THATCH, CLAY_TILE, ASHLAR,
     // Placeable lights. Appended so earlier save ids stay put.
     TORCH, LANTERN,
+    // Full bark cube. Appended so earlier save ids stay put.
+    // BARK itself remains the single-face sheet item.
+    BARK_BLOCK,
     BLOCK_COUNT
 };
 

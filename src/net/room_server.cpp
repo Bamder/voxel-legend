@@ -182,7 +182,8 @@ void applyEdit(World& world, const BlockEditNet& e) {
     world.ensureColumn(cx, cz);
     if (!world.columnLoaded(cx, cz)) return;
     if (world.getBlock(e.x, e.y, e.z) == e.block) return;
-    world.setBlock(e.x, e.y, e.z, e.block, false, false);
+    int face = e.face < 6 ? (int)e.face : -1;
+    world.setBlock(e.x, e.y, e.z, e.block, false, false, face);
 }
 
 void applyBark(World& world, const PlayInputNet::BarkEdit& e) {
@@ -763,6 +764,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     building_loot::Spawner lootSpawner(world, seed);
 
     bool populatedTeams[matchmap::kCombatTeams]{};
+    bool stonehengesPlaced = false;
     std::array<bool, ritual::RelicCount> defeatedGuardians{};
     auto finishGuardian = [&](int relic, int gx, int gy, int gz) {
         if (relic < 0 || relic >= ritual::RelicCount) return;
@@ -892,6 +894,30 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             world, lootSpawner, clueDirector, seed, c.team);
                         if (!populatedTeams[c.team - 1])
                             slog(log, "match content placement failed");
+                    }
+                    // Stonehenge is shared world content; the team's rooms,
+                    // clues and ritual sites above are populated independently.
+                    if (!stonehengesPlaced && !c.spectator &&
+                        c.team >= 1 && c.team <= matchmap::kCombatTeams) {
+                        for (int shIdx = 0; shIdx < 3; ++shIdx) {
+                            int wx = bx, wz = bz;
+                            if (shIdx == 0) {
+                                wx += 70;
+                                wz -= 70;
+                            } else {
+                                int zoneIdx = (shIdx == 1 ? 3 : 14) % matchmap::kCombatTeams;
+                                matchmap::Zone zone = matchmap::combatZone(zoneIdx);
+                                wx = zone.cx0 * cfg::CHUNK_X +
+                                     (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                                wz = zone.cz0 * cfg::CHUNK_Z +
+                                     (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                                if (shIdx == 1) { wx -= 50; wz += 50; }
+                                else { wx += 50; wz += 50; }
+                            }
+                            int wy = 0;
+                            structure::paintStonehenge(world, wx, wy, wz, 0);
+                        }
+                        stonehengesPlaced = true;
                     }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;

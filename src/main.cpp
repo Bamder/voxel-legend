@@ -516,10 +516,16 @@ static std::vector<PlayInputNet::BarkEdit> g_roomBark;
 static std::vector<PlayInputNet::MineEdit> g_roomMines;
 static bool g_treeResync = false;
 
-static void noteRoomEdit(int x, int y, int z, uint8_t b) {
+static void noteRoomEdit(int x, int y, int z, uint8_t b, int face = -1) {
     if (!g_roomRecord || g_roomApplyNet) return;
     if (g_roomEdits.size() >= 256) g_roomEdits.erase(g_roomEdits.begin());
-    g_roomEdits.push_back(BlockEditNet{ x, y, z, b });
+    BlockEditNet e;
+    e.x = x;
+    e.y = y;
+    e.z = z;
+    e.block = b;
+    e.face = (face >= 0 && face < 6) ? (uint8_t)face : 255;
+    g_roomEdits.push_back(e);
 }
 
 static void noteRoomBark(int x, int y, int z, int face, bool place) {
@@ -1178,7 +1184,7 @@ void deployBlockColor(uint8_t b, int y, int& r, int& g, int& bl) {
     if (b == SAND || b == SANDSTONE) { r = 194; g = 174; bl = 108; return; }
     if (b == SNOW) { r = 226; g = 230; bl = 234; return; }
     if (b == STONE || b == COBBLE || b == GRAVEL || b == BEDROCK) { r = 112; g = 112; bl = 116; return; }
-    if (b == LOG || b == WOOD || b == PLANKS || b == BARK) { r = 122; g = 84; bl = 48; return; }
+    if (b == LOG || b == WOOD || b == PLANKS || b == BARK || b == BARK_BLOCK) { r = 122; g = 84; bl = 48; return; }
     if (b == LEAVES || b == SHRUB_LEAF || b == SHRUB_STEM) { r = 46; g = 108; bl = 44; return; }
     if (b == GRASS || b == DIRT || b == GRASS_TUFT) {
         float t = (float)(y - cfg::SEA_LEVEL) / 30.0f;
@@ -3327,6 +3333,15 @@ int main(int argc, char** argv) {
         if (roomSession && ui.targetDrop < 0 && playing && !spectating && !player.dead &&
             !inventoryOpen && !paused && !guideOpen && !clueOpen && !structureEdit)
             ui.targetDrop = room_inventory::nearbyDrop(world, player.eye(), player.pos);
+        ui.processLogReady = false;
+        if (hitOk && physHit < 0 && !player.dead && carry.empty() && lookLocked &&
+            !inventoryOpen && !paused && !guideOpen && !clueOpen && playing && !spectating &&
+            !structureEdit && ui.targetDrop < 0 && dummyAim < 0) {
+            uint8_t heldProc = inv[ui.selectedSlot].block;
+            bool stripTool = hasItemTags(heldProc, TAG_AXE | TAG_WOODWORKING | TAG_ONE_HAND);
+            if (stripTool && world.getBlock(hit.x, hit.y, hit.z) == LOG)
+                ui.processLogReady = true;
+        }
         // Air, a hostile player, or a guardian all start the same swing. The
         // server raycasts again at the damage frame, so the click itself does
         // not need a target. A block under the crosshair stays a mining swing.
@@ -3444,6 +3459,24 @@ int main(int argc, char** argv) {
                         } else if (left < (int)n) {
                             world.setDropCount(ui.targetDrop, (uint8_t)left);
                         }
+                    }
+                }
+            } else if (!inventoryOpen && ui.processLogReady && lookLocked) {
+                // Hand axe: strip LOG in place to WOOD (same axis), drop 4 BARK sheets.
+                IVec3 cell = ui.targetBlock;
+                if (physHit < 0 && world.getBlock(cell.x, cell.y, cell.z) == LOG) {
+                    uint8_t heldProc = inv[ui.selectedSlot].block;
+                    if (hasItemTags(heldProc, TAG_AXE | TAG_WOODWORKING | TAG_ONE_HAND)) {
+                        int axis = world.logAxisAt(cell.x, cell.y, cell.z);
+                        int placeFace = (axis == 0) ? 2 : ((axis == 2) ? 4 : 0);
+                        uint8_t keep = (uint8_t)(world.getFlags(cell.x, cell.y, cell.z)
+                                                 & (uint8_t)~(FLAG_ALIVE | FLAG_SETTLED));
+                        int overlayBark = world.takeAllBarkAt(cell.x, cell.y, cell.z);
+                        world.setBlock(cell.x, cell.y, cell.z, WOOD, true, true, placeFace, (int)keep);
+                        noteRoomEdit(cell.x, cell.y, cell.z, WOOD, placeFace);
+                        int barkN = 4 + overlayBark;
+                        world.spawnDrop(cellCenter(cell.x, cell.y, cell.z), BARK, barkN, true);
+                        ui.processLogReady = false;
                     }
                 }
             }
@@ -3937,6 +3970,13 @@ int main(int argc, char** argv) {
                         timeOfDay = t * (float)cfg::TICKS_PER_DAY;
                     }
                 } else {
+                    if (structureEdit && lmb && ui.timeSliderW > 1.0f &&
+                        ui.mouseX >= ui.timeSliderX - 12.0f && ui.mouseX <= ui.timeSliderX + ui.timeSliderW + 12.0f &&
+                        ui.mouseY >= ui.timeSliderY - 12.0f && ui.mouseY <= ui.timeSliderY + ui.timeSliderH + 12.0f) {
+                        float t = (ui.mouseX - ui.timeSliderX) / ui.timeSliderW;
+                        t = clampf(t, 0.0f, 1.0f);
+                        timeOfDay = t * (float)cfg::TICKS_PER_DAY;
+                    }
                     if (lmb && !prevLmb) {
                         if (roomSession) {
                             if (ui.menuHover == 0) { paused = false; settingsOpen = false; debugMenuOpen = false; }
@@ -4041,9 +4081,9 @@ int main(int argc, char** argv) {
                     IVec3 place = ui.placePreview;
                     if (world.getBlock(place.x, place.y, place.z) == AIR
                         && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
-                        world.setBlock(place.x, place.y, place.z, carry.block, true, true,
-                                       world.faceFromHitNormal(nrm));
-                        noteRoomEdit(place.x, place.y, place.z, carry.block);
+                        int face = world.faceFromHitNormal(nrm);
+                        world.setBlock(place.x, place.y, place.z, carry.block, true, true, face);
+                        noteRoomEdit(place.x, place.y, place.z, carry.block, face);
                         carry.clear();
                         ui.hasPlacePreview = false;
                     }
@@ -4309,9 +4349,9 @@ int main(int argc, char** argv) {
                                 if (!sel.empty() && (offering || plugin::blockStrategy(sel.block)->canPlace(sel.block))) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
-                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true,
-                                                       world.faceFromHitNormal(nrm));
-                                        noteRoomEdit(place.x, place.y, place.z, sel.block);
+                                        int face = world.faceFromHitNormal(nrm);
+                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true, face);
+                                        noteRoomEdit(place.x, place.y, place.z, sel.block, face);
                                         if (--sel.count == 0) sel.clear();
                                     }
                                 }
@@ -4320,7 +4360,6 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-        }
         prevLmb = lmb;
         prevRmb = rmb;
 
@@ -4407,7 +4446,7 @@ int main(int argc, char** argv) {
             }
             if (sub == cfg::MAX_SUBSTEPS) accumulator = 0.0f;
 
-            world.update(player.pos, 6);
+            world.update(player.pos, 16);
             if (deploying && deploySpan > 0) {
                 const float S = cfg::BLOCK_SCALE;
                 Vec3 zone{
@@ -4415,7 +4454,7 @@ int main(int argc, char** argv) {
                     player.pos.y,
                     (deployOz + deploySpan * 0.5f) * S
                 };
-                world.update(zone, 6);
+                world.update(zone, 12);
                 if (paintDeployColumns(world, deployOx, deployOz, deploySpan, deployPainted, deployPixels))
                     deployStamp++;
             }
@@ -4448,8 +4487,10 @@ int main(int argc, char** argv) {
                 }
             }
 
-            timeOfDay += dt * ((float)cfg::TICKS_PER_DAY / cfg::DAY_LENGTH_SECONDS);
-            if (timeOfDay >= (float)cfg::TICKS_PER_DAY) timeOfDay -= (float)cfg::TICKS_PER_DAY;
+            if (!structureEdit) {
+                timeOfDay += dt * ((float)cfg::TICKS_PER_DAY / cfg::DAY_LENGTH_SECONDS);
+                if (timeOfDay >= (float)cfg::TICKS_PER_DAY) timeOfDay -= (float)cfg::TICKS_PER_DAY;
+            }
         } else if (!playing) {
             if (exploreScreen() || portraitScreen()) {
                 timeOfDay = 6000.0f;
@@ -4495,6 +4536,7 @@ int main(int argc, char** argv) {
                     roomAttackVisualItem = AIR;
                 }
             }
+        }
         }
 
         if (g_resized) {

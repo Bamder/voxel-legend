@@ -1,15 +1,15 @@
 # VOXEL LEGEND data pack entry
-id log
-display Log
+id bark_block
+display Bark Block
 kind block
 max_stack 1
 hardness 2.4
 durability 4
 efficiency 0
-weight 12
-friction 0.48
+weight 6
+friction 0.50
 tags 
 harvest_need axe
-harvest_drop log 1
+harvest_drop bark_block 1
 crack_folds 0
 crack_color 142 102 52

@@ -38,7 +38,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "Shrub Stem",   false, false, false, false, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, 0.40f, 0.35f, true, 5.0f, 2.2f },
     { "Shrub Leaf",   false, false, false, false, TEX_SHRUB_LEAF, TEX_SHRUB_LEAF, TEX_SHRUB_LEAF, TEX_SHRUB_LEAF, 0.12f, 0.30f, true, 3.5f, 1.2f },
     { "Stick",        false, false, false, false, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, TEX_SHRUB_STEM, 0.20f, 0.40f, false, 0.0f, 0.0f },
-    { "Grass Tuft",   false, false, false, false, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, 0.08f, 0.45f, true, 1.8f, 0.25f },
+    { "Grass Tuft",   false, false, false, false, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, TEX_GRASS_TUFT, 0.08f, 0.45f, true, 0.3f, 0.25f },
     { "Wood",         true,  false, true,  false, TEX_LOG_TOP,  TEX_WOOD_SIDE, TEX_LOG_TOP,  TEX_WOOD_SIDE,  8.00f, 0.46f, false, 0.0f, 0.0f },
     { "Bark",         false, false, false, false, TEX_BARK,     TEX_BARK,     TEX_BARK,     TEX_BARK,     0.10f, 0.50f, false, 0.0f, 0.0f },
     { "Hand Axe",     false, false, false, false, TEX_HAND_AXE, TEX_HAND_AXE, TEX_HAND_AXE, TEX_HAND_AXE, 1.20f, 0.55f, false, 0.0f, 0.0f },
@@ -79,6 +79,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "料石", true, false, true, false, TEX_ASHLAR, TEX_ASHLAR, TEX_ASHLAR, TEX_ASHLAR, 18.00f, 0.78f, false, 0.0f, 0.0f },
     { "火把", false, false, false, false, TEX_FLAME, TEX_TORCH_WOOD, TEX_TORCH_WOOD, TEX_FLAME, 0.60f, 0.40f, false, 0.0f, 0.0f, 14 },
     { "提灯", false, false, false, false, TEX_LANTERN_GLOW, TEX_LANTERN, TEX_LANTERN, TEX_LANTERN_GLOW, 1.40f, 0.45f, false, 0.0f, 0.0f, 15 },
+    { "Bark Block",   true,  false, true,  false, TEX_BARK,     TEX_BARK,     TEX_BARK,     TEX_BARK,     6.00f, 0.50f, false, 0.0f, 0.0f },
 };
 static_assert(sizeof(kBlocks) / sizeof(kBlocks[0]) == BLOCK_COUNT, "BasicConstruction block table size mismatch");
 
@@ -99,12 +100,13 @@ constexpr const char* kIds[BLOCK_COUNT] = {
     "guardian_core",
     "timber", "plaster", "thatch", "clay_tile", "ashlar",
     "torch", "lantern",
+    "bark_block",
 };
 static_assert(sizeof(kIds) / sizeof(kIds[0]) == BLOCK_COUNT, "BasicConstruction id table size mismatch");
 
 bool inCreative(uint8_t id) {
     if (id == ITEM_TARGET) return true;
-    if (id == TORCH || id == LANTERN) return true;
+    if (id == TORCH || id == LANTERN || id == BARK_BLOCK) return true;
     if (id >= TIMBER && id <= ASHLAR) return true;
     if (id >= ITEM_ELEM_CORE) return false;
     switch (id) {
@@ -131,18 +133,13 @@ struct UnplaceableStrategy : BlockStrategy {
     bool canPlace(uint8_t) const override { return false; }
 };
 struct LogStrategy : BlockStrategy {
-    uint8_t dropItem(uint8_t) const override { return WOOD; }
-    int extraDrops(uint8_t, uint8_t* out, int max) const override {
-        if (!out || max < 1) return 0;
-        out[0] = BARK;
-        return 1;
-    }
+    uint8_t dropItem(uint8_t) const override { return LOG; }
 };
 struct ShrubStemStrategy : BlockStrategy {
     uint8_t dropItem(uint8_t) const override { return STICK; }
 };
 struct LightPropStrategy : BlockStrategy {
-    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int) override {
+    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int, uint8_t, uint8_t) override {
         uint8_t id = ch.get(lx, y, lz);
         const mat::Model& model = mat::g_itemModels[id];
         if (model.quads.empty() && !mat::modelHasSolidTex(model)) return false;
@@ -177,12 +174,14 @@ struct LightPropStrategy : BlockStrategy {
     }
 };
 struct GrassTuftStrategy : BlockStrategy {
-    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int wx, int wz) override {
+    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int wx, int wz,
+                  uint8_t below, uint8_t above) override {
         // Upper half of a 2-tall tuft is drawn by the lower cell.
-        if (y > 0 && ch.get(lx, y - 1, lz) == GRASS_TUFT) return true;
+        // below/above come from world coords so CHUNK_Y seams stay correct.
+        if (below == GRASS_TUFT) return true;
         float u0, v0, u1, v1;
         tex::tileUV(TEX_GRASS_TUFT, u0, v0, u1, v1);
-        bool twoHigh = (y + 1 < cfg::CHUNK_Y && ch.get(lx, y + 1, lz) == GRASS_TUFT);
+        bool twoHigh = (above == GRASS_TUFT);
         // Two-cell tufts must reach 75% into the second cell (world height 1.75).
         float unitMax = mat::g_grassTuft.rand.get("tall_base", 0.375f)
                       + mat::g_grassTuft.rand.get("tall_range", 0.375f);
@@ -191,6 +190,14 @@ struct GrassTuftStrategy : BlockStrategy {
         mat::buildGrassTuftMesh(mat::g_grassTuft, ch.meshOpaque, lx, y, lz, wx, wz,
                                 u0, v0, u1, v1, hScale);
         return true;
+    }
+    // Self-check from the cell below: without solid ground (or a lower tuft
+    // for the upper half of a 2-tall plant), this tuft breaks itself.
+    void onSelfCheck(BlockEvent& ev) override {
+        if (ev.face != 1 || !ev.world) return; // 1 = -Y (geo::kFaces)
+        uint8_t below = (ev.y > 0) ? ev.world->getBlock(ev.x, ev.y - 1, ev.z) : (uint8_t)AIR;
+        if (isSolid(below) || below == GRASS_TUFT) return;
+        ev.world->setBlock(ev.x, ev.y, ev.z, AIR, ev.markModified, ev.updateMesh);
     }
 };
 struct PlayerStrategy : EntityStrategy {
@@ -235,6 +242,7 @@ BlockStrategy* strategyFor(int id) {
     switch (id) {
         case BEDROCK:    return &g_bedrock;
         case STICK:
+        case BARK:
         case HAND_AXE:
         case SHEARS:
         case HAND_PICK:

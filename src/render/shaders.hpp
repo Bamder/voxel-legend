@@ -164,9 +164,12 @@ void main() {
         }
         if (best > 0.0) discard;
         vec3 nrm = normalize(vNormal);
-        float diff = max(dot(nrm, uSunDir), 0.0);
+        float ndl = dot(nrm, uSunDir);
+        float diff = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
+        diff = diff * diff;
+        float face = mix(1.0, vFaceShade, 0.40);
         vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * vBlockLight;
-        vec3 col = uCrackColor * light * vFaceShade;
+        vec3 col = uCrackColor * light * face;
         float dist = length(vLocalPos + uChunkOffset);
         float f = 1.0 - exp(-uFogDensity * dist);
         col = mix(col, uFogColor, clamp(f, 0.0, 1.0));
@@ -187,10 +190,15 @@ void main() {
         if (n > vAO) discard;
     }
     vec3 n = normalize(vNormal);
-    float diff = max(dot(n, uSunDir), 0.0);
+    // Half-Lambert: side faces keep fill light so brightness does not cliff
+    // between +Y / +X / +Z at every block and chunk edge.
+    float ndl = dot(n, uSunDir);
+    float diff = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
+    diff = diff * diff;
+    float face = mix(1.0, vFaceShade, 0.40);
     vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * vBlockLight;
-    float ao = sodTile ? 1.0 : vAO;
-    vec3 col = tex.rgb * light * vFaceShade * ao;
+    float ao = sodTile ? 1.0 : mix(1.0, vAO, 0.85);
+    vec3 col = tex.rgb * light * face * ao;
     float dist = length(vLocalPos + uChunkOffset);
     float f = 1.0 - exp(-uFogDensity * dist);
     col = mix(col, uFogColor, clamp(f, 0.0, 1.0));

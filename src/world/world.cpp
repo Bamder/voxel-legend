@@ -24,6 +24,9 @@
 
 namespace {
 
+static_assert(LOG_AXIS_X == (uint8_t)(cfg::WATER_MAX_LEVEL + 1), "log axis overlaps water");
+static_assert(LOG_AXIS_Z == (uint8_t)(cfg::WATER_MAX_LEVEL + 2), "log axis overlaps water");
+
 uint32_t fnv1a(const uint8_t* d, size_t n) {
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < n; i++) { h ^= d[i]; h *= 16777619u; }
@@ -109,7 +112,20 @@ uint8_t World::getWaterLevel(int x, int y, int z) const {
     if (!cellLoc(x, y, z, c)) return 0;
     auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
     if (it == m_chunks.end()) return 0;
+    if (it->second.get(c.lx, c.ly, c.lz) != WATER) return 0;
     return it->second.levelAt(c.lx, c.ly, c.lz);
+}
+
+int World::logAxisAt(int x, int y, int z) const {
+    uint8_t b = getBlock(x, y, z);
+    if (!isOrientedWood(b)) return 1;
+    uint8_t fl = getFlags(x, y, z);
+    if (b == LOG && (fl & (FLAG_ALIVE | FLAG_SETTLED)) != 0) return 1;
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return 1;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
+    if (it == m_chunks.end()) return 1;
+    return logAxisFromLevel(it->second.levelAt(c.lx, c.ly, c.lz));
 }
 
 int World::humidityAt(int x, int y, int z) const {
@@ -358,7 +374,6 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     uint8_t prevFlags = it->second.flagAt(lx, ly, lz);
     uint32_t prevBind = it->second.treeIdAt(lx, ly, lz);
     bool cutAliveWood = isTreeWood(prev) && (prevFlags & FLAG_ALIVE) && b != prev;
-    bool cutTallGrass = (prev == GRASS_TUFT && b != prev);
     it->second.set(lx, ly, lz, b);
     it->second.setFlag(lx, ly, lz, 0); // player / other placement is death
     if (cellFlags >= 0)
@@ -387,9 +402,14 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
 
     // Water: placing water creates a temporary source (level 16); any other block
     // clears the dynamic-water level. Generated ocean water keeps level 0 (static).
+    // Log and stripped wood reuse that byte for the placement axis (17 = X, 18 = Z).
     if (b == WATER) {
         it->second.setLevel(lx, ly, lz, cfg::WATER_SOURCE_LEVEL);
         it->second.hasWater = true;
+    } else if (isOrientedWood(b) &&
+               (cellFlags < 0 || (cellFlags & (FLAG_ALIVE | FLAG_SETTLED)) == 0)) {
+        int axis = (placeFace >= 0 && placeFace < 6) ? faceAxis(placeFace) : 1;
+        it->second.setLevel(lx, ly, lz, logAxisLevel(axis));
     } else {
         it->second.setLevel(lx, ly, lz, 0);
     }
@@ -465,21 +485,23 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     }
 
     if (prev != b) {
-        plugin::BlockEvent ev{ this, x, y, z, b, prev };
+        plugin::BlockEvent ev{ this, x, y, z, b, prev, -1, markModified, updateMesh };
         if (prev != AIR) plugin::blockStrategy(prev)->onBreak(ev);
         if (b != AIR) plugin::blockStrategy(b)->onPlace(ev);
-        static const int kN[6][3] = { {0,1,0},{0,-1,0},{1,0,0},{-1,0,0},{0,0,1},{0,0,-1} };
-        for (int i = 0; i < 6; i++) {
-            int nx = x + kN[i][0], ny = y + kN[i][1], nz = z + kN[i][2];
-            uint8_t nb = getBlock(nx, ny, nz);
-            if (nb == AIR) continue;
-            plugin::BlockEvent nev{ this, nx, ny, nz, nb, nb };
-            plugin::blockStrategy(nb)->onNeighborChanged(nev);
+        // Breaking / replacing a cell: each of the six neighbors self-checks.
+        if (prev != AIR) {
+            for (int f = 0; f < 6; f++) {
+                const geo::FaceDef& F = geo::kFaces[f];
+                int nx = x + F.n[0], ny = y + F.n[1], nz = z + F.n[2];
+                uint8_t nb = getBlock(nx, ny, nz);
+                if (nb == AIR) continue;
+                // Neighbor's face toward this cell is the opposite of f.
+                plugin::BlockEvent nev{ this, nx, ny, nz, nb, nb, f ^ 1, markModified, updateMesh };
+                plugin::blockStrategy(nb)->onSelfCheck(nev);
+            }
         }
     }
 
-    if (cutTallGrass && getBlock(x, y + 1, z) == GRASS_TUFT)
-        setBlock(x, y + 1, z, AIR, markModified, updateMesh);
     if (cutAliveWood) detachAliveTree(x, y, z, prevBind);
 }
 
@@ -969,15 +991,16 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
             addBorderSod(cx, cy, cz);
             m_meshQueue.push_back(it->first);
         }
+        // Remesh neighbors so AO / face culling / block light match across the
+        // new border. Push front so seams clear before deeper mesh work.
         for (int nz = -1; nz <= 1; nz++) {
             for (int nx = -1; nx <= 1; nx++) {
                 if (nx == 0 && nz == 0) continue;
                 for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
                     auto nit = m_chunks.find(chunkKey(cx + nx, cy, cz + nz));
-                    if (nit != m_chunks.end() && !nit->second.dirty) {
-                        nit->second.dirty = true;
-                        m_meshQueue.push_back(nit->first);
-                    }
+                    if (nit == m_chunks.end()) continue;
+                    nit->second.dirty = true;
+                    m_meshQueue.push_front(nit->first);
                 }
             }
         }
@@ -1005,20 +1028,47 @@ void World::updateAnchors(const Vec3* pos, int count, int meshBudget) {
         else ++it;
     }
 
+    // Hold mesh builds until orthogonal neighbor columns that should already be
+    // loaded are present. Meshing against missing neighbors treats them as air,
+    // which bakes a bright AO rim exactly on the chunk border.
+    auto columnWanted = [&](int cx, int cz) {
+        if (m_matchBounds && !matchmap::columnInside(cx, cz)) return false;
+        if (m_buildCanvas && (cx < -1 || cx > 1 || cz < -1 || cz > 1)) return false;
+        return nearAny(cx, cz, cfg::LOAD_RADIUS);
+    };
+    auto meshNeighborsReady = [&](int cx, int cz) {
+        static const int kOrth[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+        for (int i = 0; i < 4; i++) {
+            int nx = cx + kOrth[i][0], nz = cz + kOrth[i][1];
+            if (!columnWanted(nx, nz)) continue;
+            if (!columnLoaded(nx, nz)) return false;
+        }
+        return true;
+    };
+
     int budget = meshBudget;
-    while (budget-- > 0 && !m_meshQueue.empty()) {
+    size_t pass = m_meshQueue.size();
+    while (budget > 0 && pass-- > 0 && !m_meshQueue.empty()) {
         int64_t key = m_meshQueue.front();
         m_meshQueue.pop_front();
         auto it = m_chunks.find(key);
-        if (it != m_chunks.end() && it->second.dirty) {
-            buildMeshFor(it->second, chunkCX(key), chunkCY(key), chunkCZ(key));
-            it->second.dirty = false;
+        if (it == m_chunks.end() || !it->second.dirty) continue;
+        int cx = chunkCX(key), cz = chunkCZ(key);
+        if (!meshNeighborsReady(cx, cz)) {
+            m_meshQueue.push_back(key);
+            continue;
         }
+        buildMeshFor(it->second, cx, chunkCY(key), cz);
+        it->second.dirty = false;
+        --budget;
     }
 }
 
 float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, int oy, int oz) const {
-    int cxp = wx + ox, cyp = wy + oy, czp = wz + oz;
+    // Sample from the empty cell the face looks into, then step ±1 on the two
+    // tangent axes. Using the vertex cell (wx+ox, ...) wrongly pulls in coplanar
+    // solid neighbors on -X/-Y/-Z faces, which paints a fake grid on flat walls.
+    int bx = wx + nx, by = wy + ny, bz = wz + nz;
     int ta[2]; int n = 0;
     if (nx == 0) ta[n++] = 0;
     if (ny == 0) ta[n++] = 1;
@@ -1027,14 +1077,16 @@ float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, in
     int d[3] = { 0, 0, 0 };
     for (int i = 0; i < n; i++) { int a = ta[i]; d[a] = (off[a] == 0) ? -1 : 1; }
     int a0 = ta[0], a1 = ta[1];
-    int s1[3] = { cxp, cyp, czp }; s1[a0] += d[a0];
-    int s2[3] = { cxp, cyp, czp }; s2[a1] += d[a1];
-    int s3[3] = { cxp, cyp, czp }; s3[a0] += d[a0]; s3[a1] += d[a1];
+    int s1[3] = { bx, by, bz }; s1[a0] += d[a0];
+    int s2[3] = { bx, by, bz }; s2[a1] += d[a1];
+    int s3[3] = { bx, by, bz }; s3[a0] += d[a0]; s3[a1] += d[a1];
     bool o1 = isOpaque(getBlock(s1[0], s1[1], s1[2]));
     bool o2 = isOpaque(getBlock(s2[0], s2[1], s2[2]));
     bool o3 = isOpaque(getBlock(s3[0], s3[1], s3[2]));
     int ao = (o1 && o2) ? 3 : ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (o3 ? 1 : 0));
-    return 1.0f - 0.25f * (float)ao; // 1.0, 0.75, 0.5, 0.25
+    // Softer than the classic 0.25 step so adjacent blocks blend instead of
+    // reading as a hard brightness cut at every edge (and chunk border).
+    return 1.0f - 0.16f * (float)ao; // 1.0, 0.84, 0.68, 0.52
 }
 
 void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
@@ -1062,7 +1114,9 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                 int wx = cx * cfg::CHUNK_X + x;
                 int wz = cz * cfg::CHUNK_Z + z;
                 if (structure::isGuardianToken(wx, wy, wz, b)) continue;
-                if (plugin::blockStrategy(b)->emitMesh(ch, x, y, z, wx, wz))
+                uint8_t below = (wy > 0) ? getBlock(wx, wy - 1, wz) : (uint8_t)AIR;
+                uint8_t above = (wy + 1 < cfg::WORLD_H) ? getBlock(wx, wy + 1, wz) : (uint8_t)AIR;
+                if (plugin::blockStrategy(b)->emitMesh(ch, x, y, z, wx, wz, below, above))
                     continue;
 
                 const BlockInfo& info = blockOf(b);
@@ -1074,7 +1128,9 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                 uint8_t fl = ch.flagAt(x, y, z);
                 int trunk = 1;
                 auto isWood = [&](int ix, int iy, int iz) { return isTreeWood(getBlock(ix, iy, iz)); };
-                if (b == LOG) trunk = logTrunkAxis(wx, wy, wz, fl, isWood);
+                bool grownLog = b == LOG && (fl & (FLAG_ALIVE | FLAG_SETTLED)) != 0;
+                if (grownLog) trunk = logTrunkAxis(wx, wy, wz, fl, isWood);
+                else if (isOrientedWood(b)) trunk = logAxisFromLevel(ch.levelAt(x, y, z));
 
                 for (int f = 0; f < 6; f++) {
                     const geo::FaceDef& F = geo::kFaces[f];
@@ -1101,10 +1157,13 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                         };
                         spliceKind = spliceEndRing(wx, wy, wz, f, trunk, qa, qb, longAxis, isWood, hasCut);
                     }
-                    LogFaceTex lf = (b == LOG)
-                        ? logFaceTex(fl, f, trunk, spliceKind, qa, qb, longAxis)
-                        : LogFaceTex{};
-                    if (b != LOG) {
+                    LogFaceTex lf;
+                    if (b == LOG) {
+                        lf = logFaceTex(fl, f, trunk, spliceKind, qa, qb, longAxis, TEX_LOG_SIDE);
+                    } else if (b == WOOD) {
+                        uint8_t wf = (uint8_t)(fl & (uint8_t)~(FLAG_ALIVE | FLAG_SETTLED));
+                        lf = logFaceTex(wf, f, trunk, 0, 0, 0, 0, TEX_WOOD_SIDE);
+                    } else {
                         lf.tile = (f == 0) ? info.texTop : (f == 1 ? info.texBottom : info.texSide);
                     }
                     float alpha = (b == WATER) ? 0.55f : (b == GLASS ? 0.4f : 1.0f);
@@ -1120,9 +1179,12 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                             py -= 0.14f; // recessed ocean surface
                         }
                         float u, v;
-                        if (b == LOG) logCornerUV(lf, F.t[c][0], F.t[c][1],
-                                                 F.p[c][0], F.p[c][1], F.p[c][2], u, v);
-                        else {
+                        if (b == LOG || b == WOOD) {
+                            float tu = F.t[c][0], tv = F.t[c][1];
+                            if (!grownLog && lf.tile != TEX_LOG_TOP)
+                                orientLogSideUV(f, trunk, F.p[c][0], F.p[c][1], F.p[c][2], tu, tv);
+                            logCornerUV(lf, tu, tv, F.p[c][0], F.p[c][1], F.p[c][2], u, v);
+                        } else {
                             float u0, v0, u1, v1;
                             tex::tileUV(lf.tile, u0, v0, u1, v1);
                             u = u0 + (u1 - u0) * F.t[c][0];
@@ -1135,8 +1197,15 @@ void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
                     }
 
                     std::vector<Vertex>& dst = isTrans ? ch.meshTransparent : ch.meshOpaque;
-                    dst.push_back(vv[0]); dst.push_back(vv[1]); dst.push_back(vv[2]);
-                    dst.push_back(vv[0]); dst.push_back(vv[2]); dst.push_back(vv[3]);
+                    // Flip the split when the other diagonal is brighter so AO
+                    // does not leave a dark crease across an otherwise flat face.
+                    if (vv[0].ao + vv[2].ao > vv[1].ao + vv[3].ao) {
+                        dst.push_back(vv[1]); dst.push_back(vv[2]); dst.push_back(vv[3]);
+                        dst.push_back(vv[1]); dst.push_back(vv[3]); dst.push_back(vv[0]);
+                    } else {
+                        dst.push_back(vv[0]); dst.push_back(vv[1]); dst.push_back(vv[2]);
+                        dst.push_back(vv[0]); dst.push_back(vv[2]); dst.push_back(vv[3]);
+                    }
 
                     // Leaf frills: on air-facing faces, probabilistically add a
                     // crossed-quad "X" frill to smooth the crown/shrub silhouette.
@@ -2573,8 +2642,8 @@ bool World::loadChunkFile(int cx, int cy, int cz, Chunk& ch) const {
     if (!f) return false;
     if (fnv1a(ch.waterLevel.data(), ch.waterLevel.size()) != wchk) return false;
     ch.hasWater = false;
-    for (uint8_t lvl : ch.waterLevel) {
-        if (lvl > 0) { ch.hasWater = true; break; }
+    for (size_t i = 0; i < ch.waterLevel.size(); i++) {
+        if (ch.blocks[i] == WATER && ch.waterLevel[i] > 0) { ch.hasWater = true; break; }
     }
 
     uint32_t fchk = 0;
@@ -3214,6 +3283,17 @@ void World::ensureColumn(int cx, int cz) {
         addBorderSod(cx, cy, cz);
         m_meshQueue.push_back(it->first);
     }
+    for (int nz = -1; nz <= 1; nz++) {
+        for (int nx = -1; nx <= 1; nx++) {
+            if (nx == 0 && nz == 0) continue;
+            for (int cy = 0; cy < cfg::CHUNK_LAYERS; cy++) {
+                auto nit = m_chunks.find(chunkKey(cx + nx, cy, cz + nz));
+                if (nit == m_chunks.end()) continue;
+                nit->second.dirty = true;
+                m_meshQueue.push_front(nit->first);
+            }
+        }
+    }
 }
 
 void World::acceptSeedChunk(int cx, int cy, int cz) {
@@ -3278,8 +3358,8 @@ void World::writeAuthChunk(int cx, int cy, int cz, const uint8_t* blocks, const 
     ch.generated = true;
     ch.modified = true;
     ch.hasWater = false;
-    for (uint8_t lvl : ch.waterLevel) {
-        if (lvl > 0) { ch.hasWater = true; break; }
+    for (size_t i = 0; i < ch.waterLevel.size() && i < ch.blocks.size(); i++) {
+        if (ch.blocks[i] == WATER && ch.waterLevel[i] > 0) { ch.hasWater = true; break; }
     }
     rememberEdited(cx, cz);
     remeshChunk(cx, cy, cz);
