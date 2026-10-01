@@ -22,6 +22,96 @@ void check(bool value, const char* message) {
 }
 
 int main() {
+    check(matchmap::playableSpan(4, 64) == 2048, "full combat roster keeps the 2048 field");
+    check(matchmap::playableSpan(2, 2) == 181, "two solo teams use the shrunk field");
+    check(matchmap::playableSpan(1, 0) == matchmap::playableSpan(1, 2), "fewer than 2 players counts as 2");
+    check(matchmap::playableSpan(6, 90) == 2048, "teams above 4 and players above 64 stay at the full field");
+    check(matchmap::span() == matchmap::kFullSpan, "tests start from the full field");
+    check(matchmap::zoneColumns() == 819, "full field deploy side is 40 percent");
+    matchmap::setSpan(181);
+    check(matchmap::zoneColumns() == 72, "shrunk field deploy side stays 40 percent");
+    auto zonesOverlap = [](matchmap::Zone a, matchmap::Zone b) {
+        return a.cx0 < b.cx0 + b.columns && b.cx0 < a.cx0 + a.columns &&
+               a.cz0 < b.cz0 + b.columns && b.cz0 < a.cz0 + a.columns;
+    };
+    for (int i = 0; i < 4; ++i) {
+        matchmap::Zone zone = matchmap::combatZone(i);
+        check(zone.columns == 72, "each corner deploy square uses the 40 percent side");
+        check(matchmap::columnPlayable(zone.cx0, zone.cz0) &&
+              matchmap::columnPlayable(zone.cx0 + zone.columns - 1, zone.cz0 + zone.columns - 1),
+              "corner deploy squares stay inside the playable field");
+        for (int j = i + 1; j < 6; ++j)
+            check(!zonesOverlap(zone, matchmap::combatZone(j)), "deploy squares do not overlap");
+    }
+    check(!zonesOverlap(matchmap::combatZone(4), matchmap::combatZone(5)),
+          "the two center deploy squares do not overlap");
+    matchmap::setSpan(matchmap::kFullSpan);
+
+    std::vector<RoomTeamNet> teams(4);
+    teams[0].spectator = true;
+    std::vector<RoomPlayerNet> players(5);
+    players[0].team = 0;
+    players[1].team = 0;
+    players[2].team = 1;
+    players[3].team = 2;
+    players[4].team = -1;
+    int combatTeams = 0, combatPlayers = 0;
+    countCombatRoster(teams, players, combatTeams, combatPlayers);
+    check(combatTeams == 2 && combatPlayers == 2,
+          "spectators, unassigned players, and empty combat teams stay out of the field roster");
+    int buildingCounts[3] = {};
+    int buildingTotal = match_content::resourceBuildingTotal(2, 2, 0);
+    check(buildingTotal >= 15 && buildingTotal <= 64, "resource building total stays in range");
+    int crowded = match_content::resourceBuildingTotal(4, 64, 0);
+    check(crowded >= 40 && crowded <= 64, "a full roster raises the building minimum to 40");
+    match_content::splitResourceBuildings(17, 1, buildingCounts);
+    check(buildingCounts[0] + buildingCounts[1] + buildingCounts[2] == 17, "building types sum to the total");
+    int lo = buildingCounts[0], hi = buildingCounts[0];
+    for (int count : buildingCounts) {
+        if (count < lo) lo = count;
+        if (count > hi) hi = count;
+    }
+    check(hi - lo <= 1, "the three building types differ by at most one");
+
+    matchmap::setMatchRoster(0x1, 1, 1);
+    matchmap::setSpan(matchmap::kFullSpan);
+    World rosterWorld(91);
+    rosterWorld.setSaveEnabled(false);
+    rosterWorld.setMatchBounds(true);
+    int liveRitual = ritual::assignedRitual(1);
+    int liveX = 0, liveZ = 0;
+    check(structure::ritualAnchor(liveRitual, liveX, liveZ), "the entered team keeps its altar");
+    {
+        matchmap::Zone home = matchmap::combatZone(0);
+        int colX = matchmap::blockToCol(liveX, cfg::CHUNK_X);
+        int colZ = matchmap::blockToCol(liveZ, cfg::CHUNK_Z);
+        check(colX >= home.cx0 && colX < home.cx0 + home.columns &&
+              colZ >= home.cz0 && colZ < home.cz0 + home.columns,
+              "that altar stays inside the entered team's deploy square");
+    }
+    for (int team = 2; team <= matchmap::kCombatTeams; ++team) {
+        int absentX = 0, absentZ = 0;
+        check(!structure::ritualAnchor(ritual::assignedRitual(team), absentX, absentZ),
+              "a team that did not enter gets no altar");
+    }
+    int liveRecipe[3] = {};
+    ritual::recipeRelics(liveRitual, liveRecipe);
+    bool recipeRelic[ritual::RelicCount] = {};
+    for (int piece = 0; piece < 3; ++piece) recipeRelic[liveRecipe[piece]] = true;
+    int ruinCount = 0;
+    for (int relic = 0; relic < ritual::RelicCount; ++relic) {
+        int rx = 0, rz = 0;
+        bool present = structure::relicAnchor(relic, rx, rz);
+        if (recipeRelic[relic]) {
+            check(present, "each relic the entered ritual needs has a ruin");
+            ++ruinCount;
+        } else {
+            check(!present, "relics outside the entered rituals are not generated");
+        }
+    }
+    check(ruinCount == 3, "one team places exactly its three relic ruins");
+    matchmap::setMatchRoster(0x3F, 6, 0);
+
     check(clue_quiz::count() == 50, "clue question bank contains exactly 50 questions");
     std::unordered_set<std::string> subjects;
     std::unordered_set<std::string> prompts;
@@ -461,6 +551,19 @@ int main() {
           structure::isOfferingCell(matchWorld, assignedAltar, altarX,
                                     matchWorld.surfaceHeight(altarX, altarZ) + 1, altarZ),
           "painted ritual altar remains the authoritative offering site");
+    {
+        matchmap::Zone home = matchmap::combatZone(0);
+        int altarColX = matchmap::blockToCol(altarX, cfg::CHUNK_X);
+        int altarColZ = matchmap::blockToCol(altarZ, cfg::CHUNK_Z);
+        check(altarColX >= home.cx0 && altarColX < home.cx0 + home.columns &&
+              altarColZ >= home.cz0 && altarColZ < home.cz0 + home.columns,
+              "the team's ritual altar is inside its deploy square");
+        int homeX = home.cx0 * cfg::CHUNK_X + home.columns * cfg::CHUNK_X / 2;
+        int homeZ = home.cz0 * cfg::CHUNK_Z + home.columns * cfg::CHUNK_Z / 2;
+        int dx = altarX - homeX;
+        int dz = altarZ - homeZ;
+        check(dx * dx + dz * dz >= 160 * 160, "the altar stays clear of the spawn buildings");
+    }
     altarY = matchWorld.surfaceHeight(altarX, altarZ);
     check(matchWorld.getBlock(altarX, altarY, altarZ) == BRICK &&
           matchWorld.getBlock(altarX, altarY + 1, altarZ) == AIR,

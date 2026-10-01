@@ -700,6 +700,13 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     }
     if (seed == 0) seed = 1;
 
+    int combatTeams = 0;
+    int combatPlayers = 0;
+    uint8_t combatMask = 0;
+    countCombatRoster(teams, roster, combatTeams, combatPlayers, &combatMask);
+    matchmap::setMatchRoster(combatMask, combatTeams, combatPlayers);
+    matchmap::setSpan(matchmap::playableSpan(combatTeams, combatPlayers));
+
     World world(seed);
     world.setSaveEnabled(false);
     world.reset(seed);
@@ -712,7 +719,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     int sh = world.surfaceHeight(8, 8);
     Vec3 base{ 8.5f * S, (float)(sh + 3) * S, 8.5f * S };
     char line[128];
-    snprintf(line, sizeof(line), "seed %u port %u", seed, (unsigned)port);
+    snprintf(line, sizeof(line), "seed %u port %u span %d combat teams %d players %d",
+             seed, (unsigned)port, matchmap::span(), combatTeams, combatPlayers);
     slog(log, line);
 
     SOCKET listenSock = INVALID_SOCKET;
@@ -806,7 +814,6 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     building_loot::Spawner lootSpawner(world, seed);
 
     bool populatedTeams[matchmap::kCombatTeams]{};
-    bool stonehengesPlaced = false;
     std::array<bool, ritual::RelicCount> defeatedGuardians{};
     auto finishGuardian = [&](int relic, int gx, int gy, int gz) {
         if (relic < 0 || relic >= ritual::RelicCount) return;
@@ -995,8 +1002,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                     int bz = (int)std::floor(base.z / S);
                     if (!c.landed) {
                         matchmap::Zone zone = matchmap::combatZone(c.team - 1);
-                        bx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                        bz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                        bx = zone.cx0 * cfg::CHUNK_X + (zone.columns * cfg::CHUNK_X) / 2;
+                        bz = zone.cz0 * cfg::CHUNK_Z + (zone.columns * cfg::CHUNK_Z) / 2;
                     }
                     int by = world.surfaceHeight(bx, bz);
                     float ox = 0.0f, oz = 0.0f;
@@ -1022,30 +1029,6 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                             world, lootSpawner, clueDirector, seed, c.team);
                         if (!populatedTeams[c.team - 1])
                             slog(log, "match content placement failed");
-                    }
-                    // Stonehenge is shared world content; the team's rooms,
-                    // clues and ritual sites above are populated independently.
-                    if (!stonehengesPlaced && !c.spectator &&
-                        c.team >= 1 && c.team <= matchmap::kCombatTeams) {
-                        for (int shIdx = 0; shIdx < 3; ++shIdx) {
-                            int wx = bx, wz = bz;
-                            if (shIdx == 0) {
-                                wx += 70;
-                                wz -= 70;
-                            } else {
-                                int zoneIdx = (shIdx == 1 ? 3 : 14) % matchmap::kCombatTeams;
-                                matchmap::Zone zone = matchmap::combatZone(zoneIdx);
-                                wx = zone.cx0 * cfg::CHUNK_X +
-                                     (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                                wz = zone.cz0 * cfg::CHUNK_Z +
-                                     (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
-                                if (shIdx == 1) { wx -= 50; wz += 50; }
-                                else { wx += 50; wz += 50; }
-                            }
-                            int wy = 0;
-                            structure::paintStonehenge(world, wx, wy, wz, 0);
-                        }
-                        stonehengesPlaced = true;
                     }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
@@ -1344,7 +1327,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
             for (SClient& c : clients) {
                 if (!c.known || c.sentWelcome) continue;
                 c.conn.send((uint16_t)RoomMsg::PlayWelcome,
-                            encodePlayWelcome(c.id, seed, c.x, c.y, c.z, c.spectator, c.team));
+                            encodePlayWelcome(c.id, seed, c.x, c.y, c.z, c.spectator, c.team,
+                                              matchmap::span(), matchmap::activeTeamMask()));
                 c.sentWelcome = true;
                 snprintf(line, sizeof(line), "welcome %u %s", c.id, c.name.c_str());
                 slog(log, line);

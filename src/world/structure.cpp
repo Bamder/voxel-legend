@@ -263,14 +263,6 @@ void roll(uint32_t seed) {
     for (PoseSlot& pose : g_pose) pose = {};
     g_sites.clear();
     for (int i = 0; i < ritual::RelicCount; i++) g_hp[i] = kGuardianHp[i];
-    int c0 = matchmap::playMin() + 8;
-    int c1 = matchmap::playMax() - 8;
-    int span = c1 - c0 + 1;
-    if (span < 8) {
-        c0 = matchmap::playMin();
-        c1 = matchmap::playMax();
-        span = c1 - c0 + 1;
-    }
     uint32_t rng = seed ? seed : 1u;
     auto next = [&]() {
         rng = rng * 1664525u + 1013904223u;
@@ -279,40 +271,143 @@ void roll(uint32_t seed) {
     std::vector<std::pair<int, int>> pts;
     auto far = [&](int x, int z) {
         for (const auto& p : pts) {
-            int dx = p.first - x;
-            int dz = p.second - z;
-            if (dx * dx + dz * dz < 96 * 96) return false;
+            long long dx = (long long)p.first - x;
+            long long dz = (long long)p.second - z;
+            if (dx * dx + dz * dz < 96LL * 96LL) return false;
         }
         return true;
     };
-    int need = ritual::RelicCount + ritual::kRitualCount;
-    int guard = 0;
-    while ((int)pts.size() < need && guard < 20000) {
-        guard++;
-        int colx = c0 + (int)(next() % (uint32_t)span);
-        int colz = c0 + (int)(next() % (uint32_t)span);
-        int x = colx * cfg::CHUNK_X + (int)(next() % (uint32_t)cfg::CHUNK_X);
-        int z = colz * cfg::CHUNK_Z + (int)(next() % (uint32_t)cfg::CHUNK_Z);
-        if (!far(x, z)) continue;
-        pts.push_back({ x, z });
+    // One altar per team that actually entered, and only inside that team's
+    // deploy square. Teams that are not in the match get no altar.
+    int ritualZone[ritual::kRitualCount];
+    bool ritualLive[ritual::kRitualCount] = {};
+    for (int i = 0; i < ritual::kRitualCount; i++) ritualZone[i] = -1;
+    for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
+        if (!matchmap::teamInMatch(team)) continue;
+        int assigned = ritual::assignedRitual(team);
+        if (assigned < 0 || assigned >= ritual::kRitualCount) continue;
+        ritualZone[assigned] = team - 1;
+        ritualLive[assigned] = true;
     }
-    int n = (int)pts.size();
-    int items = ritual::RelicCount;
-    if (items > n) items = n;
-    for (int i = 0; i < items; i++) {
-        Site s;
-        s.cx = pts[(size_t)i].first;
-        s.cz = pts[(size_t)i].second;
-        s.kind = 0;
-        s.id = i;
-        g_sites.push_back(s);
+    std::pair<int, int> altars[ritual::kRitualCount] = {};
+    for (int ritualId = 0; ritualId < ritual::kRitualCount; ++ritualId) {
+        if (!ritualLive[ritualId]) continue;
+        matchmap::Zone zone = matchmap::combatZone(ritualZone[ritualId]);
+        if (zone.columns < 1) continue;
+        const int x0 = zone.cx0 * cfg::CHUNK_X;
+        const int z0 = zone.cz0 * cfg::CHUNK_Z;
+        const int side = std::max(1, zone.columns * cfg::CHUNK_X);
+        const int centerX = x0 + side / 2;
+        const int centerZ = z0 + side / 2;
+        int inset = 16;
+        if (inset * 2 >= side) inset = std::max(0, side / 4);
+        const int loX = x0 + inset;
+        const int loZ = z0 + inset;
+        int spanX = side - inset * 2;
+        int spanZ = side - inset * 2;
+        if (spanX < 1) spanX = side;
+        if (spanZ < 1) spanZ = side;
+        int minR = 160;
+        int maxR = 480;
+        if (minR >= side / 2) minR = std::max(32, side / 5);
+        if (maxR <= minR) maxR = minR + std::max(32, side / 5);
+        int chosenX = centerX + minR;
+        int chosenZ = centerZ;
+        bool placed = false;
+        const int radiusSpan = std::max(1, maxR - minR + 1);
+        for (int attempt = 0; attempt < 80 && !placed; ++attempt) {
+            int radius = minR + (int)(next() % (uint32_t)radiusSpan);
+            double ang = (next() % 360u) * 0.017453292519943295;
+            int x = centerX + (int)std::lround(std::cos(ang) * radius);
+            int z = centerZ + (int)std::lround(std::sin(ang) * radius);
+            if (x < loX) x = loX;
+            if (z < loZ) z = loZ;
+            if (x > loX + spanX - 1) x = loX + spanX - 1;
+            if (z > loZ + spanZ - 1) z = loZ + spanZ - 1;
+            int dx = x - centerX;
+            int dz = z - centerZ;
+            if (dx * dx + dz * dz < minR * minR) continue;
+            if (!far(x, z)) continue;
+            chosenX = x;
+            chosenZ = z;
+            placed = true;
+        }
+        if (!placed) {
+            chosenX = std::min(loX + spanX - 1, std::max(loX, centerX + minR));
+            chosenZ = std::min(loZ + spanZ - 1, std::max(loZ, centerZ));
+        }
+        altars[ritualId] = { chosenX, chosenZ };
+        pts.push_back(altars[ritualId]);
     }
-    int rituals = ritual::kRitualCount;
-    if (items + rituals > n) rituals = n - items;
-    for (int i = 0; i < rituals; i++) {
+    // Every relic required by an entered team's ritual gets one ruin. Shared
+    // relics are not repeated. The sites sit on a jittered grid so they spread
+    // across the playable field instead of clumping in one corner.
+    bool needRelic[ritual::RelicCount] = {};
+    int relicIds[ritual::RelicCount];
+    int relicN = 0;
+    for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
+        if (!matchmap::teamInMatch(team)) continue;
+        int assigned = ritual::assignedRitual(team);
+        int recipe[3] = {-1, -1, -1};
+        ritual::recipeRelics(assigned, recipe);
+        for (int piece = 0; piece < 3; ++piece) {
+            int id = recipe[piece];
+            if (id < 0 || id >= ritual::RelicCount || needRelic[id]) continue;
+            needRelic[id] = true;
+            relicIds[relicN++] = id;
+        }
+    }
+    if (relicN > 0) {
+        int cols = (int)std::ceil(std::sqrt((double)relicN));
+        if (cols < 1) cols = 1;
+        int rows = (relicN + cols - 1) / cols;
+        int block0 = (matchmap::playMin() + 2) * cfg::CHUNK_X;
+        int block1 = (matchmap::playMax() - 1) * cfg::CHUNK_X;
+        if (block1 <= block0) {
+            block0 = matchmap::playMin() * cfg::CHUNK_X;
+            block1 = matchmap::playMax() * cfg::CHUNK_X;
+        }
+        int width = std::max(1, block1 - block0);
+        int cellW = std::max(1, width / cols);
+        int cellH = std::max(1, width / rows);
+        for (int i = 0; i < relicN; ++i) {
+            int col = i % cols;
+            int row = i / cols;
+            int cx = block0 + col * cellW + cellW / 2;
+            int cz = block0 + row * cellH + cellH / 2;
+            int jx = cellW / 5;
+            int jz = cellH / 5;
+            if (jx < 1) jx = 1;
+            if (jz < 1) jz = 1;
+            int x = cx;
+            int z = cz;
+            bool placed = false;
+            for (int attempt = 0; attempt < 8 && !placed; ++attempt) {
+                int ox = (int)(next() % (uint32_t)(jx * 2 + 1)) - jx;
+                int oz = (int)(next() % (uint32_t)(jz * 2 + 1)) - jz;
+                x = cx + ox;
+                z = cz + oz;
+                if (x < block0) x = block0;
+                if (z < block0) z = block0;
+                if (x > block1) x = block1;
+                if (z > block1) z = block1;
+                if (far(x, z)) placed = true;
+            }
+            if (!placed) { x = cx; z = cz; }
+            Site s;
+            s.cx = x;
+            s.cz = z;
+            s.kind = 0;
+            s.id = relicIds[i];
+            g_sites.push_back(s);
+            pts.push_back({ x, z });
+        }
+    }
+    for (int i = 0; i < ritual::kRitualCount; i++) {
+        if (!ritualLive[i]) continue;
         Site s;
-        s.cx = pts[(size_t)(items + i)].first;
-        s.cz = pts[(size_t)(items + i)].second;
+        s.cx = altars[i].first;
+        s.cz = altars[i].second;
         s.kind = 1;
         s.id = i;
         g_sites.push_back(s);
@@ -791,6 +886,32 @@ void collectRoomGuardians(std::vector<GuardianSync>& out) {
         g.hp = s.looted ? 0 : g_hp[s.id];
         out.push_back(g);
     }
+}
+
+bool relicAnchor(int relic, int& x, int& z) {
+    if (relic < 0 || relic >= ritual::RelicCount) return false;
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        x = s.cx;
+        z = s.cz;
+        return true;
+    }
+    return false;
+}
+
+bool anchorRelicRuin(World& world, int relic) {
+    if (relic < 0 || relic >= ritual::RelicCount) return false;
+    for (Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic) continue;
+        int floor = 0;
+        if (!paintStonehenge(world, s.cx, floor, s.cz, 0)) return false;
+        if (floor < 1) floor = 1;
+        if (floor > cfg::WORLD_H - 6) floor = cfg::WORLD_H - 6;
+        world.setBlock(s.cx, floor, s.cz, (uint8_t)GUARDIAN_CORE, true, false);
+        s.ground = floor;
+        return true;
+    }
+    return false;
 }
 
 bool guardianHome(World& world, int relic, Vec3& out) {

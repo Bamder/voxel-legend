@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2610010002u;
+constexpr uint32_t kRoomProto = 2610010004u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -40,7 +40,7 @@ enum class RoomMsg : uint16_t {
     JoinTeam = 4,    // i32 team
     MatchStart = 5,  // empty; guests reconnect to the dedicated server
     PlayHello = 6,   // u32 proto, string name
-    PlayWelcome = 7, // id, seed, spawn, spectator, team
+    PlayWelcome = 7, // id, seed, spawn, spectator, team, playable span, team mask
     PlayInput = 8,   // pose, avatar inputs, block edits, chunk resync asks
     PlayDelta = 9,   // server tick + player state + chunk baseline / delta / hash
     Deploy = 10,     // client: deploy pin; action 3 requests travel in local clue QA only
@@ -79,6 +79,29 @@ struct RoomPlayerNet {
     int team = -1;
     bool host = false;
 };
+
+// Combat roster for the field-size formula. Spectator teams, anyone on them,
+// and players who never joined a team are left out. An empty combat team does
+// not add a front.
+inline void countCombatRoster(const std::vector<RoomTeamNet>& teams,
+                              const std::vector<RoomPlayerNet>& players,
+                              int& combatTeams, int& combatPlayers, uint8_t* teamMask = nullptr) {
+    combatTeams = 0;
+    combatPlayers = 0;
+    if (teamMask) *teamMask = 0;
+    bool seen[16] = {};
+    for (const RoomPlayerNet& p : players) {
+        if (p.team < 0 || (size_t)p.team >= teams.size() || p.team >= 16) continue;
+        if (teams[(size_t)p.team].spectator) continue;
+        ++combatPlayers;
+        if (!seen[p.team]) {
+            seen[p.team] = true;
+            ++combatTeams;
+            if (teamMask && p.team >= 1 && p.team <= 6)
+                *teamMask = (uint8_t)(*teamMask | (uint8_t)(1u << (p.team - 1)));
+        }
+    }
+}
 
 struct BlockEditNet {
     int x = 0, y = 0, z = 0;
@@ -481,7 +504,7 @@ inline bool decodeDeploySync(const uint8_t* p, const uint8_t* end, std::vector<D
 }
 
 inline std::vector<uint8_t> encodePlayWelcome(uint32_t id, uint32_t seed, float x, float y, float z,
-                                              bool spectator, int team) {
+                                              bool spectator, int team, int span, uint8_t teamMask) {
     Buf b;
     b.u32(id);
     b.u32(seed);
@@ -490,19 +513,26 @@ inline std::vector<uint8_t> encodePlayWelcome(uint32_t id, uint32_t seed, float 
     b.f32(z);
     b.u8(spectator ? 1 : 0);
     b.i32(team);
+    b.i32(span);
+    b.u8(teamMask);
     return b.data();
 }
 
 inline bool decodePlayWelcome(const uint8_t* p, const uint8_t* end, uint32_t& id, uint32_t& seed,
-                              float& x, float& y, float& z, bool& spectator, int& team) {
+                              float& x, float& y, float& z, bool& spectator, int& team, int& span,
+                              uint8_t& teamMask) {
     uint8_t spec = 0;
     int32_t tm = 0;
+    int32_t columns = 0;
+    uint8_t mask = 0;
     if (!Buf::u32(p, end, id) || !Buf::u32(p, end, seed) || !Buf::f32(p, end, x) ||
         !Buf::f32(p, end, y) || !Buf::f32(p, end, z) || !Buf::u8(p, end, spec) ||
-        !Buf::i32(p, end, tm))
+        !Buf::i32(p, end, tm) || !Buf::i32(p, end, columns) || !Buf::u8(p, end, mask))
         return false;
     spectator = spec != 0;
     team = (int)tm;
+    span = (int)columns;
+    teamMask = mask;
     return true;
 }
 

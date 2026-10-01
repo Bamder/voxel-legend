@@ -4,18 +4,58 @@
 #include "../core/config.hpp"
 #include "../core/math.hpp"
 
-// Multiplayer field: 2048×2048 playable chunk columns, plus one outer ring.
+// Multiplayer field: a square of playable chunk columns, plus one outer ring.
 // Gray fog starts on the first block of that ring, is opaque at half its depth,
-// and the outer face stops travel.
+// and the outer face stops travel. The side length follows the combat roster.
 namespace matchmap {
 
-inline constexpr int kSpan = 2048;
+inline constexpr int kFullSpan = 2048;
 inline constexpr int kRim = 1;
+inline int g_span = kFullSpan;
+// Bit 0 is combat team 1. Default keeps every slot so a match that has not
+// announced its roster still has a site for each team.
+inline uint8_t g_activeTeams = 0x3F;
+inline int g_rosterTeams = 6;
+inline int g_rosterPlayers = 0;
 
-inline int playMin() { return -kSpan / 2; }          // -8
-inline int playMax() { return playMin() + kSpan - 1; } // 7
-inline int rimMin() { return playMin() - kRim; }     // -9
-inline int rimMax() { return playMax() + kRim; }     // 8
+inline int span() { return g_span; }
+inline void setMatchRoster(uint8_t teamMask, int combatTeams, int combatPlayers) {
+    g_activeTeams = teamMask;
+    if (combatTeams < 0) combatTeams = 0;
+    if (combatPlayers < 0) combatPlayers = 0;
+    g_rosterTeams = combatTeams;
+    g_rosterPlayers = combatPlayers;
+}
+inline uint8_t activeTeamMask() { return g_activeTeams; }
+inline int rosterTeams() { return g_rosterTeams; }
+inline int rosterPlayers() { return g_rosterPlayers; }
+inline void setSpan(int chunkColumns) {
+    if (chunkColumns < 1) chunkColumns = 1;
+    if (chunkColumns > kFullSpan) chunkColumns = kFullSpan;
+    g_span = chunkColumns;
+}
+
+// Side length in chunk columns.
+// n is combat players, clamped to [2, 64]. t is combat teams, clamped to [1, 4].
+// Full roster (4 teams, 64 players) stays at kFullSpan.
+inline int playableSpan(int combatTeams, int combatPlayers) {
+    int t = combatTeams;
+    int n = combatPlayers;
+    if (t < 1) t = 1;
+    if (t > 4) t = 4;
+    if (n < 2) n = 2;
+    if (n > 64) n = 64;
+    const double side = (double)kFullSpan * std::pow(n / 64.0, 0.65) * std::pow(t / 4.0, 0.25);
+    int columns = (int)std::lround(side);
+    if (columns < 1) columns = 1;
+    if (columns > kFullSpan) columns = kFullSpan;
+    return columns;
+}
+
+inline int playMin() { return -span() / 2; }
+inline int playMax() { return playMin() + span() - 1; }
+inline int rimMin() { return playMin() - kRim; }
+inline int rimMax() { return playMax() + kRim; }
 
 inline bool columnPlayable(int cx, int cz) {
     return cx >= playMin() && cx <= playMax() && cz >= playMin() && cz <= playMax();
@@ -27,9 +67,16 @@ inline bool columnRim(int cx, int cz) {
     return columnInside(cx, cz) && !columnPlayable(cx, cz);
 }
 
-// Six combat teams. Each owns one 4×4 chunk-column corner of the playable field.
+// Six combat team slots. The first four each own one corner square whose side
+// is 40% of the playable field. The last two use the central gap.
 inline constexpr int kCombatTeams = 6;
-inline constexpr int kZoneChunks = 4;
+
+inline bool teamInMatch(int team) {
+    if (team < 1 || team > kCombatTeams) return false;
+    return (g_activeTeams & (uint8_t)(1u << (team - 1))) != 0;
+}
+inline constexpr double kZoneSide = 0.40;
+inline constexpr int kDeployPreview = 512;
 inline constexpr float kDeploySeconds = 10.0f;
 inline constexpr float kDeployDeathSeconds = 20.0f;
 inline constexpr float kDeployFade = 1.6f;
@@ -37,7 +84,20 @@ inline constexpr float kDeployFade = 1.6f;
 struct Zone {
     int cx0 = 0;
     int cz0 = 0;
+    int columns = 0;
 };
+
+// Deploy square side, in chunk columns. Opposite corners stay apart.
+inline int zoneColumns() {
+    int columns = (int)std::lround((double)span() * kZoneSide);
+    if (columns < 1) columns = 1;
+    int limit = span() / 2;
+    if (limit < 1) limit = 1;
+    if (columns > limit) columns = limit;
+    if (span() > 1 && columns * 2 >= span()) columns = (span() - 1) / 2;
+    if (columns < 1) columns = 1;
+    return columns;
+}
 
 inline int blockToCol(int block, int chunk) {
     int q = block / chunk;
@@ -49,29 +109,27 @@ inline int blockToCol(int block, int chunk) {
 inline Zone combatZone(int index) {
     if (index < 0) index = 0;
     if (index >= kCombatTeams) index = kCombatTeams - 1;
-    // 6-team layout: 3 columns x 2 rows
-    // 2 | 4 | 3
-    //---+---+---
-    // 0 | 5 | 1
-    int cols = 3;  // number of columns
-    int col = index % cols;
-    int row = index / cols;
-    // Calculate x side: 0=left, 1=right, 2=center
-    int xSide;
-    if (col == 0) xSide = playMin();
-    else if (col == 2) xSide = playMax() - (kZoneChunks - 1);
-    else xSide = (playMin() + playMax() + 1 - kZoneChunks) / 2;
-    // Calculate z side: 0=bottom, 1=top
-    int zSide = row == 0 ? playMin() : (playMax() - (kZoneChunks - 1));
-    return { xSide, zSide };
+    const int columns = zoneColumns();
+    // Teams 0–3: four corners. x side is index & 1, z side is index & 2.
+    if (index < 4) {
+        int xSide = (index & 1) ? playMax() - (columns - 1) : playMin();
+        int zSide = (index & 2) ? playMax() - (columns - 1) : playMin();
+        return { xSide, zSide, columns };
+    }
+    // Teams 4–5 sit in the gap between the corner squares.
+    const int gap = std::max(1, span() - 2 * columns);
+    int xSide = playMin() + columns;
+    int zSide = index == 4 ? playMin() : playMax() - (gap - 1);
+    return { xSide, zSide, gap };
 }
 
 inline bool blockInZone(int combatIndex, int bx, int bz) {
     if (combatIndex < 0 || combatIndex >= kCombatTeams) return false;
     Zone z = combatZone(combatIndex);
+    if (z.columns < 1) return false;
     int cx = blockToCol(bx, cfg::CHUNK_X);
     int cz = blockToCol(bz, cfg::CHUNK_Z);
-    return cx >= z.cx0 && cx < z.cx0 + kZoneChunks && cz >= z.cz0 && cz < z.cz0 + kZoneChunks;
+    return cx >= z.cx0 && cx < z.cx0 + z.columns && cz >= z.cz0 && cz < z.cz0 + z.columns;
 }
 
 // 0 on the playable side of the ring, 1 on the outer face.

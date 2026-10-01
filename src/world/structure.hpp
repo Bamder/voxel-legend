@@ -80,6 +80,9 @@ bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach
 bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, GuardianSpan& out);
 // Loads the match guardian's home and returns the location used by clue routes.
 bool guardianHome(World& world, int relic, Vec3& out);
+bool relicAnchor(int relic, int& x, int& z);
+// Stonehenge ruin at the relic site, with the guardian core kept on its floor.
+bool anchorRelicRuin(World& world, int relic);
 const char* guardianAppearance(int relic);
 
 // Free-explore trial chamber: 255×128×255 blocks (the world is only 128 blocks tall).
