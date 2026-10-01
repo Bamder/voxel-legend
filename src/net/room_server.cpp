@@ -817,6 +817,9 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     bool teamWanted[matchmap::kCombatTeams]{};
     bool contentStarted = false;
     bool contentLogged = false;
+    bool matchEnded = false;
+    uint8_t matchVictorTeam = 0;
+    uint8_t matchVictorRitual = 0;
     std::array<bool, ritual::RelicCount> defeatedGuardians{};
     auto finishGuardian = [&](int relic, int gx, int gy, int gz) {
         if (relic < 0 || relic >= ritual::RelicCount) return;
@@ -1039,6 +1042,10 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
                     if (!decodePlayInput(p, end, in)) continue;
+                    if (matchEnded) {
+                        c.body.input = {};
+                        continue;
+                    }
                     if (!room_body::accept(c.body, in, serverTick)) continue;
                     c.yaw = c.body.player.yaw;
                     c.pitch = c.body.player.pitch;
@@ -1229,6 +1236,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                         queueBase(c, columnKey(ask.cx, ask.cz), true);
                     }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::ClueAnswer) {
+                    if (matchEnded) continue;
                     uint32_t challengeId = 0;
                     uint8_t option = 0;
                     if (!decodeClueAnswer(p, end, challengeId, option) ||
@@ -1253,6 +1261,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                     uint8_t action = 0;
                     int bx = 0, bz = 0;
                     if (!decodeDeploy(p, end, action, bx, bz)) continue;
+                    if (matchEnded) continue;
                     if (c.spectator || c.team < 1 || c.team > matchmap::kCombatTeams) continue;
                     if (action == 3) {
                         if (!clueQa || !c.qaHost || !c.landed || c.fade > 0.0f ||
@@ -1376,6 +1385,26 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
             }
         }
 
+        if (worldReady && contentLogged && !matchEnded) {
+            for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
+                if ((matchmap::activeTeamMask() & (uint8_t)(1u << (team - 1))) == 0) continue;
+                int rid = ritual::assignedRitual(team);
+                if (rid < 0 || !structure::offeringReady(world, rid)) continue;
+                matchEnded = true;
+                matchVictorTeam = (uint8_t)team;
+                matchVictorRitual = (uint8_t)rid;
+                for (SClient& c : clients) {
+                    c.body.input = {};
+                    c.body.player.vel = {};
+                    combat::cancelMelee(c.melee);
+                    combat::cancelMelee(c.guardianMelee);
+                }
+                snprintf(line, sizeof(line), "match end team %d ritual %d", team, rid);
+                slog(log, line);
+                break;
+            }
+        }
+
         if (worldReady) {
             long long tnow = nowMs();
             float dt = (float)(tnow - tickClock) / 1000.0f;
@@ -1438,8 +1467,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                                  (c.guardianMelee.pending || c.guardianMelee.action))
                             swingItem = c.guardianMelee.item;
                         c.body.player.swingStrafe = (swingClock && loot::isTool(swingItem)) ? 0.5f : 1.0f;
-                        room_body::tick(c.body, world, serverTick, c.landed, c.mineCharge > 0,
-                                        arcane::frozen(c.frozen, serverTick));
+                        room_body::tick(c.body, world, serverTick, c.landed && !matchEnded, c.mineCharge > 0,
+                                        arcane::frozen(c.frozen, serverTick) || matchEnded);
                         const Player& p = c.body.player;
                         c.x = p.pos.x; c.y = p.pos.y; c.z = p.pos.z;
                         c.vx = p.vel.x; c.vz = p.vel.z;
@@ -1985,6 +2014,9 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                         if (!still) d.removed.push_back(old);
                     }
                     c.announced.swap(visible);
+                    if (matchEnded)
+                        c.conn.send((uint16_t)RoomMsg::MatchEnd,
+                                    encodeMatchEnd(matchVictorTeam, matchVictorRitual));
                     c.conn.send((uint16_t)RoomMsg::PlayDelta, encodePlayDelta(d));
                     c.conn.pump();
                 }

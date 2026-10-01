@@ -1448,6 +1448,12 @@ int main(int argc, char** argv) {
     float loadShown = 0.0f;
     float lobbyBroadcastAccum = 0.0f;
     bool lobbyDirty = false;
+    float lobbyCooldown = 0.0f;
+    int guestLobbyCooldown = 0;
+    bool lobbyReturning = false;
+    bool lobbyRebind = false;
+    float lobbyRetryAt = 0.0f;
+    std::vector<std::pair<std::string, int>> lobbySeatMemory;
     float roomNetAccum = 0.0f;
     uint8_t roomMovement = 0;
     uint32_t roomInventoryRevision = 0, roomLayoutNext = 0, roomLayoutPending = 0;
@@ -1509,6 +1515,15 @@ int main(int argc, char** argv) {
     int storyIndex = 0;
     int storyPhase = 0;
     float storyAlpha = 0.0f;
+    bool endingOpen = false;
+    bool endingFinished = false;
+    int endingPage = 0;
+    int endingPhase = 0;
+    float endingCover = 0.0f;
+    float endingText = 0.0f;
+    int endingTeam = 0;
+    int endingRitual = -1;
+    float endingR = 1.0f, endingG = 1.0f, endingB = 1.0f;
     bool structurePainted = false;
     bool structurePicker = false;
     bool structureNaming = false;
@@ -1752,6 +1767,12 @@ int main(int argc, char** argv) {
         deployDeath = false;
         storyShown = false;
         storyOpen = false;
+        endingOpen = false;
+        endingFinished = false;
+        endingPage = 0;
+        endingPhase = 0;
+        endingCover = 0.0f;
+        endingText = 0.0f;
         guideOpen = false;
         clueOpen = false;
         clueQuiz = {};
@@ -1784,6 +1805,11 @@ int main(int argc, char** argv) {
         ui.dummyActive = false;
         g_textTarget = nullptr;
         ui.menuMessage.clear();
+        lobbyCooldown = 0.0f;
+        guestLobbyCooldown = 0;
+        lobbyReturning = false;
+        lobbyRebind = false;
+        lobbySeatMemory.clear();
     };
 
     const float kTeamCols[8][3] = {
@@ -1817,6 +1843,11 @@ int main(int argc, char** argv) {
         roomSession = false;
         spectating = false;
         lobbyDirty = true;
+        lobbyCooldown = 0.0f;
+        guestLobbyCooldown = 0;
+        lobbyReturning = false;
+        lobbyRebind = false;
+        lobbySeatMemory.clear();
         appScreen = AppScreen::RoomLobby;
         ui.appScreen = AppScreen::RoomLobby;
         ui.menuMessage.clear();
@@ -1930,6 +1961,7 @@ int main(int argc, char** argv) {
             roomTeams.push_back(v);
         }
         uint32_t me = lobbyGuest.localId();
+        guestLobbyCooldown = (int)lobbyGuest.startCooldown();
         roomPlayers.clear();
         for (const RoomPlayerNet& p : players) {
             RoomPlayerView v;
@@ -2072,9 +2104,146 @@ int main(int argc, char** argv) {
         gameTick = 0;
         roomNetAccum = 0.0f;
         if (!spectating && team >= 1 && team <= matchmap::kCombatTeams) openDeploy(false);
+        endingOpen = false;
+        endingPage = 0;
+        endingPhase = 0;
+        endingCover = 0.0f;
+        endingText = 0.0f;
+    };
+    auto beginEnding = [&](int team, int ritual) {
+        if (endingOpen || team < 1 || ritual < 0) return;
+        endingOpen = true;
+        endingTeam = team;
+        endingRitual = ritual;
+        endingPage = 0;
+        endingPhase = 0;
+        endingCover = 0.0f;
+        endingText = 0.0f;
+        storyOpen = false;
+        deploying = false;
+        paused = false;
+        settingsOpen = false;
+        inventoryOpen = false;
+        guideOpen = false;
+        clueOpen = false;
+        clueQuiz = {};
+        clueQuizSubmitting = false;
+        targetPanel = -1;
+        debugMenuOpen = false;
+        ritualDone = true;
+        player.vel = { 0, 0, 0 };
+        if (team < (int)roomTeams.size()) {
+            endingR = roomTeams[(size_t)team].r;
+            endingG = roomTeams[(size_t)team].g;
+            endingB = roomTeams[(size_t)team].b;
+        } else {
+            int i = (team - 1) % 8;
+            endingR = kTeamCols[i][0];
+            endingG = kTeamCols[i][1];
+            endingB = kTeamCols[i][2];
+        }
+    };
+    auto returnToLobby = [&]() {
+        lobbySeatMemory.clear();
+        for (const RoomPlayerView& p : roomPlayers)
+            if (!p.local) lobbySeatMemory.push_back({ p.name, p.team });
+        roomPlayers.erase(std::remove_if(roomPlayers.begin(), roomPlayers.end(),
+                                         [](const RoomPlayerView& p) { return !p.local; }),
+                          roomPlayers.end());
+        bool host = roomHost;
+        std::string addr = roomHostAddr;
+        int port = roomPort;
+        gameClient.close();
+        roomProc.kill();
+        lobbyGuest.close();
+        g_roomRecord = false;
+        g_roomEdits.clear();
+        g_roomBark.clear();
+        g_roomMines.clear();
+        g_treeResync = false;
+        world.setLocalTrees(true);
+        remoteHist.clear();
+        selfHist.clear();
+        remotes.clear();
+        roomTick = 0;
+        roomTickInit = false;
+        selfShownOk = false;
+        roomCameraOffset = { 0, 0, 0 };
+        chunkNet.clear();
+        resyncAsk.clear();
+        loadSeedApplied = false;
+        loadFailed = false;
+        roomSession = false;
+        spectating = false;
+        deploying = false;
+        deployDeath = false;
+        storyShown = false;
+        storyOpen = false;
+        endingOpen = false;
+        endingFinished = false;
+        endingPage = 0;
+        endingPhase = 0;
+        endingCover = 0.0f;
+        endingText = 0.0f;
+        guideOpen = false;
+        clueOpen = false;
+        clueQuiz = {};
+        clueQuizSubmitting = false;
+        guidePage = 0;
+        ui.noteOpen = false;
+        ui.storyOpen = false;
+        ui.endingOpen = false;
+        deployPins.clear();
+        paused = false;
+        settingsOpen = false;
+        inventoryOpen = false;
+        targets.clear();
+        targetPanel = -1;
+        debugMenuOpen = false;
+        player = Player();
+        carry.clear();
+        player.yaw = 0.4f;
+        player.pitch = -0.15f;
+        world.reset(seed);
+        world.setSaveEnabled(false);
+        matchmap::setMatchRoster(0x3F, 6, 0);
+        matchmap::setSpan(matchmap::kFullSpan);
+        roomHost = host;
+        roomHostAddr = addr.empty() ? "127.0.0.1" : addr;
+        roomPort = port;
+        ui.roomPort = port;
+        ui.roomPortText = std::to_string(port);
+        ui.portFieldActive = false;
+        g_textTarget = nullptr;
+        g_textDigits = false;
+        lobbyCooldown = 10.0f;
+        guestLobbyCooldown = 10;
+        lobbyDirty = true;
+        lobbyBroadcastAccum = 0.0f;
+        appScreen = AppScreen::RoomLobby;
+        ui.appScreen = AppScreen::RoomLobby;
+        firstLook = true;
+        if (host) {
+            lobbyReturning = false;
+            std::string err;
+            if (!lobbyHost.open((uint16_t)roomPort, err)) {
+                lobbyRebind = true;
+                ui.menuMessage = "正在恢复房间";
+            } else {
+                lobbyRebind = false;
+                ui.menuMessage.clear();
+            }
+        } else {
+            lobbyHost.close();
+            lobbyReturning = true;
+            lobbyRetryAt = 0.0f;
+            lobbyRebind = false;
+            ui.menuMessage = "正在返回房间";
+        }
     };
     auto startRoom = [&]() {
         if (!roomHost) return;
+        if (lobbyCooldown > 0.0f) return;
         if ((int)roomPlayers.size() < kRoomMinPlayers) return;
         std::string path = std::string(saves::kRoot) + "/room_handoff.bin";
         std::string err;
@@ -2095,13 +2264,32 @@ int main(int argc, char** argv) {
         beginLoading("127.0.0.1");
     };
     auto pollRoom = [&](float frameDt) {
+        if (appScreen == AppScreen::RoomLobby && roomHost) {
+            if (lobbyRebind || !lobbyHost.listening()) {
+                std::string err;
+                if (lobbyHost.open((uint16_t)roomPort, err)) {
+                    lobbyRebind = false;
+                    lobbyDirty = true;
+                    if (ui.menuMessage == "正在恢复房间") ui.menuMessage.clear();
+                }
+            }
+        }
         if (appScreen == AppScreen::RoomLobby && roomHost && lobbyHost.listening()) {
+            if (lobbyCooldown > 0.0f) {
+                int before = (int)std::ceil(lobbyCooldown);
+                lobbyCooldown -= frameDt;
+                if (lobbyCooldown < 0.0f) lobbyCooldown = 0.0f;
+                int after = lobbyCooldown > 0.0f ? (int)std::ceil(lobbyCooldown) : 0;
+                if (before != after) lobbyDirty = true;
+            }
             lobbyHost.poll();
             for (const LobbyHost::Join& j : lobbyHost.takeJoins()) {
                 RoomPlayerView v;
                 v.name = j.name;
                 v.id = j.id;
                 v.team = -1;
+                for (const auto& seat : lobbySeatMemory)
+                    if (seat.first == j.name) { v.team = seat.second; break; }
                 v.host = false;
                 v.local = false;
                 roomPlayers.push_back(v);
@@ -2121,9 +2309,24 @@ int main(int argc, char** argv) {
             }
             lobbyBroadcastAccum += frameDt;
             if (lobbyDirty || lobbyBroadcastAccum >= 0.1f) {
-                lobbyHost.broadcast(rosterTeams(), rosterPlayers());
+                int cool = lobbyCooldown > 0.0f ? (int)std::ceil(lobbyCooldown) : 0;
+                if (cool > 10) cool = 10;
+                lobbyHost.broadcast(rosterTeams(), rosterPlayers(), (uint8_t)cool);
                 lobbyDirty = false;
                 lobbyBroadcastAccum = 0.0f;
+            }
+        } else if (appScreen == AppScreen::RoomLobby && !roomHost && lobbyReturning) {
+            lobbyRetryAt -= frameDt;
+            if (lobbyRetryAt <= 0.0f) {
+                lobbyRetryAt = 0.5f;
+                std::string err;
+                if (lobbyGuest.connect(roomHostAddr, (uint16_t)roomPort, ui.playerName, err, 400)) {
+                    lobbyReturning = false;
+                    ui.menuMessage.clear();
+                    pullGuestLobby();
+                } else {
+                    ui.menuMessage = "正在返回房间";
+                }
             }
         } else if (appScreen == AppScreen::RoomLobby && !roomHost) {
             lobbyGuest.poll();
@@ -2209,12 +2412,18 @@ int main(int argc, char** argv) {
                 enterRoomPlay();
         } else if (roomSession && appScreen == AppScreen::Playing) {
             gameClient.poll();
+            uint8_t endTeam = 0, endRitual = 0;
+            if (gameClient.takeMatchEnd(endTeam, endRitual))
+                beginEnding((int)endTeam, (int)endRitual);
             if (gameClient.failed()) {
-                leaveWorld();
-                ui.menuMessage = "与服务器断开";
+                if (!endingOpen) {
+                    leaveWorld();
+                    ui.menuMessage = "与服务器断开";
+                }
                 return;
             }
             for (ClueQuizNet& message : gameClient.takeClueQuizzes()) {
+                if (endingOpen) continue;
                 clueQuiz = std::move(message);
                 clueQuizSubmitting = false;
                 clueOpen = true;
@@ -2227,7 +2436,7 @@ int main(int argc, char** argv) {
                     player.vitals = d.body.vitals;
                     player.fatigue = d.body.fatigue;
                     player.dead = vitals::isDead(player.vitals);
-                    if (!deploying && !storyOpen && (d.body.flags & 1)) {
+                    if (!deploying && !storyOpen && !endingOpen && (d.body.flags & 1)) {
                         Vec3 serverPos{d.body.x, d.body.y, d.body.z};
                         // Keep the rendered camera continuous across the
                         // authoritative correction. The actual player position
@@ -2543,7 +2752,7 @@ int main(int argc, char** argv) {
                 roomNetAccum = 0.0f;
                 size_t n = g_roomEdits.size() < 32 ? g_roomEdits.size() : 32;
                 PlayInputNet netIn;
-                netIn.movement = (g_focused && !paused && !deploying && !storyOpen && !player.dead)
+                netIn.movement = (g_focused && !paused && !deploying && !storyOpen && !endingOpen && !player.dead)
                     ? roomMovement : 0;
                 netIn.x = player.pos.x;
                 netIn.y = player.pos.y;
@@ -2837,6 +3046,10 @@ int main(int argc, char** argv) {
             fpsFrames = 0;
         }
 
+        if (endingFinished) {
+            endingFinished = false;
+            returnToLobby();
+        }
         bool playing = (appScreen == AppScreen::Playing);
         pollRoom(dt);
         playing = (appScreen == AppScreen::Playing);
@@ -2853,7 +3066,7 @@ int main(int argc, char** argv) {
         if (!player.privilegeMode || roomSession || structureEdit) ui.quickBreak = false;
         if (player.dead) targetPanel = -1;
         bool canMove = (g_focused && playing && !paused && !ui.matEditorOpen && !player.dead && !deploying && !storyOpen
-                        && !guideOpen && !clueOpen
+                        && !endingOpen && !guideOpen && !clueOpen
                         && !(structureEdit && structurePicker));
         bool lookLocked = (canMove && !inventoryOpen && targetPanel < 0 && !(structureEdit && blockBarOpen));
 
@@ -3037,6 +3250,8 @@ int main(int argc, char** argv) {
             else if (settingsOpen) settingsOpen = false;
             else if (deploying) {
             }
+            else if (endingOpen) {
+            }
             else if (storyOpen) {
             }
             else if (guideOpen) {
@@ -3141,7 +3356,43 @@ int main(int argc, char** argv) {
 
         bool lmb = keyDown(VK_LBUTTON);
         bool rmb = keyDown(VK_RBUTTON);
-        if (storyOpen && playing) {
+        if (endingOpen && playing) {
+            bool advance = g_storyAdvance || (lmb && !prevLmb) || (rmb && !prevRmb);
+            g_storyAdvance = false;
+            if (endingPage >= 2) advance = false;
+            if (endingPage == 2 && lmb && !prevLmb && ui.endingExitHover)
+                endingFinished = true;
+            const float coverTime = 1.0f;
+            const float fade = 0.4f;
+            if (endingPhase == 0) {
+                endingCover += dt / coverTime;
+                if (endingCover >= 1.0f) {
+                    endingCover = 1.0f;
+                    endingText = 0.0f;
+                    endingPhase = 1;
+                }
+            } else if (endingPhase == 1) {
+                endingText += dt / fade;
+                if (endingText >= 1.0f) { endingText = 1.0f; endingPhase = 2; }
+                if (advance && endingText > 0.2f) endingPhase = 3;
+            } else if (endingPhase == 2) {
+                if (advance) endingPhase = 3;
+            } else if (endingPhase == 3) {
+                endingText -= dt / fade;
+                if (endingText <= 0.0f) {
+                    endingText = 0.0f;
+                    endingPage++;
+                    if (endingPage >= 3) {
+                        endingCover = 1.0f;
+                        endingText = 0.0f;
+                        endingPhase = 4;
+                        endingFinished = true;
+                    } else {
+                        endingPhase = 1;
+                    }
+                }
+            }
+        } else if (storyOpen && playing) {
             bool advance = g_storyAdvance || (lmb && !prevLmb) || (rmb && !prevRmb);
             g_storyAdvance = false;
             const float fade = 0.4f;
@@ -4454,20 +4705,20 @@ int main(int argc, char** argv) {
             player.noclip = true;
             player.dead = false;
         }
-        if (deploying || storyOpen) {
+        if (deploying || storyOpen || endingOpen) {
             player.flying = true;
             player.vel = { 0, 0, 0 };
         }
-        if (playing && !paused && !ui.matEditorOpen && (!player.dead || deploying || storyOpen)) {
+        if (playing && !paused && !ui.matEditorOpen && (!player.dead || deploying || storyOpen || endingOpen)) {
             uint8_t swingItem = roomAttackVisualItem != AIR ? roomAttackVisualItem
                                                             : inv[ui.selectedSlot].block;
             bool toolSwinging = loot::isTool(swingItem) &&
                 (player.mineCharge > 1e-4f || player.mineCooldown > 1e-4f || roomAttackVisualItem != AIR);
             player.swingStrafe = toolSwinging ? 0.5f : 1.0f;
-            if (deploying || storyOpen) accumulator = 0.0f;
+            if (deploying || storyOpen || endingOpen) accumulator = 0.0f;
             else accumulator += dt;
             int sub = 0;
-            while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS && !deploying && !storyOpen) {
+            while (accumulator >= cfg::FIXED_DT && sub < cfg::MAX_SUBSTEPS && !deploying && !storyOpen && !endingOpen) {
                 // Local motion is prediction only; server snapshots correct it.
                 player.update(world, in, cfg::FIXED_DT,
                     roomSession && !spectating && !structureEdit
@@ -4633,7 +4884,7 @@ int main(int argc, char** argv) {
         ui.privilegeMode = (roomSession && !structureEdit) ? false : player.privilegeMode;
         ui.inTrial = trialAnchor.active;
         if (!debugMenuOpen) ui.trialPick = false;
-        ui.hideAvatar = structureEdit || deploying || storyOpen || guideOpen || clueOpen;
+        ui.hideAvatar = structureEdit || deploying || storyOpen || endingOpen || guideOpen || clueOpen;
         ui.deploying = deploying;
         ui.deployPixels = deploying ? &deployPixels : nullptr;
         ui.deployStamp = deployStamp;
@@ -4686,10 +4937,31 @@ int main(int argc, char** argv) {
             ui.borderFog = 0.0f;
             ui.borderActive = false;
         }
-        ui.storyOpen = storyOpen && playing;
+        ui.storyOpen = storyOpen && playing && !endingOpen;
         ui.storyHold = storyOpen && storyPhase == 1;
         ui.storyFade = storyAlpha;
         ui.storySentence.clear();
+        ui.endingOpen = endingOpen && playing;
+        ui.endingCover = endingCover;
+        ui.endingText = endingText;
+        ui.endingHold = endingOpen && endingPhase == 2 && endingPage < 2;
+        ui.endingExit = endingOpen && endingPage == 2 && endingPhase >= 1 && endingPhase <= 2;
+        ui.endingFlag = endingPage == 1;
+        ui.endingFlagR = endingR;
+        ui.endingFlagG = endingG;
+        ui.endingFlagB = endingB;
+        ui.endingLeft.clear();
+        ui.endingRight.clear();
+        if (endingOpen) {
+            if (endingPage == 0) {
+                ui.endingLeft = std::string("……") + ritual::ritualName(endingRitual) + "听见你的渴望";
+            } else if (endingPage == 1) {
+                ui.endingLeft = "队伍";
+                ui.endingRight = "获得胜利";
+            } else {
+                ui.endingLeft = "对局结束";
+            }
+        }
         if (storyOpen) {
             int rid = ritual::assignedRitual(gameClient.team());
             if (storyIndex >= 0 && storyIndex < ritual::storyLineCount(rid))
@@ -4799,6 +5071,11 @@ int main(int argc, char** argv) {
         ui.roomPlayers = roomPlayers;
         ui.roomMinPlayers = kRoomMinPlayers;
         ui.roomHost = roomHost;
+        if (roomHost)
+            ui.lobbyCooldown = lobbyCooldown > 0.0f ? (int)std::ceil(lobbyCooldown) : 0;
+        else
+            ui.lobbyCooldown = guestLobbyCooldown;
+        if (ui.lobbyCooldown > 10) ui.lobbyCooldown = 10;
         ui.roomSession = roomSession;
         ui.roomPort = roomPort;
         if (!ui.portFieldActive) ui.roomPortText = std::to_string(roomPort);

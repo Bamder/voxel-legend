@@ -35,6 +35,15 @@ bool danger(float hp, float controlled, const Sense& target) {
     return std::isfinite(target.windup) && target.windup > kWindup;
 }
 
+// (maxHp - hp) / (maxHp * combatSeconds). Zero combat time has no rate yet.
+bool evadeReady(float hp, float combat) {
+    if (!(combat > 0.0f) || !std::isfinite(hp) || !std::isfinite(combat)) return false;
+    if (hp < 0.0f) hp = 0.0f;
+    if (hp > 1.0f) hp = 1.0f;
+    float rate = (1.0f - hp) / combat;
+    return std::isfinite(rate) && rate >= kEvadeRate;
+}
+
 bool empowerWanted(const Brain& brain, float hp, float combat) {
     if (brain.enraged) return false;
     int bucket = (int)(combat / kEmpowerEvery);
@@ -148,7 +157,7 @@ Order publish(const Brain& brain, float threatValue, bool group) {
     case State::Wander:
         order.move = Move::Orbit;
         order.strafe = brain.strafe;
-        order.preferDistance = kOrbit;
+        order.preferDistance = 0.0f;
         break;
     case State::Empower:
         order.move = Move::Orbit;
@@ -162,8 +171,8 @@ Order publish(const Brain& brain, float threatValue, bool group) {
     return order;
 }
 
-bool tickCharge(Brain& brain, const Sense& target, float hp, float controlled) {
-    if (!brain.enraged && controlled > 0.0f) return go(brain, State::Evade, hp, true);
+bool tickCharge(Brain& brain, const Sense& target, float hp, float controlled, bool mayEvade) {
+    if (mayEvade && !brain.enraged && controlled > 0.0f) return go(brain, State::Evade, hp, true);
     if (target.distance <= kMeleeRange) {
         setCast(brain, SkillSlot::Melee);
         return go(brain, State::Attack, hp, false);
@@ -171,9 +180,9 @@ bool tickCharge(Brain& brain, const Sense& target, float hp, float controlled) {
     return false;
 }
 
-bool tickAttack(Brain& brain, const Sense& target, float threatValue, float high, float hp, float step) {
+bool tickAttack(Brain& brain, const Sense& target, float threatValue, float low, float hp, float step) {
     if (target.distance > kChargeRange) {
-        if (threatValue > high && brain.cdCharge <= 0.0f) return go(brain, State::Charge, hp, true);
+        if (threatValue >= low && brain.cdCharge <= 0.0f) return go(brain, State::Charge, hp, true);
         return go(brain, State::Wander, hp, true);
     }
     brain.swing -= step;
@@ -220,14 +229,14 @@ bool tickEvade(Brain& brain, const Sense& target, float threatValue, float high,
     return go(brain, State::Wander, hp, true);
 }
 
-bool tickWander(Brain& brain, const Sense& target, float threatValue, float low, float high,
+bool tickWander(Brain& brain, const Sense& target, float threatValue, float low,
                 float hp, float step, bool wanted) {
-    if (threatValue > high && target.distance > kChargeRange && brain.cdCharge <= 0.0f)
+    if (target.distance <= kMeleeRange)
+        return go(brain, State::Attack, hp, true);
+    if (target.distance <= kChargeRange && threatValue >= low)
+        return go(brain, State::Attack, hp, true);
+    if (target.distance > kChargeRange && threatValue >= low && brain.cdCharge <= 0.0f)
         return go(brain, State::Charge, hp, true);
-    if (target.distance < kMeleeRange) {
-        if (!brain.enraged && brain.cdEvade <= 0.0f) return go(brain, State::Evade, hp, true);
-        if (threatValue >= low) return go(brain, State::Attack, hp, true);
-    }
     if (!brain.branched && brain.stateTime > 1.0f) {
         bool suppressOk = brain.cdSuppress <= 0.0f && (target.mobile || hp > kHealthy);
         bool empowerOk = wanted && brain.cdEmpower <= 0.0f;
@@ -250,8 +259,8 @@ bool tickWander(Brain& brain, const Sense& target, float threatValue, float low,
     return false;
 }
 
-bool tickSuppress(Brain& brain, float hp, float controlled, float step) {
-    if (!brain.enraged && controlled > 0.0f) return go(brain, State::Evade, hp, true);
+bool tickSuppress(Brain& brain, float hp, float controlled, float step, bool mayEvade) {
+    if (mayEvade && !brain.enraged && controlled > 0.0f) return go(brain, State::Evade, hp, true);
     if (brain.suppressHit == 1) {
         setCast(brain, SkillSlot::Followup);
         brain.suppressHit = -1;
@@ -267,10 +276,13 @@ bool tickSuppress(Brain& brain, float hp, float controlled, float step) {
     return false;
 }
 
-bool tickEmpower(Brain& brain, float hp, bool focused, float step) {
+bool tickEmpower(Brain& brain, float hp, bool focused, float step, bool mayEvade) {
     if (brain.enraged) return false;
     brain.empowerLeft -= step;
-    if (focused) return go(brain, State::Evade, hp, true);
+    if (focused) {
+        if (mayEvade && brain.cdEvade <= 0.0f) return go(brain, State::Evade, hp, true);
+        return go(brain, State::Attack, hp, true);
+    }
     if (brain.empowerLeft <= 0.0f) return go(brain, State::Attack, hp, true);
     return false;
 }
@@ -356,6 +368,7 @@ Order think(Brain& brain, const Body& body, const Sense* targets, int count, flo
         brain.cdGroup = kGroupCd;
     }
     bool wanted = empowerWanted(brain, hp, combat);
+    bool mayEvade = evadeReady(hp, combat);
 
     auto finish = [&]() {
         const Sense* locked = findTarget(targets, count, brain.target);
@@ -370,7 +383,7 @@ Order think(Brain& brain, const Body& body, const Sense* targets, int count, flo
         brain.target = best->id;
         current = best;
         float score = threat(*current);
-        if (!brain.enraged && brain.cdEvade <= 0.0f && danger(hp, controlled, *current)) {
+        if (mayEvade && !brain.enraged && brain.cdEvade <= 0.0f && danger(hp, controlled, *current)) {
             go(brain, State::Evade, hp, true);
             return finish();
         }
@@ -379,10 +392,11 @@ Order think(Brain& brain, const Body& body, const Sense* targets, int count, flo
             go(brain, State::Empower, hp, true);
             return finish();
         }
-        if (score < low) go(brain, State::Wander, hp, true);
-        else if (current->distance > kChargeRange && score > high && brain.cdCharge <= 0.0f)
+        if (current->distance <= kMeleeRange) go(brain, State::Attack, hp, true);
+        else if (current->distance <= kChargeRange && score >= low) go(brain, State::Attack, hp, true);
+        else if (current->distance > kChargeRange && score >= low && brain.cdCharge <= 0.0f)
             go(brain, State::Charge, hp, true);
-        else if (current->distance < kMeleeRange) go(brain, State::Attack, hp, true);
+        else if (score < low) go(brain, State::Wander, hp, true);
         else if (brain.cdSuppress <= 0.0f && (current->mobile || hp > kHealthy))
             go(brain, State::Suppress, hp, true);
         else go(brain, State::Wander, hp, true);
@@ -390,10 +404,10 @@ Order think(Brain& brain, const Body& body, const Sense* targets, int count, flo
     }
 
     if (brain.state == State::Empower) {
-        tickEmpower(brain, hp, body.focused, dt);
+        tickEmpower(brain, hp, body.focused, dt, mayEvade);
         return finish();
     }
-    if (!brain.enraged && brain.cdEvade <= 0.0f && danger(hp, controlled, *current)) {
+    if (mayEvade && !brain.enraged && brain.cdEvade <= 0.0f && danger(hp, controlled, *current)) {
         go(brain, State::Evade, hp, true);
         return finish();
     }
@@ -404,11 +418,11 @@ Order think(Brain& brain, const Body& body, const Sense* targets, int count, flo
     }
 
     switch (brain.state) {
-    case State::Charge: tickCharge(brain, *current, hp, controlled); break;
-    case State::Attack: tickAttack(brain, *current, threat(*current), high, hp, dt); break;
+    case State::Charge: tickCharge(brain, *current, hp, controlled, mayEvade); break;
+    case State::Attack: tickAttack(brain, *current, threat(*current), low, hp, dt); break;
     case State::Evade: tickEvade(brain, *current, threat(*current), high, hp, dt); break;
-    case State::Wander: tickWander(brain, *current, threat(*current), low, high, hp, dt, wanted); break;
-    case State::Suppress: tickSuppress(brain, hp, controlled, dt); break;
+    case State::Wander: tickWander(brain, *current, threat(*current), low, hp, dt, wanted); break;
+    case State::Suppress: tickSuppress(brain, hp, controlled, dt, mayEvade); break;
     default: break;
     }
     return finish();

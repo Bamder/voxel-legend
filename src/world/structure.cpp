@@ -16,6 +16,9 @@
 #include <fstream>
 
 namespace structure {
+
+const char* ritualAltarName(int altarIndex);
+
 namespace {
 
 // Named per-cell tags live after the block payload. Each set flag bit is one
@@ -74,6 +77,9 @@ struct Site {
     int id = 0;
     int ground = -1; // plank height; token sits at ground + 1
     bool looted = false;
+    // Altar blueprint box. y1 includes the cell on the roof.
+    int boxX0 = 0, boxY0 = 0, boxZ0 = 0, boxX1 = 0, boxY1 = 0, boxZ1 = 0;
+    bool boxReady = false;
 };
 
 // Each boss is above 250, and no two share a pool.
@@ -111,23 +117,55 @@ PoseSlot g_pose[ritual::RelicCount]{};
 std::vector<Site> g_sites;
 bool g_trial = false;
 
-// Equilateral-ish triangle on the altar, pointing -Z. Vertices sit inside the stone disk.
-bool insideTri(int dx, int dz) {
-    const int ax = 0, az = -6;
-    const int bx = 5, bz = 3;
-    const int cx = -5, cz = 3;
-    auto cross = [](int px, int pz, int qx, int qz) { return px * qz - pz * qx; };
-    int c0 = cross(bx - ax, bz - az, dx - ax, dz - az);
-    int c1 = cross(cx - bx, cz - bz, dx - bx, dz - bz);
-    int c2 = cross(ax - cx, az - cz, dx - cx, dz - cz);
-    return c0 >= 0 && c1 >= 0 && c2 >= 0;
-}
+bool readBlueprint(const std::string& path, Blueprint& b);
 
 const Site* ritualSite(int ritual) {
     for (const Site& s : g_sites) {
         if (s.kind == 1 && s.id == ritual) return &s;
     }
     return nullptr;
+}
+
+Site* ritualSiteMut(int ritual) {
+    for (Site& s : g_sites) {
+        if (s.kind == 1 && s.id == ritual) return &s;
+    }
+    return nullptr;
+}
+
+void altarBlueprintSize(int ritual, int& sx, int& sy, int& sz) {
+    sx = 5;
+    sy = 5;
+    sz = 5;
+    std::string path = std::string("assets/structures/") + ritualAltarName(ritual) + ".vlstruct";
+    Blueprint b;
+    if (!readBlueprint(path, b)) return;
+    sx = b.sx;
+    sy = b.sy;
+    sz = b.sz;
+}
+
+void ensureAltarBox(World& world, Site& s) {
+    if (s.boxReady) return;
+    int sx = 5, sy = 5, sz = 5;
+    altarBlueprintSize(s.id, sx, sy, sz);
+    s.boxX0 = s.cx - sx / 2;
+    s.boxZ0 = s.cz - sz / 2;
+    s.boxX1 = s.boxX0 + sx - 1;
+    s.boxZ1 = s.boxZ0 + sz - 1;
+    int floorY = 1;
+    for (int z = s.boxZ0; z <= s.boxZ1; ++z) {
+        for (int x = s.boxX0; x <= s.boxX1; ++x) {
+            int h = world.surfaceHeight(x, z);
+            if (h > floorY) floorY = h;
+        }
+    }
+    if (sy < 1) sy = 1;
+    if (floorY > cfg::WORLD_H - sy) floorY = cfg::WORLD_H - sy;
+    if (floorY < 1) floorY = 1;
+    s.boxY0 = floorY;
+    s.boxY1 = floorY + sy;
+    s.boxReady = true;
 }
 
 int altarGround(World& world, const Site& s) {
@@ -453,8 +491,7 @@ void stampColumn(int cx, int cz,
                 for (int dx = -10; dx <= 10; dx++) {
                     int d2 = dx * dx + dz * dz;
                     if (d2 > 100) continue;
-                    uint8_t floor = insideTri(dx, dz) ? (uint8_t)BRICK
-                        : (d2 >= 64) ? (uint8_t)COBBLE : (uint8_t)STONE;
+                    uint8_t floor = (d2 >= 64) ? (uint8_t)COBBLE : (uint8_t)STONE;
                     cell(s.cx + dx, s.cz + dz, ground, 0, floor);
                     for (int rise = 1; rise <= 4; rise++)
                         cell(s.cx + dx, s.cz + dz, ground, rise, AIR);
@@ -465,21 +502,23 @@ void stampColumn(int cx, int cz,
 }
 
 bool isOfferingCell(World& world, int ritual, int x, int y, int z) {
-    const Site* s = ritualSite(ritual);
+    Site* s = ritualSiteMut(ritual);
     if (!s) return false;
-    if (y != altarGround(world, *s) + 1) return false;
-    return insideTri(x - s->cx, z - s->cz);
+    ensureAltarBox(world, *s);
+    return x >= s->boxX0 && x <= s->boxX1 && z >= s->boxZ0 && z <= s->boxZ1
+        && y >= s->boxY0 && y <= s->boxY1;
 }
 
 bool offeringPlaced(World& world, int ritual, int relic) {
-    const Site* s = ritualSite(ritual);
+    Site* s = ritualSiteMut(ritual);
     if (!s || relic < 0) return false;
+    ensureAltarBox(world, *s);
     uint8_t id = (uint8_t)ritual::blockId(relic);
-    int ground = altarGround(world, *s);
-    for (int dz = -6; dz <= 3; dz++) {
-        for (int dx = -5; dx <= 5; dx++) {
-            if (!insideTri(dx, dz)) continue;
-            if (world.getBlock(s->cx + dx, ground + 1, s->cz + dz) == id) return true;
+    for (int y = s->boxY0; y <= s->boxY1; ++y) {
+        for (int z = s->boxZ0; z <= s->boxZ1; ++z) {
+            for (int x = s->boxX0; x <= s->boxX1; ++x) {
+                if (world.getBlock(x, y, z) == id) return true;
+            }
         }
     }
     return false;
@@ -1082,6 +1121,31 @@ void putSolid(World& world, int x, int y, int z, uint8_t block, int placeFace = 
     world.setBlock(x, y, z, block, true, false, placeFace, cellFlags);
 }
 
+bool isSitePlant(uint8_t b) {
+    return b == GRASS_TUFT || isShrubPart(b);
+}
+
+// Terrain plants are written before blueprints. A solid floor replaces a tuft's
+// support, and the upper half then draws itself on the building. Shrub leaves
+// also sit one cell outside their stem. Strip both from the footprint, plus
+// that one-cell overhang, before any foundation or blueprint block is written.
+void clearSitePlants(World& world, int x0, int z0, int x1, int z1) {
+    const int mx0 = x0 - 1;
+    const int mz0 = z0 - 1;
+    const int mx1 = x1 + 1;
+    const int mz1 = z1 + 1;
+    ensureSpan(world, mx0, mz0, mx1, mz1);
+    for (int z = mz0; z <= mz1; ++z) {
+        for (int x = mx0; x <= mx1; ++x) {
+            for (int y = 1; y < cfg::WORLD_H; ++y) {
+                uint8_t b = world.getBlock(x, y, z);
+                if (!isSitePlant(b)) continue;
+                world.setBlock(x, y, z, AIR, true, false);
+            }
+        }
+    }
+}
+
 // Bottom sits on the highest terrain under the box. Columns that have a solid
 // on the blueprint's bottom layer are filled up from the local surface.
 int stampBlueprint(World& world, int worldX, int worldZ, const Blueprint& b, int& placed) {
@@ -1089,7 +1153,7 @@ int stampBlueprint(World& world, int worldX, int worldZ, const Blueprint& b, int
     int z0 = worldZ - b.sz / 2;
     int x1 = x0 + b.sx - 1;
     int z1 = z0 + b.sz - 1;
-    ensureSpan(world, x0, z0, x1, z1);
+    clearSitePlants(world, x0, z0, x1, z1);
     int floorY = footprintFloor(world, x0, z0, x1, z1, b.sy);
     for (int lz = 0; lz < b.sz; ++lz) {
         for (int lx = 0; lx < b.sx; ++lx) {
@@ -1198,21 +1262,7 @@ bool paintMatchRitualAltar(World& world, int ritual) {
         for (int cx = floorDiv(x - 21, cfg::CHUNK_X); cx <= floorDiv(x + 21, cfg::CHUNK_X); ++cx)
             world.ensureColumn(cx, cz);
     int blueprintFloor = altarGround(world, *site);
-    if (!paintRitualAltar(world, x, blueprintFloor, z, ritual)) return false;
-    // The new blueprints can have a raised center. The ritual rule reads the
-    // center surface, so place its offering triangle at that same height.
-    int ground = altarGround(world, *site);
-    // Preserve the existing offering rule: three relics sit one cell above
-    // the brick triangle at this seed-rolled site, on server and clients.
-    for (int dz = -6; dz <= 3; ++dz) {
-        for (int dx = -5; dx <= 5; ++dx) {
-            if (!insideTri(dx, dz)) continue;
-            world.setBlock(x + dx, ground, z + dz, (uint8_t)BRICK, true, false);
-            for (int rise = 1; rise <= 3; ++rise)
-                world.setBlock(x + dx, ground + rise, z + dz, AIR, true, false);
-        }
-    }
-    return true;
+    return paintRitualAltar(world, x, blueprintFloor, z, ritual);
 }
 
 // Stonehenge structure file names

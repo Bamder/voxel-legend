@@ -11,6 +11,8 @@
 //
 // Threat uses the worked weights (about 2208 for the 15000/8000/2s/5m
 // example). Bands are 500 and 1500. Distance gates are 5m, 8m and 20m.
+// A charge or a closing attack commits from the low band. Evade stays shut
+// until (maxHp - hp) / (maxHp * combatSeconds) reaches kEvadeRate.
 namespace guardian_ai {
 
 inline constexpr float kThreatWindow = 10.0f;
@@ -51,6 +53,9 @@ inline constexpr float kProbe = 3.50f;
 inline constexpr float kTrap = 11.0f;
 inline constexpr float kChargeCd = 8.0f;
 inline constexpr float kEvadeCd = 4.0f;
+// Fraction of max health lost per second of the fight. Body.hp is already
+// that fraction, so the rate is (1 - hp) / combatSeconds.
+inline constexpr float kEvadeRate = 0.02f;
 inline constexpr float kSuppressCd = 12.0f;
 inline constexpr float kGroupCd = 20.0f;
 inline constexpr float kDodgeStep = 0.35f;

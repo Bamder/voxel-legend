@@ -360,6 +360,10 @@ void moveMind(Mind& mind, const guardian_ai::Order& order, const Rival* target, 
         Vec3 side{ -dir.z, 0.0f, dir.x };
         if (order.strafe < 0.0f) side = side * -1.0f;
         float radial = dist > 12.0f ? 0.65f : (dist < 8.0f ? -0.65f : 0.0f);
+        if (order.state == guardian_ai::State::Wander) {
+            // No standoff. Strafe, and let a fraction of the step point backward.
+            radial = -0.22f;
+        }
         wish = side + dir * radial;
         float len = wish.length();
         if (len > 1e-4f) wish = wish / len;

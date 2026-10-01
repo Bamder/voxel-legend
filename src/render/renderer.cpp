@@ -2315,12 +2315,12 @@ void Renderer::tri(float x0, float y0, float x1, float y1, float x2, float y2,
         for (int i = 0; i < 8; i++) m_batch.data.push_back(v[i]);
 }
 
-void Renderer::drawFlag(float x, float y, float w, float h, float r, float g, float b) {
+void Renderer::drawFlag(float x, float y, float w, float h, float r, float g, float b, float a) {
     float rectH = h * 0.68f;
-    quad(x - 1.0f, y - 1.0f, w + 2.0f, rectH + 1.0f, 0, 0, 0, 0, r * 0.35f, g * 0.35f, b * 0.35f, 1.0f);
-    quad(x, y, w, rectH, 0, 0, 0, 0, r, g, b, 1.0f);
+    quad(x - 1.0f, y - 1.0f, w + 2.0f, rectH + 1.0f, 0, 0, 0, 0, r * 0.35f, g * 0.35f, b * 0.35f, a);
+    quad(x, y, w, rectH, 0, 0, 0, 0, r, g, b, a);
     float base = y + rectH;
-    tri(x, base, x + w, base, x + w * 0.5f, y + h, r, g, b, 1.0f);
+    tri(x, base, x + w, base, x + w * 0.5f, y + h, r, g, b, a);
 }
 
 void Renderer::flushUI(unsigned int prog, unsigned int tex) {
@@ -2816,7 +2816,8 @@ void Renderer::drawRoomLobby(UIState& ui) {
     const int nTeams = (int)ui.roomTeams.size();
     const int nPlayers = (int)ui.roomPlayers.size();
     const bool enoughPlayers = nPlayers >= ui.roomMinPlayers;
-    const bool canStart = ui.roomHost && enoughPlayers;
+    const bool cooling = ui.lobbyCooldown > 0;
+    const bool canStart = ui.roomHost && enoughPlayers && !cooling;
     const bool canAddTeam = ui.roomHost && nTeams < 1 + matchmap::kCombatTeams;
 
     int lw = 0, lh = 0;
@@ -2982,9 +2983,15 @@ void Renderer::drawRoomLobby(UIState& ui) {
     centeredText(newLabel, leftX + sideW * 0.5f, newY + btnH * 0.5f,
                  0.9f, canAddTeam ? 1.0f : 0.4f, canAddTeam ? 1.0f : 0.4f, canAddTeam ? 1.0f : 0.4f, 1);
     centeredText("返回", backX + backW * 0.5f, barY + btnH * 0.5f, 0.95f, 1, 1, 1, 1);
+    std::string coolLabel;
     const char* startLabel = "等待主机";
-    if (ui.roomHost) startLabel = canStart ? "开始对局" : "人数不足";
-    float sa = canStart ? 1.0f : 0.4f;
+    if (cooling) {
+        coolLabel = std::to_string(ui.lobbyCooldown);
+        startLabel = coolLabel.c_str();
+    } else if (ui.roomHost) {
+        startLabel = canStart ? "开始对局" : "人数不足";
+    }
+    float sa = canStart ? 1.0f : (cooling ? 0.95f : 0.4f);
     centeredText(startLabel, startX + startW * 0.5f, barY + btnH * 0.5f, 0.95f, sa, sa, sa, 1);
     if (!ui.menuMessage.empty())
         drawString(ui.menuMessage, midX, barY - 28.0f, 0.8f, 0.95f, 0.75f, 0.45f, 1);
@@ -3860,6 +3867,49 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         text(14, 12, 0.78f, 0.96f, 0.96f, 0.92f, 1.0f,
              "坐标 X %d  Y %d  Z %d   |   区块 %d,%d", bx, by, bz, cx, cz);
     };
+    if (ui.endingOpen) {
+        quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, ui.endingCover);
+        flushUI(progUI, whiteTex);
+        if (ui.endingCover >= 1.0f && ui.endingText > 0.01f) {
+            const float cx = (float)scrW * 0.5f;
+            const float cy = (float)scrH * 0.5f;
+            const float scale = 1.35f;
+            const float tr = 0.93f, tg = 0.93f, tb = 0.91f;
+            if (ui.endingFlag && !ui.endingLeft.empty() && !ui.endingRight.empty()) {
+                int lw = 0, lh = 0, rw = 0, rh = 0;
+                stringSize(ui.endingLeft, lw, lh);
+                stringSize(ui.endingRight, rw, rh);
+                (void)rh;
+                const float flagW = 22.0f, flagH = 36.0f, gap = 14.0f;
+                float rowW = (float)lw * scale + gap + flagW + gap + (float)rw * scale;
+                float x = cx - rowW * 0.5f;
+                float textY = cy - (float)lh * scale * 0.5f;
+                drawString(ui.endingLeft, x, textY, scale, tr, tg, tb, ui.endingText);
+                float flagX = x + (float)lw * scale + gap;
+                drawFlag(flagX, cy - flagH * 0.5f, flagW, flagH,
+                         ui.endingFlagR, ui.endingFlagG, ui.endingFlagB, ui.endingText);
+                flushUI(progUI, whiteTex);
+                drawString(ui.endingRight, flagX + flagW + gap, textY, scale, tr, tg, tb, ui.endingText);
+            } else if (!ui.endingLeft.empty()) {
+                centeredText(ui.endingLeft, cx, cy, scale, tr, tg, tb, ui.endingText);
+            }
+            if (ui.endingHold)
+                centeredText("单击或按任意键", cx, (float)scrH - 56.0f, 0.85f, 0.62f, 0.62f, 0.62f, 0.9f);
+        }
+        ui.endingExitHover = false;
+        if (ui.endingExit) {
+            const float bw = 148.0f, bh = 48.0f;
+            const float bx = (float)scrW - bw - 36.0f;
+            const float by = (float)scrH - bh - 36.0f;
+            bool hover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= by && ui.mouseY < by + bh;
+            ui.endingExitHover = hover;
+            buttonChrome(bx, by, bw, bh, hover, 0.72f, 0.73f, 0.76f);
+            flushUI(progUI, whiteTex);
+            centeredText("EXIT", bx + bw * 0.5f, by + bh * 0.5f, 1.05f, 0.08f, 0.08f, 0.09f, 1.0f);
+        }
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
     if (ui.storyOpen) {
         quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 1.0f);
         flushUI(progUI, whiteTex);
@@ -4366,7 +4416,7 @@ void Renderer::drawNote(UIState& ui) {
     if (ui.noteDone)
         centeredText("仪式已完成", x + w * 0.5f, y + h - 78.0f, 1.1f, 0.85f, 0.78f, 0.45f, 1);
     else
-        centeredText("将三件物品放到祭坛的三角区域", x + w * 0.5f, y + h - 78.0f, 1.0f, 0.75f, 0.72f, 0.62f, 1);
+        centeredText("将三件物品放到祭坛建筑内", x + w * 0.5f, y + h - 78.0f, 1.0f, 0.75f, 0.72f, 0.62f, 1);
     float bw = 120.0f, bh = 34.0f;
     float bx = x + w - bw - 28.0f;
     float by = y + h - 52.0f;

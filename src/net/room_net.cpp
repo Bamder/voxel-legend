@@ -280,8 +280,9 @@ void LobbyHost::poll() {
     }
 }
 
-void LobbyHost::broadcast(const std::vector<RoomTeamNet>& teamList, const std::vector<RoomPlayerNet>& players) {
-    std::vector<uint8_t> msg = encodeLobby(boundPort, 1, teamList, players);
+void LobbyHost::broadcast(const std::vector<RoomTeamNet>& teamList, const std::vector<RoomPlayerNet>& players,
+                          uint8_t startCooldown) {
+    std::vector<uint8_t> msg = encodeLobby(boundPort, 1, teamList, players, startCooldown);
     for (Remote& r : remotes) {
         if (!r.welcomed) continue;
         r.conn.send((uint16_t)RoomMsg::Lobby, msg);
@@ -327,7 +328,8 @@ std::vector<LobbyHost::TeamCmd> LobbyHost::takeTeamCmds() {
     return o;
 }
 
-bool LobbyGuest::connect(const std::string& host, uint16_t port, const std::string& name, std::string& err) {
+bool LobbyGuest::connect(const std::string& host, uint16_t port, const std::string& name, std::string& err,
+                         int timeoutMs) {
     netStartup();
     close();
     hostAddr = host.empty() ? "127.0.0.1" : host;
@@ -359,8 +361,10 @@ bool LobbyGuest::connect(const std::string& host, uint16_t port, const std::stri
     fd_set wset;
     FD_ZERO(&wset);
     FD_SET(s, &wset);
+    if (timeoutMs < 200) timeoutMs = 200;
     timeval tv{};
-    tv.tv_sec = 3;
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
     int sel = select(0, nullptr, &wset, nullptr, &tv);
     if (sel <= 0) {
         closesocket(s);
@@ -378,7 +382,7 @@ bool LobbyGuest::connect(const std::string& host, uint16_t port, const std::stri
     conn = NetConn((uintptr_t)s);
     std::string who = name.empty() ? "玩家" : name;
     conn.send((uint16_t)RoomMsg::Hello, encodeHello(who));
-    long long end = nowMs() + 2000;
+    long long end = nowMs() + timeoutMs;
     while (nowMs() < end && !up) {
         conn.pump();
         if (conn.dead()) {
@@ -400,7 +404,7 @@ bool LobbyGuest::connect(const std::string& host, uint16_t port, const std::stri
                 up = true;
             } else if (type == (uint16_t)RoomMsg::Lobby) {
                 uint32_t hostId = 0;
-                if (decodeLobby(p, e, lobbyPort, hostId, teams, players)) lobbyFresh = true;
+                if (decodeLobby(p, e, lobbyPort, hostId, teams, players, &startWait)) lobbyFresh = true;
             }
         }
         if (!up) Sleep(5);
@@ -419,6 +423,7 @@ void LobbyGuest::close() {
     starting = false;
     lobbyFresh = false;
     id = 0;
+    startWait = 0;
     teams.clear();
     players.clear();
 }
@@ -434,7 +439,7 @@ void LobbyGuest::poll() {
         const uint8_t* e = p + payload.size();
         if (type == (uint16_t)RoomMsg::Lobby) {
             uint32_t hostId = 0;
-            if (decodeLobby(p, e, lobbyPort, hostId, teams, players)) lobbyFresh = true;
+            if (decodeLobby(p, e, lobbyPort, hostId, teams, players, &startWait)) lobbyFresh = true;
         } else if (type == (uint16_t)RoomMsg::MatchStart) {
             starting = true;
         }
@@ -535,6 +540,9 @@ void GameClient::close() {
     clueQuizzes.clear();
     deploySnap.clear();
     deployFresh = false;
+    matchEndFresh = false;
+    matchEndTeam = 0;
+    matchEndRitual = 0;
     id = 0;
     playSpan = 0;
     rosterMask = 0;
@@ -593,6 +601,13 @@ void GameClient::pumpWelcome() {
             if (decodeClueQuiz(p, e, quiz)) {
                 if (clueQuizzes.size() >= 8) clueQuizzes.erase(clueQuizzes.begin());
                 clueQuizzes.push_back(std::move(quiz));
+            }
+        } else if (type == (uint16_t)RoomMsg::MatchEnd && haveWelcome) {
+            uint8_t team = 0, ritual = 0;
+            if (decodeMatchEnd(p, e, team, ritual)) {
+                matchEndTeam = team;
+                matchEndRitual = ritual;
+                matchEndFresh = true;
             }
         }
     }
@@ -662,6 +677,14 @@ std::vector<ClueQuizNet> GameClient::takeClueQuizzes() {
     std::vector<ClueQuizNet> out;
     out.swap(clueQuizzes);
     return out;
+}
+
+bool GameClient::takeMatchEnd(uint8_t& team, uint8_t& ritual) {
+    if (!matchEndFresh) return false;
+    matchEndFresh = false;
+    team = matchEndTeam;
+    ritual = matchEndRitual;
+    return true;
 }
 
 bool GameClient::takeDeploy(std::vector<DeployPinNet>& out) {

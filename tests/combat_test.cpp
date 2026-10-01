@@ -307,16 +307,28 @@ int main() {
     order = think(brain, live, &charging, 1, 0.05f);
     check(order.state == State::Charge, "charge can start once the cooldown is clear");
     live.controlledSeconds = 0.2f;
+    live.combatSeconds = 8.0f;
+    order = think(brain, live, &charging, 1, 0.05f);
+    check(order.state == State::Charge, "control without pressure does not break a charge");
+    live.hp = 0.80f;
+    live.combatSeconds = 5.0f;
     order = think(brain, live, &charging, 1, 0.05f);
     check(order.state == State::Evade && order.skill == SkillSlot::Dodge &&
           order.move == Move::Retreat && near(order.invulnerable, kIFrame),
-          "control breaks a charge into a dodge");
+          "pressure lets control break a charge into a dodge");
     live.controlledSeconds = 0.0f;
+    live.hp = 1.0f;
+    live.combatSeconds = 0.0f;
 
     brain = {};
     live.hp = 0.20f;
+    live.combatSeconds = 80.0f;
     order = think(brain, live, &melee, 1, 0.05f);
-    check(order.state == State::Evade && order.skill == SkillSlot::Dodge, "low health opens on evade");
+    check(order.state != State::Evade, "low health below the evade rate does not dodge");
+    brain = {};
+    live.combatSeconds = 10.0f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Evade && order.skill == SkillSlot::Dodge, "low health opens on evade once the rate is met");
     bool smoked = false;
     for (int i = 0; i < 15 && !smoked; ++i) {
         order = think(brain, live, &melee, 1, 0.40f);
@@ -324,12 +336,19 @@ int main() {
     }
     check(smoked, "a chase after the dodge asks for smoke");
     live.hp = 1.0f;
+    live.combatSeconds = 0.0f;
 
     brain = {};
     melee.windup = 0.60f;
     order = think(brain, live, &melee, 1, 0.05f);
-    check(order.state == State::Evade, "a long windup is evaded");
+    check(order.state == State::Attack, "a windup at full health is attacked");
+    live.hp = 0.85f;
+    live.combatSeconds = 5.0f;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Evade, "a long windup is evaded once the rate is met");
     melee.windup = 0.0f;
+    live.hp = 1.0f;
+    live.combatSeconds = 0.0f;
 
     brain = {};
     live.hp = 0.40f;
@@ -343,9 +362,24 @@ int main() {
     check(order.state == State::Empower && order.controlImmune && order.skill == SkillSlot::None,
           "empower ignores a windup");
     live.focused = true;
+    live.hp = 1.0f;
+    live.combatSeconds = 5.0f;
     order = think(brain, live, &melee, 1, 0.05f);
-    check(order.state == State::Evade && !order.controlImmune, "focus fire ends empower early");
+    check(order.state == State::Attack && !order.controlImmune, "focus fire without pressure ends empower on an attack");
+    brain = {};
+    live.hp = 0.40f;
+    live.combatSeconds = 0.0f;
     live.focused = false;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Empower, "half health still empowers before the focus check");
+    live.hp = 0.70f;
+    live.combatSeconds = 10.0f;
+    live.focused = true;
+    order = think(brain, live, &melee, 1, 0.05f);
+    check(order.state == State::Evade && !order.controlImmune, "focus fire ends empower early once the rate is met");
+    live.focused = false;
+    live.hp = 1.0f;
+    live.combatSeconds = 0.0f;
     melee.windup = 0.0f;
 
     brain = {};
@@ -365,11 +399,15 @@ int main() {
     brain = {};
     Sense pacing = foe(1, 10.0f, 35000.0f);
     order = think(brain, {0.60f, 1.0f, 0.0f, false}, &pacing, 1, 0.05f);
-    check(order.state == State::Wander && !order.groupSuppress, "mid threat paces instead of charging");
+    check(order.state == State::Charge && !order.groupSuppress, "mid threat charges");
+    brain = {};
+    Sense lingering = foe(1, 10.0f, 12000.0f);
+    order = think(brain, {0.60f, 1.0f, 0.0f, false}, &lingering, 1, 0.05f);
+    check(order.state == State::Wander, "threat under the low band paces");
     for (int i = 0; i < 5; ++i)
-        order = think(brain, {0.60f, 1.0f, 0.0f, false}, &pacing, 1, 1.0f);
+        order = think(brain, {0.60f, 1.0f, 0.0f, false}, &lingering, 1, 1.0f);
     check(order.state == State::Wander, "five seconds of pacing does not cross the band yet");
-    order = think(brain, {0.60f, 1.0f, 0.0f, false}, &pacing, 1, 0.05f);
+    order = think(brain, {0.60f, 1.0f, 0.0f, false}, &lingering, 1, 0.05f);
     check(order.state == State::Charge, "lingering lowers the charge band");
 
     brain = {};
@@ -385,20 +423,27 @@ int main() {
     check(poked && (order.strafe == 1.0f || order.strafe == -1.0f), "orbit tries a ranged probe");
 
     brain = {};
-    Sense grip = foe(1, 6.0f, 20000.0f);
+    Sense closing = foe(1, 6.0f, 20000.0f);
+    order = think(brain, live, &closing, 1, 0.05f);
+    check(order.state == State::Attack && order.move == Move::Approach, "healthy mid range closes to attack");
+    brain = {};
+    brain.cdCharge = 100.0f;
+    Sense grip = foe(1, 9.0f, 20000.0f);
     order = think(brain, live, &grip, 1, 0.05f);
-    check(order.state == State::Suppress && order.skill == SkillSlot::Suppress, "healthy mid range suppresses");
+    check(order.state == State::Suppress && order.skill == SkillSlot::Suppress, "a far healthy target suppresses while charge is down");
     reportSuppress(brain, true);
     order = think(brain, live, &grip, 1, 0.05f);
     check(order.state == State::Attack && order.skill == SkillSlot::Followup, "a landed suppress leads a follow-up");
 
     brain = {};
+    brain.cdCharge = 100.0f;
     think(brain, live, &grip, 1, 0.05f);
     reportSuppress(brain, false);
     order = think(brain, live, &grip, 1, 0.05f);
     check(order.state == State::Wander, "a missed suppress returns to pacing");
 
     brain = {};
+    brain.cdCharge = 100.0f;
     think(brain, live, &grip, 1, 0.05f);
     order = think(brain, live, &grip, 1, 0.50f);
     check(order.state == State::Suppress, "suppress holds through its cast");
@@ -408,11 +453,18 @@ int main() {
     check(order.state == State::Wander, "an unanswered suppress times out");
 
     brain = {};
+    brain.cdCharge = 100.0f;
     think(brain, live, &grip, 1, 0.05f);
     live.controlledSeconds = 0.20f;
     order = think(brain, live, &grip, 1, 0.05f);
-    check(order.state == State::Evade, "control breaks suppress");
+    check(order.state == State::Suppress, "control without pressure does not break suppress");
+    live.hp = 0.80f;
+    live.combatSeconds = 5.0f;
+    order = think(brain, live, &grip, 1, 0.05f);
+    check(order.state == State::Evade, "pressure lets control break suppress");
     live.controlledSeconds = 0.0f;
+    live.hp = 1.0f;
+    live.combatSeconds = 0.0f;
 
     brain = {};
     Sense pair[2] = { foe(1, 5.0f, 15000.0f, 8000.0f), foe(2, 6.0f, 80000.0f) };
@@ -467,6 +519,24 @@ int main() {
     blowCount = guardian_fight::tick(&home, 1, &rival, 1, 0.05f, {}, blows, 4);
     check(blowCount == 0 && !guardian_fight::vulnerable(0), "low health dodges with an invulnerable window");
     check(guardian_fight::vulnerable(3), "an untouched guardian can still be hit");
+
+    guardian_fight::reset();
+    home.hp = home.maxHp = 320.0f;
+    home.feet = {};
+    rival.feet = { 7.0f, 0.0f, 0.0f };
+    rival.alive = rival.active = true;
+    blowCount = guardian_fight::tick(&home, 1, &rival, 1, 0.5f, {}, blows, 4);
+    poseCount = guardian_fight::poses(&pose, 1);
+    check(poseCount == 1 && pose.feet.x < -0.2f && pose.feet.x > -0.85f &&
+          std::fabs(pose.feet.z) > std::fabs(pose.feet.x),
+          "wander strafes and only gives a little ground");
+    guardian_fight::reset();
+    home.feet = {};
+    rival.feet = { 6.5f, 0.0f, 0.0f };
+    guardian_fight::noteDamage(0, 7, 200);
+    blowCount = guardian_fight::tick(&home, 1, &rival, 1, 0.5f, {}, blows, 4);
+    poseCount = guardian_fight::poses(&pose, 1);
+    check(poseCount == 1 && pose.feet.x > 0.5f, "mid-range threat closes to attack");
 
     guardian_fight::Ground climb{ nullptr, lipStand, lipBlocked };
     guardian_fight::reset();

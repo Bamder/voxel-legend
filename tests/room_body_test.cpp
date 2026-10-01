@@ -22,6 +22,21 @@ void check(bool value, const char* message) {
 }
 
 int main() {
+    {
+        auto bytes = encodeMatchEnd(2, 4);
+        uint8_t team = 0, ritualId = 0;
+        check(decodeMatchEnd(bytes.data(), bytes.data() + bytes.size(), team, ritualId) &&
+              team == 2 && ritualId == 4,
+              "match end names the winning team and ritual");
+        check(!decodeMatchEnd(bytes.data(), bytes.data() + 1, team, ritualId),
+              "truncated match end rejected");
+        uint8_t spectator[] = { 0, 0 };
+        check(!decodeMatchEnd(spectator, spectator + 2, team, ritualId),
+              "a spectator team cannot win");
+        uint8_t unknown[] = { 1, 9 };
+        check(!decodeMatchEnd(unknown, unknown + 2, team, ritualId),
+              "an unknown ritual cannot end the match");
+    }
     check(matchmap::playableSpan(4, 64) == 2048, "full combat roster keeps the 2048 field");
     check(matchmap::playableSpan(2, 2) == 181, "two solo teams use the shrunk field");
     check(matchmap::playableSpan(1, 0) == matchmap::playableSpan(1, 2), "fewer than 2 players counts as 2");
@@ -547,10 +562,16 @@ int main() {
     int altarX = 0, altarZ = 0;
     int assignedAltar = ritual::assignedRitual(1);
     int altarY = 0;
-    check(structure::ritualAnchor(assignedAltar, altarX, altarZ) &&
-          structure::isOfferingCell(matchWorld, assignedAltar, altarX,
-                                    matchWorld.surfaceHeight(altarX, altarZ) + 1, altarZ),
+    int offeringY = -1;
+    check(structure::ritualAnchor(assignedAltar, altarX, altarZ),
           "painted ritual altar remains the authoritative offering site");
+    for (int y = 1; y < cfg::WORLD_H && offeringY < 0; ++y) {
+        if (structure::isOfferingCell(matchWorld, assignedAltar, altarX, y, altarZ))
+            offeringY = y;
+    }
+    check(offeringY >= 0, "the altar center column intersects the building volume");
+    check(!structure::isOfferingCell(matchWorld, assignedAltar, altarX + 40, offeringY, altarZ),
+          "a cell outside the altar building is not an offering cell");
     {
         matchmap::Zone home = matchmap::combatZone(0);
         int altarColX = matchmap::blockToCol(altarX, cfg::CHUNK_X);
@@ -564,14 +585,11 @@ int main() {
         int dz = altarZ - homeZ;
         check(dx * dx + dz * dz >= 160 * 160, "the altar stays clear of the spawn buildings");
     }
-    altarY = matchWorld.surfaceHeight(altarX, altarZ);
-    check(matchWorld.getBlock(altarX, altarY, altarZ) == BRICK &&
-          matchWorld.getBlock(altarX, altarY + 1, altarZ) == AIR,
-          "painted altar leaves its offering triangle accessible");
+    altarY = offeringY;
     int neededRelics[3];
     ritual::recipeRelics(assignedAltar, neededRelics);
     for (int i = 0; i < 3; ++i)
-        matchWorld.setBlock(altarX + i - 1, altarY + 1, altarZ,
+        matchWorld.setBlock(altarX, altarY + i, altarZ,
                             (uint8_t)ritual::blockId(neededRelics[i]), true, false);
     check(structure::offeringReady(matchWorld, assignedAltar),
           "three Boss relics complete the painted ritual site");

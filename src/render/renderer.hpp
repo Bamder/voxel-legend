@@ -237,6 +237,16 @@ struct UIState {
     bool storyHold = false;
     float storyFade = 1.0f;
     std::string storySentence;
+    bool endingOpen = false;
+    float endingCover = 0.0f;
+    float endingText = 0.0f;
+    bool endingHold = false;
+    bool endingExit = false;
+    bool endingExitHover = false;
+    bool endingFlag = false;
+    float endingFlagR = 1.0f, endingFlagG = 1.0f, endingFlagB = 1.0f;
+    std::string endingLeft;
+    std::string endingRight;
     std::vector<DeployPinView> deployPins;
 
     const vitals::Vitals* vitals = nullptr;
@@ -290,6 +300,7 @@ struct UIState {
     int roomMinPlayers = 1;
     int lobbyJoinHover = -1;   // team index of the "+" under the cursor
     int lobbyBtnHover = -1;    // 0 new team, 1 start, 2 back
+    int lobbyCooldown = 0;     // seconds until the host may start the next match
     bool roomHost = false;     // this machine created the room and runs the server
     bool roomSession = false;  // in a room match: hide privilege mode and the debug panel
     int roomPort = 35535;
@@ -458,7 +469,7 @@ private:
     void scrimFade(float w, float h);
     void tri(float x0, float y0, float x1, float y1, float x2, float y2,
              float r, float g, float b, float a);
-    void drawFlag(float x, float y, float w, float h, float r, float g, float b);
+    void drawFlag(float x, float y, float w, float h, float r, float g, float b, float a = 1.0f);
     void flushUI(unsigned int prog, unsigned int tex);
     void drawString(const std::string& s, float x, float y, float scale, float r, float g, float b, float a);
     void text(float x, float y, float scale, float r, float g, float b, float a, const char* fmt, ...);

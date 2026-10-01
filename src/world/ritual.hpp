@@ -4,7 +4,7 @@
 
 // Six rituals, three props each. Relics enter the match through authoritative
 // Boss rewards; ritual recipes and altar placement remain unchanged.
-// Each combat team is assigned a different recipe. Place its three items on that altar's triangle.
+// Each combat team is assigned a different recipe. Place its three items inside that altar building.
 namespace ritual {
 
 enum Relic : int {

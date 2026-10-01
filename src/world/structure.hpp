@@ -29,9 +29,9 @@ void stampColumn(int cx, int cz,
 
 bool nearRitual(int ritual, float x, float z);
 
-// Air cell directly above the brick triangle on that ritual's altar.
+// A cell inside that ritual altar's building, including the roof.
 bool isOfferingCell(World& world, int ritual, int x, int y, int z);
-// The team's three relics are all sitting in that triangle.
+// The team's three relics are all inside that altar building.
 bool offeringReady(World& world, int ritual);
 bool offeringPlaced(World& world, int ritual, int relic);
 bool ritualAnchor(int ritual, int& x, int& z);

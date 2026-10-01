@@ -43,7 +43,8 @@ public:
     int remoteCount() const { return (int)remotes.size(); }
 
     void poll();
-    void broadcast(const std::vector<RoomTeamNet>& teams, const std::vector<RoomPlayerNet>& players);
+    void broadcast(const std::vector<RoomTeamNet>& teams, const std::vector<RoomPlayerNet>& players,
+                   uint8_t startCooldown = 0);
     void sendMatchStart();
     bool flushOut(int timeoutMs);
 
@@ -77,7 +78,8 @@ private:
 
 class LobbyGuest {
 public:
-    bool connect(const std::string& host, uint16_t port, const std::string& name, std::string& err);
+    bool connect(const std::string& host, uint16_t port, const std::string& name, std::string& err,
+                 int timeoutMs = 2000);
     void close();
     void poll();
     void sendJoinTeam(int team);
@@ -87,6 +89,7 @@ public:
     const std::string& host() const { return hostAddr; }
     uint16_t port() const { return hostPort; }
     bool takeLobby(uint16_t& port, std::vector<RoomTeamNet>& teams, std::vector<RoomPlayerNet>& players);
+    uint8_t startCooldown() const { return startWait; }
 
 private:
     NetConn conn;
@@ -99,6 +102,7 @@ private:
     uint16_t hostPort = 0;
     std::vector<RoomTeamNet> teams;
     std::vector<RoomPlayerNet> players;
+    uint8_t startWait = 0;
 };
 
 class GameClient {
@@ -131,6 +135,7 @@ public:
     std::vector<PlayDeltaNet> takeDeltas();
     std::vector<ClueQuizNet> takeClueQuizzes();
     bool takeDeploy(std::vector<DeployPinNet>& out);
+    bool takeMatchEnd(uint8_t& team, uint8_t& ritual);
 
 private:
     enum class Phase { Idle, Connecting, WaitWelcome, Play, Dead };
@@ -160,6 +165,9 @@ private:
     std::vector<ClueQuizNet> clueQuizzes;
     std::vector<DeployPinNet> deploySnap;
     bool deployFresh = false;
+    bool matchEndFresh = false;
+    uint8_t matchEndTeam = 0;
+    uint8_t matchEndRitual = 0;
     long long deadlineMs = 0;
     long long retryAtMs = 0;
 };

@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2610010005u;
+constexpr uint32_t kRoomProto = 2610010006u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -47,7 +47,8 @@ enum class RoomMsg : uint16_t {
     DeploySync = 11, // server: same-team pins (aiming X or fading dot)
     PlaceProgress = 14, // server: buildings placed, then the total to place
     ClueQuiz = 12,   // server: question or answer result; never includes answer key
-    ClueAnswer = 13  // client: challenge id and one of four option indices
+    ClueAnswer = 13, // client: challenge id and one of four option indices
+    MatchEnd = 15    // server: winning combat team (1..6) and its ritual index
 };
 
 struct ClueQuizNet {
@@ -350,7 +351,8 @@ inline bool decodeWelcome(const uint8_t* p, const uint8_t* end, uint32_t& id) {
 
 inline std::vector<uint8_t> encodeLobby(uint16_t port, uint32_t hostId,
                                         const std::vector<RoomTeamNet>& teams,
-                                        const std::vector<RoomPlayerNet>& players) {
+                                        const std::vector<RoomPlayerNet>& players,
+                                        uint8_t startCooldown = 0) {
     Buf b;
     b.u16(port);
     b.u32(hostId);
@@ -369,11 +371,13 @@ inline std::vector<uint8_t> encodeLobby(uint16_t port, uint32_t hostId,
         b.i32(pl.team);
         b.u8(pl.host ? 1 : 0);
     }
+    b.u8(startCooldown > 10 ? 10 : startCooldown);
     return b.data();
 }
 
 inline bool decodeLobby(const uint8_t* p, const uint8_t* end, uint16_t& port, uint32_t& hostId,
-                        std::vector<RoomTeamNet>& teams, std::vector<RoomPlayerNet>& players) {
+                        std::vector<RoomTeamNet>& teams, std::vector<RoomPlayerNet>& players,
+                        uint8_t* startCooldown = nullptr) {
     teams.clear();
     players.clear();
     if (!Buf::u16(p, end, port) || !Buf::u32(p, end, hostId)) return false;
@@ -398,6 +402,10 @@ inline bool decodeLobby(const uint8_t* p, const uint8_t* end, uint16_t& port, ui
             return false;
         players[i].host = host != 0;
     }
+    uint8_t cool = 0;
+    if (p < end && !Buf::u8(p, end, cool)) return false;
+    if (cool > 10) cool = 0;
+    if (startCooldown) *startCooldown = cool;
     return true;
 }
 
@@ -480,6 +488,18 @@ inline std::vector<uint8_t> encodePlaceProgress(uint16_t done, uint16_t total) {
 
 inline bool decodePlaceProgress(const uint8_t* p, const uint8_t* end, uint16_t& done, uint16_t& total) {
     return Buf::u16(p, end, done) && Buf::u16(p, end, total) && done <= total && p == end;
+}
+
+inline std::vector<uint8_t> encodeMatchEnd(uint8_t team, uint8_t ritual) {
+    Buf b;
+    b.u8(team);
+    b.u8(ritual);
+    return b.data();
+}
+
+inline bool decodeMatchEnd(const uint8_t* p, const uint8_t* end, uint8_t& team, uint8_t& ritual) {
+    return Buf::u8(p, end, team) && team >= 1 && team <= 6 &&
+        Buf::u8(p, end, ritual) && ritual < 6 && p == end;
 }
 
 inline std::vector<uint8_t> encodeDeploySync(const std::vector<DeployPinNet>& pins) {
