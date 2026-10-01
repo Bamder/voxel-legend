@@ -700,6 +700,11 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     }
     if (seed == 0) seed = 1;
 
+    int combatTeams = 0;
+    int combatPlayers = 0;
+    countCombatRoster(teams, roster, combatTeams, combatPlayers);
+    matchmap::setSpan(matchmap::playableSpan(combatTeams, combatPlayers));
+
     World world(seed);
     world.setSaveEnabled(false);
     world.reset(seed);
@@ -712,7 +717,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     int sh = world.surfaceHeight(8, 8);
     Vec3 base{ 8.5f * S, (float)(sh + 3) * S, 8.5f * S };
     char line[128];
-    snprintf(line, sizeof(line), "seed %u port %u", seed, (unsigned)port);
+    snprintf(line, sizeof(line), "seed %u port %u span %d combat teams %d players %d",
+             seed, (unsigned)port, matchmap::span(), combatTeams, combatPlayers);
     slog(log, line);
 
     SOCKET listenSock = INVALID_SOCKET;
@@ -1344,7 +1350,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
             for (SClient& c : clients) {
                 if (!c.known || c.sentWelcome) continue;
                 c.conn.send((uint16_t)RoomMsg::PlayWelcome,
-                            encodePlayWelcome(c.id, seed, c.x, c.y, c.z, c.spectator, c.team));
+                            encodePlayWelcome(c.id, seed, c.x, c.y, c.z, c.spectator, c.team,
+                                              matchmap::span()));
                 c.sentWelcome = true;
                 snprintf(line, sizeof(line), "welcome %u %s", c.id, c.name.c_str());
                 slog(log, line);

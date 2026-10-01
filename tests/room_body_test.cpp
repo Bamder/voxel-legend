@@ -22,6 +22,25 @@ void check(bool value, const char* message) {
 }
 
 int main() {
+    check(matchmap::playableSpan(4, 64) == 2048, "full combat roster keeps the 2048 field");
+    check(matchmap::playableSpan(2, 2) == 181, "two solo teams use the shrunk field");
+    check(matchmap::playableSpan(1, 0) == matchmap::playableSpan(1, 2), "fewer than 2 players counts as 2");
+    check(matchmap::playableSpan(6, 90) == 2048, "teams above 4 and players above 64 stay at the full field");
+    check(matchmap::span() == matchmap::kFullSpan, "tests start from the full field");
+
+    std::vector<RoomTeamNet> teams(4);
+    teams[0].spectator = true;
+    std::vector<RoomPlayerNet> players(5);
+    players[0].team = 0;
+    players[1].team = 0;
+    players[2].team = 1;
+    players[3].team = 2;
+    players[4].team = -1;
+    int combatTeams = 0, combatPlayers = 0;
+    countCombatRoster(teams, players, combatTeams, combatPlayers);
+    check(combatTeams == 2 && combatPlayers == 2,
+          "spectators, unassigned players, and empty combat teams stay out of the field roster");
+
     check(clue_quiz::count() == 50, "clue question bank contains exactly 50 questions");
     std::unordered_set<std::string> subjects;
     std::unordered_set<std::string> prompts;

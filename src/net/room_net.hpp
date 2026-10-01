@@ -119,6 +119,7 @@ public:
     float spawnZ() const { return sz; }
     bool spectator() const { return spec; }
     int team() const { return teamId; }
+    int span() const { return playSpan; }
     void sendInput(const PlayInputNet& in);
     void sendDeploy(uint8_t action, int bx, int bz);
     void sendClueAnswer(uint32_t challengeId, uint8_t option);
@@ -146,6 +147,7 @@ private:
     float sx = 0, sy = 0, sz = 0;
     bool spec = false;
     int teamId = -1;
+    int playSpan = 0;
     std::vector<PlayDeltaNet> deltas;
     std::vector<ClueQuizNet> clueQuizzes;
     std::vector<DeployPinNet> deploySnap;

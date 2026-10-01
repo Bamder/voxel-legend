@@ -4,18 +4,43 @@
 #include "../core/config.hpp"
 #include "../core/math.hpp"
 
-// Multiplayer field: 2048×2048 playable chunk columns, plus one outer ring.
+// Multiplayer field: a square of playable chunk columns, plus one outer ring.
 // Gray fog starts on the first block of that ring, is opaque at half its depth,
-// and the outer face stops travel.
+// and the outer face stops travel. The side length follows the combat roster.
 namespace matchmap {
 
-inline constexpr int kSpan = 2048;
+inline constexpr int kFullSpan = 2048;
 inline constexpr int kRim = 1;
+inline int g_span = kFullSpan;
 
-inline int playMin() { return -kSpan / 2; }          // -8
-inline int playMax() { return playMin() + kSpan - 1; } // 7
-inline int rimMin() { return playMin() - kRim; }     // -9
-inline int rimMax() { return playMax() + kRim; }     // 8
+inline int span() { return g_span; }
+inline void setSpan(int chunkColumns) {
+    if (chunkColumns < 1) chunkColumns = 1;
+    if (chunkColumns > kFullSpan) chunkColumns = kFullSpan;
+    g_span = chunkColumns;
+}
+
+// Side length in chunk columns.
+// n is combat players, clamped to [2, 64]. t is combat teams, clamped to [1, 4].
+// Full roster (4 teams, 64 players) stays at kFullSpan.
+inline int playableSpan(int combatTeams, int combatPlayers) {
+    int t = combatTeams;
+    int n = combatPlayers;
+    if (t < 1) t = 1;
+    if (t > 4) t = 4;
+    if (n < 2) n = 2;
+    if (n > 64) n = 64;
+    const double side = (double)kFullSpan * std::pow(n / 64.0, 0.65) * std::pow(t / 4.0, 0.25);
+    int columns = (int)std::lround(side);
+    if (columns < 1) columns = 1;
+    if (columns > kFullSpan) columns = kFullSpan;
+    return columns;
+}
+
+inline int playMin() { return -span() / 2; }
+inline int playMax() { return playMin() + span() - 1; }
+inline int rimMin() { return playMin() - kRim; }
+inline int rimMax() { return playMax() + kRim; }
 
 inline bool columnPlayable(int cx, int cz) {
     return cx >= playMin() && cx <= playMax() && cz >= playMin() && cz <= playMax();

@@ -1797,6 +1797,7 @@ int main(int argc, char** argv) {
         roomSession = false;
         roomTeams.clear();
         roomPlayers.clear();
+        matchmap::setSpan(matchmap::kFullSpan);
         world.reset(seed);
         world.setSaveEnabled(false);
         currentWorld.clear();
@@ -2184,6 +2185,7 @@ int main(int argc, char** argv) {
             if (!loadSeedApplied) {
                 uint32_t s = gameClient.seed();
                 if (s == 0) s = 1;
+                matchmap::setSpan(gameClient.span());
                 world.reset(s);
                 world.setSaveEnabled(false);
                 world.setMatchBounds(true);
