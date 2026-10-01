@@ -814,6 +814,9 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     building_loot::Spawner lootSpawner(world, seed);
 
     bool populatedTeams[matchmap::kCombatTeams]{};
+    bool teamWanted[matchmap::kCombatTeams]{};
+    bool contentStarted = false;
+    bool contentLogged = false;
     std::array<bool, ritual::RelicCount> defeatedGuardians{};
     auto finishGuardian = [&](int relic, int gx, int gy, int gz) {
         if (relic < 0 || relic >= ritual::RelicCount) return;
@@ -1023,13 +1026,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                     room_body::spawn(c.body, {c.x, c.y, c.z});
                     c.body.player.yaw = c.yaw;
                     c.body.player.pitch = c.pitch;
-                    if (!c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams &&
-                        !populatedTeams[c.team - 1]) {
-                        populatedTeams[c.team - 1] = match_content::populateTeam(
-                            world, lootSpawner, clueDirector, seed, c.team);
-                        if (!populatedTeams[c.team - 1])
-                            slog(log, "match content placement failed");
-                    }
+                    if (!c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams)
+                        teamWanted[c.team - 1] = true;
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
                     if (!decodePlayInput(p, end, in)) continue;
@@ -1329,9 +1327,44 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                 c.conn.send((uint16_t)RoomMsg::PlayWelcome,
                             encodePlayWelcome(c.id, seed, c.x, c.y, c.z, c.spectator, c.team,
                                               matchmap::span(), matchmap::activeTeamMask()));
+                c.conn.pump();
                 c.sentWelcome = true;
                 snprintf(line, sizeof(line), "welcome %u %s", c.id, c.name.c_str());
                 slog(log, line);
+            }
+        }
+
+        if (worldReady) {
+            bool anyWanted = false;
+            for (bool wanted : teamWanted)
+                if (wanted) anyWanted = true;
+            if (anyWanted) {
+                if (!contentStarted) {
+                    match_content::beginMatchContent(world, lootSpawner, seed);
+                    contentStarted = true;
+                    slog(log, "placing match content");
+                }
+                if (!match_content::matchContentReady())
+                    match_content::advanceMatchContent(world, lootSpawner, seed);
+                if (match_content::matchContentReady()) {
+                    for (SClient& c : clients) {
+                        if (!c.known || c.spectator || c.team < 1 || c.team > matchmap::kCombatTeams)
+                            continue;
+                        if (!teamWanted[c.team - 1] || populatedTeams[c.team - 1]) continue;
+                        populatedTeams[c.team - 1] = match_content::populateTeam(
+                            world, lootSpawner, clueDirector, seed, c.team);
+                        teamWanted[c.team - 1] = false;
+                        if (!populatedTeams[c.team - 1])
+                            slog(log, "match content placement failed");
+                        else if (clueDirector.targetFor(c.team).active &&
+                                 !inventoryHas(c.inventory, ITEM_CLUE))
+                            room_inventory::add(c.inventory, ITEM_CLUE, 1);
+                    }
+                    if (!contentLogged) {
+                        slog(log, "match content placed");
+                        contentLogged = true;
+                    }
+                }
             }
         }
 

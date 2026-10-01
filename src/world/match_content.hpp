@@ -13,6 +13,12 @@ int resourceBuildingTotal(int combatTeams, int combatPlayers, uint32_t pick);
 // Splits total across the three types so the counts differ by at most one.
 void splitResourceBuildings(int total, uint32_t pick, int outTypes[3]);
 
+// Placement is shared by every team. The server can paint one site per tick
+// so the welcome handshake is not stuck behind the whole map.
+void beginMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed);
+bool advanceMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed);
+bool matchContentReady();
+
 // Called once for each team that actually enters the match. The server owns
 // the spawned drops and clue bindings; no other team needs to be present.
 bool populateTeam(World& world, building_loot::Spawner& loot,

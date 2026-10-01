@@ -97,86 +97,131 @@ int claimRoom(int type, int team, int minSpots) {
     return reuse;
 }
 
-void ensureMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed) {
-    if (g_roomsWorld == &world && g_roomsSeed == seed && !g_rooms.empty()) return;
-    g_rooms.clear();
-    g_roomsWorld = &world;
-    g_roomsSeed = seed;
+enum class PlaceKind : uint8_t { Relic, Altar, Building };
 
-    for (int relic = 0; relic < ritual::RelicCount; ++relic)
-        structure::anchorRelicRuin(world, relic);
-    for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
-        if (!matchmap::teamInMatch(team)) continue;
-        int assigned = ritual::assignedRitual(team);
-        if (assigned >= 0) structure::paintMatchRitualAltar(world, assigned);
-    }
+struct PlaceJob {
+    PlaceKind kind = PlaceKind::Relic;
+    int a = 0;
+    int b = 0;
+};
 
-    uint32_t rng = seed ? seed : 1u;
-    auto next = [&]() {
-        rng = rng * 1664525u + 1013904223u;
-        return rng;
-    };
-    int counts[3] = {};
-    int total = resourceBuildingTotal(matchmap::rosterTeams(), matchmap::rosterPlayers(), next());
-    splitResourceBuildings(total, next(), counts);
-    int x0 = matchmap::playMin() * cfg::CHUNK_X + 24;
-    int x1 = (matchmap::playMax() + 1) * cfg::CHUNK_X - 24;
-    if (x1 <= x0) {
-        x0 = matchmap::playMin() * cfg::CHUNK_X;
-        x1 = x0 + cfg::CHUNK_X;
-    }
-    int span = x1 - x0;
+std::vector<PlaceJob> g_jobs;
+int g_job = 0;
+bool g_planned = false;
+uint32_t g_placeRng = 1;
+int g_placeX0 = 0;
+int g_placeSpan = 1;
+
+bool plannedFor(const World& world, uint32_t seed) {
+    return g_planned && g_roomsWorld == &world && g_roomsSeed == seed;
+}
+
+uint32_t nextPlaceRng() {
+    g_placeRng = g_placeRng * 1664525u + 1013904223u;
+    return g_placeRng;
+}
+
+void placeOneBuilding(World& world, building_loot::Spawner& loot, uint32_t seed, int type, int n) {
     const int needSpots[3] = {2, 6, 1};
-    for (int type = 0; type < 3; ++type) {
-        for (int n = 0; n < counts[type]; ++n) {
-            bool accepted = false;
-            int fallbackX = x0 + span / 2;
-            int fallbackZ = fallbackX;
-            for (int attempt = 0; attempt < 40 && !accepted; ++attempt) {
-                int x = x0 + (int)(next() % (uint32_t)span);
-                int z = x0 + (int)(next() % (uint32_t)span);
-                if (!clearOfSites(x, z)) continue;
-                bool spaced = true;
-                for (const PlacedRoom& room : g_rooms) {
-                    if (!separated(x, z, room.x, room.z, 48)) { spaced = false; break; }
-                }
-                if (!spaced) continue;
-                int h = world.surfaceHeight(x, z);
-                if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::WORLD_H - 28) continue;
-                int y = std::min(h, cfg::WORLD_H - 26);
-                for (int cz = floorDiv(z - 21, cfg::CHUNK_Z); cz <= floorDiv(z + 21, cfg::CHUNK_Z); ++cz)
-                    for (int cx = floorDiv(x - 21, cfg::CHUNK_X); cx <= floorDiv(x + 21, cfg::CHUNK_X); ++cx)
-                        world.ensureColumn(cx, cz);
-                if (!structure::paintRoomBuilding(world, x, y, z, type)) continue;
-                PlacedRoom room;
-                room.type = type;
-                room.x = x;
-                room.z = z;
-                room.spots = roomSpots(world, x, y, z, seed ^ uint32_t(type * 131 + n * 17));
-                if ((int)room.spots.size() < needSpots[type] && attempt < 39) continue;
-                const building_loot::Entry stock[] = {
-                    {PLANKS, 2, 6, 3}, {COBBLE, 2, 6, 3}, {STONE, 1, 4, 1},
-                };
-                if (!room.spots.empty())
-                    loot.spawnRandomLootAt(room.spots[0], stock);
-                g_rooms.push_back(std::move(room));
-                accepted = true;
-            }
-            if (!accepted) {
-                PlacedRoom room;
-                room.type = type;
-                room.x = fallbackX;
-                room.z = fallbackZ;
-                int y = std::min(world.surfaceHeight(fallbackX, fallbackZ), cfg::WORLD_H - 26);
-                structure::paintRoomBuilding(world, fallbackX, y, fallbackZ, type);
-                room.spots = roomSpots(world, fallbackX, y, fallbackZ, seed ^ 0x51u);
-                g_rooms.push_back(std::move(room));
-            }
+    bool accepted = false;
+    int fallbackX = g_placeX0 + g_placeSpan / 2;
+    int fallbackZ = fallbackX;
+    for (int attempt = 0; attempt < 40 && !accepted; ++attempt) {
+        int x = g_placeX0 + (int)(nextPlaceRng() % (uint32_t)g_placeSpan);
+        int z = g_placeX0 + (int)(nextPlaceRng() % (uint32_t)g_placeSpan);
+        if (!clearOfSites(x, z)) continue;
+        bool spaced = true;
+        for (const PlacedRoom& room : g_rooms) {
+            if (!separated(x, z, room.x, room.z, 48)) { spaced = false; break; }
         }
+        if (!spaced) continue;
+        int h = world.surfaceHeight(x, z);
+        if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::WORLD_H - 28) continue;
+        int y = std::min(h, cfg::WORLD_H - 26);
+        for (int cz = floorDiv(z - 21, cfg::CHUNK_Z); cz <= floorDiv(z + 21, cfg::CHUNK_Z); ++cz)
+            for (int cx = floorDiv(x - 21, cfg::CHUNK_X); cx <= floorDiv(x + 21, cfg::CHUNK_X); ++cx)
+                world.ensureColumn(cx, cz);
+        if (!structure::paintRoomBuilding(world, x, y, z, type)) continue;
+        PlacedRoom room;
+        room.type = type;
+        room.x = x;
+        room.z = z;
+        room.spots = roomSpots(world, x, y, z, seed ^ uint32_t(type * 131 + n * 17));
+        if ((int)room.spots.size() < needSpots[type] && attempt < 39) continue;
+        const building_loot::Entry stock[] = {
+            {PLANKS, 2, 6, 3}, {COBBLE, 2, 6, 3}, {STONE, 1, 4, 1},
+        };
+        if (!room.spots.empty())
+            loot.spawnRandomLootAt(room.spots[0], stock);
+        g_rooms.push_back(std::move(room));
+        accepted = true;
+    }
+    if (!accepted) {
+        PlacedRoom room;
+        room.type = type;
+        room.x = fallbackX;
+        room.z = fallbackZ;
+        int y = std::min(world.surfaceHeight(fallbackX, fallbackZ), cfg::WORLD_H - 26);
+        structure::paintRoomBuilding(world, fallbackX, y, fallbackZ, type);
+        room.spots = roomSpots(world, fallbackX, y, fallbackZ, seed ^ 0x51u);
+        g_rooms.push_back(std::move(room));
     }
 }
 
+void ensureMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed) {
+    beginMatchContent(world, loot, seed);
+    while (!matchContentReady()) advanceMatchContent(world, loot, seed);
+}
+
 } // namespace
+
+void beginMatchContent(World& world, building_loot::Spawner&, uint32_t seed) {
+    if (plannedFor(world, seed)) return;
+    g_rooms.clear();
+    g_roomsWorld = &world;
+    g_roomsSeed = seed;
+    g_jobs.clear();
+    g_job = 0;
+    g_planned = true;
+    for (int relic = 0; relic < ritual::RelicCount; ++relic) {
+        int x = 0, z = 0;
+        if (!structure::relicAnchor(relic, x, z)) continue;
+        g_jobs.push_back({PlaceKind::Relic, relic, 0});
+    }
+    for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
+        if (!matchmap::teamInMatch(team)) continue;
+        int assigned = ritual::assignedRitual(team);
+        if (assigned >= 0) g_jobs.push_back({PlaceKind::Altar, assigned, team});
+    }
+    g_placeRng = seed ? seed : 1u;
+    int counts[3] = {};
+    int total = resourceBuildingTotal(matchmap::rosterTeams(), matchmap::rosterPlayers(), nextPlaceRng());
+    splitResourceBuildings(total, nextPlaceRng(), counts);
+    g_placeX0 = matchmap::playMin() * cfg::CHUNK_X + 24;
+    int x1 = (matchmap::playMax() + 1) * cfg::CHUNK_X - 24;
+    if (x1 <= g_placeX0) {
+        g_placeX0 = matchmap::playMin() * cfg::CHUNK_X;
+        x1 = g_placeX0 + cfg::CHUNK_X;
+    }
+    g_placeSpan = std::max(1, x1 - g_placeX0);
+    for (int type = 0; type < 3; ++type)
+        for (int n = 0; n < counts[type]; ++n)
+            g_jobs.push_back({PlaceKind::Building, type, n});
+}
+
+bool advanceMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed) {
+    if (!plannedFor(world, seed)) beginMatchContent(world, loot, seed);
+    if (g_job >= (int)g_jobs.size()) return true;
+    const PlaceJob job = g_jobs[(size_t)g_job++];
+    if (job.kind == PlaceKind::Relic) structure::anchorRelicRuin(world, job.a);
+    else if (job.kind == PlaceKind::Altar) structure::paintMatchRitualAltar(world, job.a);
+    else placeOneBuilding(world, loot, seed, job.a, job.b);
+    return g_job >= (int)g_jobs.size();
+}
+
+bool matchContentReady() {
+    return g_planned && g_job >= (int)g_jobs.size();
+}
 
 int resourceBuildingTotal(int combatTeams, int combatPlayers, uint32_t pick) {
     if (combatTeams < 0) combatTeams = 0;
