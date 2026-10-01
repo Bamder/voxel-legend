@@ -389,6 +389,7 @@ private:
     int uParticleMVP = 0, uParticleColor = 0, uParticleSoftness = 0, uParticleRing = 0;
     int uHumMVP = 0, uHumTexMVP = 0, uHumTexAtlas = 0;
     int uHumLit = 0, uHumSunDir = 0, uHumSunColor = 0, uHumAmbient = 0, uHumFogColor = 0, uHumFogDensity = 0;
+    int uHumFogOfs = 0, uHumFogMul = 0;
     int uHumTexLit = 0, uHumTexSunDir = 0, uHumTexSunColor = 0, uHumTexAmbient = 0, uHumTexFogColor = 0, uHumTexFogDensity = 0;
     int uUIScreen = 0, uUITex = 0, uUITextScreen = 0, uUITextTex = 0;
 
@@ -494,7 +495,8 @@ private:
     void drawCrosshairPromptText(const std::vector<CrosshairPromptBox>& boxes);
     void drawBlockIcon(uint8_t block, float x, float y, float size);
     void drawModelItemIcon(uint8_t block, const mat::Model& model, float x, float y, float size);
-    void drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, const Sky* sun, float fogDensity);
+    void drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, const Sky* sun, float fogDensity,
+                      float fogOx = 0.0f, float fogOy = 0.0f, float fogOz = 0.0f, float fogMul = 1.0f);
     void buttonChrome(float x, float y, float w, float h, bool hovered,
                       float fr = 0.47f, float fg = 0.47f, float fb = 0.47f);
     void drawMenu(UIState& ui);

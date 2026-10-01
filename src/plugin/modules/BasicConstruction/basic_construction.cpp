@@ -53,21 +53,21 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "Shirt",         false, false, false, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.40f, 0.50f, false, 0.0f, 0.0f },
     { "Shorts",        false, false, false, false, TEX_BARK, TEX_BARK, TEX_BARK, TEX_BARK, 0.35f, 0.50f, false, 0.0f, 0.0f },
     { "Shoes",         false, false, false, false, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, 0.50f, 0.60f, false, 0.0f, 0.0f },
-    { "元素核心", true, false, true, false, TEX_DIAMOND, TEX_DIAMOND, TEX_DIAMOND, TEX_DIAMOND, 0.40f, 0.45f, false, 0.0f, 0.0f },
-    { "原始之火", true, false, true, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.40f, 0.45f, false, 0.0f, 0.0f },
-    { "静滞之水", true, false, true, false, TEX_WATER, TEX_WATER, TEX_WATER, TEX_WATER, 0.40f, 0.20f, false, 0.0f, 0.0f },
-    { "生命嫩枝", true, false, true, false, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, 0.30f, 0.40f, false, 0.0f, 0.0f },
-    { "根须织毯", true, false, true, false, TEX_BARK, TEX_BARK, TEX_BARK, TEX_BARK, 0.30f, 0.55f, false, 0.0f, 0.0f },
-    { "裁决天平", true, false, true, false, TEX_GOLD, TEX_GOLD, TEX_GOLD, TEX_GOLD, 0.50f, 0.40f, false, 0.0f, 0.0f },
-    { "黄金冠冕", true, false, true, false, TEX_GOLD, TEX_GOLD, TEX_GOLD, TEX_GOLD, 0.50f, 0.42f, false, 0.0f, 0.0f },
-    { "审判之书", true, false, true, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.35f, 0.48f, false, 0.0f, 0.0f },
-    { "鳞片沙漏", true, false, true, false, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, 0.40f, 0.36f, false, 0.0f, 0.0f },
-    { "循环刻印", true, false, true, false, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, 0.45f, 0.65f, false, 0.0f, 0.0f },
-    { "深渊棱镜", true, false, true, false, TEX_GLASS, TEX_GLASS, TEX_GLASS, TEX_GLASS, 0.40f, 0.18f, false, 0.0f, 0.0f },
-    { "上古图腾", true, false, true, false, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, 0.45f, 0.60f, false, 0.0f, 0.0f },
-    { "残响符石", true, false, true, false, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, 0.45f, 0.72f, false, 0.0f, 0.0f },
-    { "旧神骸骨", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.35f, 0.30f, false, 0.0f, 0.0f },
-    { "无目雕像", true, false, true, false, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, 0.55f, 0.58f, false, 0.0f, 0.0f },
+    { "元素核心", false, false, true, false, TEX_DIAMOND, TEX_DIAMOND, TEX_DIAMOND, TEX_DIAMOND, 0.40f, 0.45f, false, 0.0f, 0.0f },
+    { "原始之火", false, false, true, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.40f, 0.45f, false, 0.0f, 0.0f },
+    { "静滞之水", false, false, true, false, TEX_WATER, TEX_WATER, TEX_WATER, TEX_WATER, 0.40f, 0.20f, false, 0.0f, 0.0f },
+    { "生命嫩枝", false, false, true, false, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, 0.30f, 0.40f, false, 0.0f, 0.0f },
+    { "根须织毯", false, false, true, false, TEX_BARK, TEX_BARK, TEX_BARK, TEX_BARK, 0.30f, 0.55f, false, 0.0f, 0.0f },
+    { "裁决天平", false, false, true, false, TEX_GOLD, TEX_GOLD, TEX_GOLD, TEX_GOLD, 0.50f, 0.40f, false, 0.0f, 0.0f },
+    { "黄金冠冕", false, false, true, false, TEX_GOLD, TEX_GOLD, TEX_GOLD, TEX_GOLD, 0.50f, 0.42f, false, 0.0f, 0.0f },
+    { "审判之书", false, false, true, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.35f, 0.48f, false, 0.0f, 0.0f },
+    { "鳞片沙漏", false, false, true, false, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, 0.40f, 0.36f, false, 0.0f, 0.0f },
+    { "循环刻印", false, false, true, false, TEX_STONE, TEX_STONE, TEX_STONE, TEX_STONE, 0.45f, 0.65f, false, 0.0f, 0.0f },
+    { "深渊棱镜", false, false, true, false, TEX_GLASS, TEX_GLASS, TEX_GLASS, TEX_GLASS, 0.40f, 0.18f, false, 0.0f, 0.0f },
+    { "上古图腾", false, false, true, false, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, TEX_LOG_SIDE, 0.45f, 0.60f, false, 0.0f, 0.0f },
+    { "残响符石", false, false, true, false, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, TEX_COBBLE, 0.45f, 0.72f, false, 0.0f, 0.0f },
+    { "旧神骸骨", false, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.35f, 0.30f, false, 0.0f, 0.0f },
+    { "无目雕像", false, false, true, false, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, TEX_SANDSTONE, 0.55f, 0.58f, false, 0.0f, 0.0f },
     { "火球术卷轴", false, false, false, false, TEX_COAL, TEX_COAL, TEX_COAL, TEX_COAL, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "灰白石", true, false, true, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 40.00f, 0.80f, false, 0.0f, 0.0f },
     { "标靶", false, false, false, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 1.00f, 0.50f, false, 0.0f, 0.0f },
@@ -139,6 +139,24 @@ struct CoreStrategy : BlockStrategy {
 };
 struct UnplaceableStrategy : BlockStrategy {
     bool canPlace(uint8_t) const override { return false; }
+};
+// Ritual relics stay unplaceable except on the offering path. Their figure is
+// the authored cuboids, so a placed offering is not a full texture cube.
+struct RelicStrategy : BlockStrategy {
+    bool canPlace(uint8_t) const override { return false; }
+    bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int, uint8_t, uint8_t) override {
+        uint8_t id = ch.get(lx, y, lz);
+        const mat::Model& model = mat::g_itemModels[id];
+        if (model.cube || (model.quads.empty() && model.solids.empty())) return false;
+        auto xform = [&](float mx, float my, float mz) {
+            return Vec3{ (float)lx + mx, (float)y + my, (float)lz + mz };
+        };
+        if (!model.quads.empty() || mat::modelHasSolidTex(model))
+            mat::emitModelMesh(model, ch.meshOpaque, xform, blockOf(id).icon);
+        if (!model.solids.empty())
+            mat::emitSolidMesh(model.solids, ch.meshSolid, xform, false, 1.0f);
+        return true;
+    }
 };
 struct LogStrategy : BlockStrategy {
     uint8_t dropItem(uint8_t) const override { return LOG; }
@@ -261,6 +279,7 @@ BedrockStrategy g_bedrock;
 ShellStrategy g_shell;
 CoreStrategy g_core;
 UnplaceableStrategy g_unplaceable;
+RelicStrategy g_relic;
 LogStrategy g_log;
 ShrubStemStrategy g_shrubStem;
 LightPropStrategy g_lightProp;
@@ -273,7 +292,7 @@ BlockStrategy* strategyFor(int id) {
     if (id == ITEM_TARGET) return &g_unplaceable;
     if (id == ITEM_ARCANE_FIREBALL || id == ITEM_ARCANE_FREEZE || id == ITEM_ARCANE_HEAL ||
         id == ITEM_GUIDE_BOOK || id == ITEM_CLUE) return &g_unplaceable;
-    if (id >= ITEM_ELEM_CORE && id <= ITEM_EYELESS) return &g_unplaceable;
+    if (id >= ITEM_ELEM_CORE && id <= ITEM_EYELESS) return &g_relic;
     switch (id) {
         case BEDROCK:    return &g_bedrock;
         case STICK:

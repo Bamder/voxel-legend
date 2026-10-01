@@ -9,7 +9,7 @@
 // and the outer face stops travel. The side length follows the combat roster.
 namespace matchmap {
 
-inline constexpr int kFullSpan = 2048;
+inline constexpr int kFullSpan = 512;
 inline constexpr int kRim = 1;
 inline int g_span = kFullSpan;
 // Bit 0 is combat team 1. Default keeps every slot so a match that has not
@@ -35,7 +35,7 @@ inline void setSpan(int chunkColumns) {
     g_span = chunkColumns;
 }
 
-// Side length in chunk columns.
+// Side length in chunk columns: 512 · (n/64)^0.65 · (t/4)^0.25.
 // n is combat players, clamped to [2, 64]. t is combat teams, clamped to [1, 4].
 // Full roster (4 teams, 64 players) stays at kFullSpan.
 inline int playableSpan(int combatTeams, int combatPlayers) {

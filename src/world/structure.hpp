@@ -36,8 +36,9 @@ bool offeringReady(World& world, int ritual);
 bool offeringPlaced(World& world, int ritual, int relic);
 bool ritualAnchor(int ritual, int& x, int& z);
 
-// The relic block on a guardian platform is a hidden token, not the pickup.
-// Defeating that guardian removes the token and the caller spawns the drop.
+// The core under a guardian is a hidden token, not the pickup.
+// Defeating that guardian replaces the token with the surrounding floor.
+// The relic item is spawned just above the guardian's feet.
 struct GuardianSpan {
     int relic = -1;
     float feetX = 0, feetY = 0, feetZ = 0;
@@ -53,6 +54,10 @@ bool raycastGuardian(const World& world, const Vec3& origin, const Vec3& dir, fl
 // True on the blow that drops the relic. Writes the token cell.
 // amount is subtracted from the guardian's hit points. Zero deals no damage.
 bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, int& z);
+// Drop origin for that guardian's relic. Uses the live stance when one is set.
+Vec3 guardianRelicDropPos(int relic, int tokenX, int tokenY, int tokenZ);
+// Swap the hidden core for a neighboring solid so the floor stays walkable.
+void clearGuardianToken(World& world, int x, int y, int z);
 // Hurt dealt by one swing, after armor, resistance, and multipliers.
 int guardianStrikeHurt(uint8_t held, int relic);
 // Converts Arcane percentage damage into this legacy guardian's integer HP.

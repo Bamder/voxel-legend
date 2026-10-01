@@ -4513,9 +4513,9 @@ int main(int argc, char** argv) {
                                 }
                                 if (slain) {
                                     uint8_t item = (uint8_t)ritual::blockId(ui.targetGuardian);
-                                    const dropgeom::Shape& sh = dropgeom::cached(item);
-                                    const float S = cfg::BLOCK_SCALE;
-                                    Vec3 dropPos{ (gx + 0.5f) * S, (gy + 1) * S + sh.half.y + 0.04f, (gz + 0.5f) * S };
+                                    Vec3 dropPos = structure::guardianRelicDropPos(
+                                        ui.targetGuardian, gx, gy, gz);
+                                    structure::clearGuardianToken(world, gx, gy, gz);
                                     world.spawnDrop(dropPos, item, 1, true);
                                 }
                             }

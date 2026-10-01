@@ -37,21 +37,21 @@ int main() {
         check(!decodeMatchEnd(unknown, unknown + 2, team, ritualId),
               "an unknown ritual cannot end the match");
     }
-    check(matchmap::playableSpan(4, 64) == 2048, "full combat roster keeps the 2048 field");
-    check(matchmap::playableSpan(2, 2) == 181, "two solo teams use the shrunk field");
+    check(matchmap::playableSpan(4, 64) == 512, "full combat roster keeps the 512 field");
+    check(matchmap::playableSpan(2, 2) == 45, "two solo teams use the shrunk field");
     check(matchmap::playableSpan(1, 0) == matchmap::playableSpan(1, 2), "fewer than 2 players counts as 2");
-    check(matchmap::playableSpan(6, 90) == 2048, "teams above 4 and players above 64 stay at the full field");
+    check(matchmap::playableSpan(6, 90) == 512, "teams above 4 and players above 64 stay at the full field");
     check(matchmap::span() == matchmap::kFullSpan, "tests start from the full field");
-    check(matchmap::zoneColumns() == 819, "full field deploy side is 40 percent");
-    matchmap::setSpan(181);
-    check(matchmap::zoneColumns() == 72, "shrunk field deploy side stays 40 percent");
+    check(matchmap::zoneColumns() == 205, "full field deploy side is 40 percent");
+    matchmap::setSpan(45);
+    check(matchmap::zoneColumns() == 18, "shrunk field deploy side stays 40 percent");
     auto zonesOverlap = [](matchmap::Zone a, matchmap::Zone b) {
         return a.cx0 < b.cx0 + b.columns && b.cx0 < a.cx0 + a.columns &&
                a.cz0 < b.cz0 + b.columns && b.cz0 < a.cz0 + a.columns;
     };
     for (int i = 0; i < 4; ++i) {
         matchmap::Zone zone = matchmap::combatZone(i);
-        check(zone.columns == 72, "each corner deploy square uses the 40 percent side");
+        check(zone.columns == 18, "each corner deploy square uses the 40 percent side");
         check(matchmap::columnPlayable(zone.cx0, zone.cz0) &&
               matchmap::columnPlayable(zone.cx0 + zone.columns - 1, zone.cz0 + zone.columns - 1),
               "corner deploy squares stay inside the playable field");
@@ -559,6 +559,12 @@ int main() {
           "spectators receive no team content");
     check(match_content::populateTeam(matchWorld, matchLoot, matchClues, 247, 1),
           "one active team receives its buildings, altar, weapons and clue route");
+    for (int ritualId = 0; ritualId < ritual::kRitualCount; ++ritualId) {
+        int nearX = 0, nearZ = 0;
+        if (!structure::ritualAnchor(ritualId, nearX, nearZ)) continue;
+        check(match_content::buildingsNear(nearX, nearZ, 130) >= 3,
+              "each altar has at least three resource buildings beside it");
+    }
     int altarX = 0, altarZ = 0;
     int assignedAltar = ritual::assignedRitual(1);
     int altarY = 0;

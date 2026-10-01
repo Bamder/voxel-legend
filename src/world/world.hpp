@@ -72,6 +72,8 @@ public:
         bool hasEmission = false;      // runtime: chunk holds a block light
         std::vector<Vertex> meshOpaque;
         std::vector<Vertex> meshTransparent;
+        // Untextured cuboids (relic figures). Same 7-float layout as emitSolidMesh.
+        std::vector<float> meshSolid;
 
         // Grass sod (草皮): a single-face overlay on exposed dirt faces.
         // face uses the same order as mesh faces (0 top, 2/3/4/5 sides).

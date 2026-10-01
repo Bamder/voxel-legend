@@ -19,6 +19,7 @@ void beginMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed
 bool advanceMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed);
 bool matchContentReady();
 void placementProgress(int& done, int& total);
+int buildingsNear(int x, int z, int radius);
 
 // Called once for each team that actually enters the match. The server owns
 // the spawned drops and clue bindings; no other team needs to be present.

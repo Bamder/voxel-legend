@@ -57,10 +57,11 @@ struct Fatigue {
 };
 
 // Defaults. Live values are rates() — overlaid by assets/data packs.
-inline constexpr float kSprintStaminaPerSec = 0.0044f; // both feet; 2% of prior 0.22
-inline constexpr float kJumpStaminaBurst = 0.0020f;    // 2% of prior 0.10
-inline constexpr float kSwimStaminaPerSec = 0.0018f;   // 2% of prior 0.09
-inline constexpr float kMineStaminaPerSec = 0.18f;
+inline constexpr float kSprintStaminaPerSec = 0.0022f; // both feet; half of 0.0044 (2x endurance)
+inline constexpr float kJumpStaminaBurst = 0.0010f;    // half of 0.0020 (2x endurance)
+inline constexpr float kSwimStaminaPerSec = 0.0009f;   // half of 0.0018 (2x endurance)
+inline constexpr float kMineStaminaPerSec = 0.09f;     // half of 0.18 (2x endurance)
+inline constexpr float kHungerThirstDrainMul = 0.2f;   // hunger / thirst fall at 20% of the base curve
 inline constexpr float kStamRegenFast = 0.52f;         // stopped before empty
 inline constexpr float kStamRegenSlow = 0.075f;        // recovering from empty
 inline constexpr float kEmptyRecoverDelay = 3.5f;      // seconds of rest before slow regen
@@ -286,8 +287,8 @@ inline void tick(Vitals& v, Fatigue& f, const TickInput& in, float dt) {
     if (in.jumpImpulse) work += 0.8f;
     if (in.swim) work += 0.7f;
     if (in.mining) work += 0.6f;
-    v.hunger -= dt * (1.0f / 900.0f) * (0.55f + work);
-    v.thirst -= dt * (1.0f / 620.0f) * (0.70f + work * 1.15f);
+    v.hunger -= dt * (1.0f / 900.0f) * (0.55f + work) * kHungerThirstDrainMul;
+    v.thirst -= dt * (1.0f / 620.0f) * (0.70f + work * 1.15f) * kHungerThirstDrainMul;
 
     // Running slowly taxes cardiopulmonary function.
     if (in.sprint && !in.flying)

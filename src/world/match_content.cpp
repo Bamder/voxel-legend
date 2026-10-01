@@ -69,13 +69,14 @@ bool separated(int x, int z, int ox, int oz, int minDist) {
     return dx * dx + dz * dz >= (long long)minDist * minDist;
 }
 
-bool clearOfSites(int x, int z) {
+bool clearOfSites(int x, int z, int skipRitual = -1) {
     for (int relic = 0; relic < ritual::RelicCount; ++relic) {
         int sx = 0, sz = 0;
         if (!structure::relicAnchor(relic, sx, sz)) continue;
         if (!separated(x, z, sx, sz, 80)) return false;
     }
     for (int ritualId = 0; ritualId < ritual::kRitualCount; ++ritualId) {
+        if (ritualId == skipRitual) continue;
         int sx = 0, sz = 0;
         if (!structure::ritualAnchor(ritualId, sx, sz)) continue;
         if (!separated(x, z, sx, sz, 80)) return false;
@@ -103,6 +104,9 @@ struct PlaceJob {
     PlaceKind kind = PlaceKind::Relic;
     int a = 0;
     int b = 0;
+    int ax = 0;
+    int az = 0;
+    int slot = -1;
 };
 
 std::vector<PlaceJob> g_jobs;
@@ -121,20 +125,75 @@ uint32_t nextPlaceRng() {
     return g_placeRng;
 }
 
-void placeOneBuilding(World& world, building_loot::Spawner& loot, uint32_t seed, int type, int n) {
+bool inPlaceField(int x, int z) {
+    return x >= g_placeX0 && z >= g_placeX0 &&
+           x < g_placeX0 + g_placeSpan && z < g_placeX0 + g_placeSpan;
+}
+
+void commitBuilding(World& world, building_loot::Spawner& loot, uint32_t seed,
+                    int type, int n, int x, int z) {
+    int h = world.surfaceHeight(x, z);
+    int y = std::min(h, cfg::WORLD_H - 26);
+    for (int cz = floorDiv(z - 21, cfg::CHUNK_Z); cz <= floorDiv(z + 21, cfg::CHUNK_Z); ++cz)
+        for (int cx = floorDiv(x - 21, cfg::CHUNK_X); cx <= floorDiv(x + 21, cfg::CHUNK_X); ++cx)
+            world.ensureColumn(cx, cz);
+    structure::paintRoomBuilding(world, x, y, z, type);
+    PlacedRoom room;
+    room.type = type;
+    room.x = x;
+    room.z = z;
+    room.spots = roomSpots(world, x, y, z, seed ^ uint32_t(type * 131 + n * 17));
+    const building_loot::Entry stock[] = {
+        {PLANKS, 2, 6, 3}, {COBBLE, 2, 6, 3}, {STONE, 1, 4, 1},
+    };
+    if (!room.spots.empty())
+        loot.spawnRandomLootAt(room.spots[0], stock);
+    g_rooms.push_back(std::move(room));
+}
+
+bool buildingSpaced(int x, int z) {
+    for (const PlacedRoom& room : g_rooms)
+        if (!separated(x, z, room.x, room.z, 48)) return false;
+    return true;
+}
+
+void placeOneBuilding(World& world, building_loot::Spawner& loot, uint32_t seed,
+                      int type, int n, int slot, int ax, int az) {
     const int needSpots[3] = {2, 6, 1};
+    const bool beside = slot >= 0;
     bool accepted = false;
-    int fallbackX = g_placeX0 + g_placeSpan / 2;
-    int fallbackZ = fallbackX;
+    int fallbackX = beside ? ax : g_placeX0 + g_placeSpan / 2;
+    int fallbackZ = beside ? az : fallbackX;
+    if (beside) {
+        double ang = (slot * 120 + 20) * 0.017453292519943295;
+        fallbackX = ax + (int)std::lround(std::cos(ang) * 88.0);
+        fallbackZ = az + (int)std::lround(std::sin(ang) * 88.0);
+    }
+    if (fallbackX < g_placeX0) fallbackX = g_placeX0;
+    if (fallbackZ < g_placeX0) fallbackZ = g_placeX0;
+    if (fallbackX >= g_placeX0 + g_placeSpan) fallbackX = g_placeX0 + g_placeSpan - 1;
+    if (fallbackZ >= g_placeX0 + g_placeSpan) fallbackZ = g_placeX0 + g_placeSpan - 1;
     for (int attempt = 0; attempt < 40 && !accepted; ++attempt) {
-        int x = g_placeX0 + (int)(nextPlaceRng() % (uint32_t)g_placeSpan);
-        int z = g_placeX0 + (int)(nextPlaceRng() % (uint32_t)g_placeSpan);
-        if (!clearOfSites(x, z)) continue;
-        bool spaced = true;
-        for (const PlacedRoom& room : g_rooms) {
-            if (!separated(x, z, room.x, room.z, 48)) { spaced = false; break; }
+        int x = 0, z = 0;
+        int skipRitual = -1;
+        if (beside) {
+            int radius = 56 + (int)(nextPlaceRng() % 57u);
+            double ang = (nextPlaceRng() % 360u) * 0.017453292519943295;
+            x = ax + (int)std::lround(std::cos(ang) * radius);
+            z = az + (int)std::lround(std::sin(ang) * radius);
+            long long dx = (long long)x - ax;
+            long long dz = (long long)z - az;
+            if (dx * dx + dz * dz < 56LL * 56LL || dx * dx + dz * dz > 112LL * 112LL) continue;
+            for (int ritualId = 0; ritualId < ritual::kRitualCount; ++ritualId) {
+                int sx = 0, sz = 0;
+                if (!structure::ritualAnchor(ritualId, sx, sz)) continue;
+                if (sx == ax && sz == az) { skipRitual = ritualId; break; }
+            }
+        } else {
+            x = g_placeX0 + (int)(nextPlaceRng() % (uint32_t)g_placeSpan);
+            z = g_placeX0 + (int)(nextPlaceRng() % (uint32_t)g_placeSpan);
         }
-        if (!spaced) continue;
+        if (!inPlaceField(x, z) || !clearOfSites(x, z, skipRitual) || !buildingSpaced(x, z)) continue;
         int h = world.surfaceHeight(x, z);
         if (h <= cfg::SEA_LEVEL + 1 || h >= cfg::WORLD_H - 28) continue;
         int y = std::min(h, cfg::WORLD_H - 26);
@@ -156,16 +215,8 @@ void placeOneBuilding(World& world, building_loot::Spawner& loot, uint32_t seed,
         g_rooms.push_back(std::move(room));
         accepted = true;
     }
-    if (!accepted) {
-        PlacedRoom room;
-        room.type = type;
-        room.x = fallbackX;
-        room.z = fallbackZ;
-        int y = std::min(world.surfaceHeight(fallbackX, fallbackZ), cfg::WORLD_H - 26);
-        structure::paintRoomBuilding(world, fallbackX, y, fallbackZ, type);
-        room.spots = roomSpots(world, fallbackX, y, fallbackZ, seed ^ 0x51u);
-        g_rooms.push_back(std::move(room));
-    }
+    if (!accepted)
+        commitBuilding(world, loot, seed, type, n, fallbackX, fallbackZ);
 }
 
 void ensureMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed) {
@@ -193,9 +244,22 @@ void beginMatchContent(World& world, building_loot::Spawner&, uint32_t seed) {
         int assigned = ritual::assignedRitual(team);
         if (assigned >= 0) g_jobs.push_back({PlaceKind::Altar, assigned, team});
     }
+    int altarX[matchmap::kCombatTeams];
+    int altarZ[matchmap::kCombatTeams];
+    int altarN = 0;
+    for (const PlaceJob& job : g_jobs) {
+        if (job.kind != PlaceKind::Altar || altarN >= matchmap::kCombatTeams) continue;
+        int x = 0, z = 0;
+        if (!structure::ritualAnchor(job.a, x, z)) continue;
+        altarX[altarN] = x;
+        altarZ[altarN] = z;
+        ++altarN;
+    }
     g_placeRng = seed ? seed : 1u;
     int counts[3] = {};
     int total = resourceBuildingTotal(matchmap::rosterTeams(), matchmap::rosterPlayers(), nextPlaceRng());
+    int besideNeed = altarN * 3;
+    if (total < besideNeed) total = besideNeed > 64 ? 64 : besideNeed;
     splitResourceBuildings(total, nextPlaceRng(), counts);
     g_placeX0 = matchmap::playMin() * cfg::CHUNK_X + 24;
     int x1 = (matchmap::playMax() + 1) * cfg::CHUNK_X - 24;
@@ -204,9 +268,42 @@ void beginMatchContent(World& world, building_loot::Spawner&, uint32_t seed) {
         x1 = g_placeX0 + cfg::CHUNK_X;
     }
     g_placeSpan = std::max(1, x1 - g_placeX0);
-    for (int type = 0; type < 3; ++type)
-        for (int n = 0; n < counts[type]; ++n)
-            g_jobs.push_back({PlaceKind::Building, type, n});
+    std::vector<int> types;
+    types.reserve((size_t)total);
+    int left[3] = { counts[0], counts[1], counts[2] };
+    while ((int)types.size() < total) {
+        bool any = false;
+        for (int type = 0; type < 3; ++type) {
+            if (left[type] <= 0) continue;
+            types.push_back(type);
+            --left[type];
+            any = true;
+            if ((int)types.size() == total) break;
+        }
+        if (!any) break;
+    }
+    int cursor = 0;
+    int reserved = altarN * 3;
+    if (reserved > (int)types.size()) reserved = (int)types.size();
+    for (int altar = 0; altar < altarN; ++altar) {
+        for (int slot = 0; slot < 3 && cursor < reserved; ++slot, ++cursor) {
+            PlaceJob job;
+            job.kind = PlaceKind::Building;
+            job.a = types[(size_t)cursor];
+            job.b = cursor;
+            job.ax = altarX[altar];
+            job.az = altarZ[altar];
+            job.slot = slot;
+            g_jobs.push_back(job);
+        }
+    }
+    for (; cursor < (int)types.size(); ++cursor) {
+        PlaceJob job;
+        job.kind = PlaceKind::Building;
+        job.a = types[(size_t)cursor];
+        job.b = cursor;
+        g_jobs.push_back(job);
+    }
 }
 
 bool advanceMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed) {
@@ -215,12 +312,24 @@ bool advanceMatchContent(World& world, building_loot::Spawner& loot, uint32_t se
     const PlaceJob job = g_jobs[(size_t)g_job++];
     if (job.kind == PlaceKind::Relic) structure::anchorRelicRuin(world, job.a);
     else if (job.kind == PlaceKind::Altar) structure::paintMatchRitualAltar(world, job.a);
-    else placeOneBuilding(world, loot, seed, job.a, job.b);
+    else placeOneBuilding(world, loot, seed, job.a, job.b, job.slot, job.ax, job.az);
     return g_job >= (int)g_jobs.size();
 }
 
 bool matchContentReady() {
     return g_planned && g_job >= (int)g_jobs.size();
+}
+
+int buildingsNear(int x, int z, int radius) {
+    if (radius < 0) radius = 0;
+    long long limit = (long long)radius * radius;
+    int count = 0;
+    for (const PlacedRoom& room : g_rooms) {
+        long long dx = (long long)room.x - x;
+        long long dz = (long long)room.z - z;
+        if (dx * dx + dz * dz <= limit) ++count;
+    }
+    return count;
 }
 
 void placementProgress(int& done, int& total) {

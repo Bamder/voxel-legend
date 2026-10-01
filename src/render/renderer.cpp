@@ -262,6 +262,10 @@ bool Renderer::init(int w, int h) {
     uHumAmbient = gl::GetUniformLocation(progHum, "uAmbient");
     uHumFogColor = gl::GetUniformLocation(progHum, "uFogColor");
     uHumFogDensity = gl::GetUniformLocation(progHum, "uFogDensity");
+    uHumFogOfs = gl::GetUniformLocation(progHum, "uFogOfs");
+    uHumFogMul = gl::GetUniformLocation(progHum, "uFogMul");
+    gl::Uniform3f(uHumFogOfs, 0.0f, 0.0f, 0.0f);
+    gl::Uniform1f(uHumFogMul, 1.0f);
     gl::UseProgram(progHumTex);
     uHumTexMVP = gl::GetUniformLocation(progHumTex, "uMVP");
     uHumTexAtlas = gl::GetUniformLocation(progHumTex, "uAtlas");
@@ -1045,6 +1049,28 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
     };
 
     drawRange(false);
+    const int solidEyeX = floorDiv((int)std::floor(eye.x / cfg::BLOCK_SCALE), cfg::CHUNK_X);
+    const int solidEyeZ = floorDiv((int)std::floor(eye.z / cfg::BLOCK_SCALE), cfg::CHUNK_Z);
+    for (const auto& [key, ch] : w.chunks()) {
+        if (ch.meshSolid.empty() || !ch.hasMesh) continue;
+        const int cx = chunkCX(key);
+        const int cz = chunkCZ(key);
+        if (std::max(std::abs(cx - solidEyeX), std::abs(cz - solidEyeZ)) > cfg::CLIENT_RENDER_RADIUS)
+            continue;
+        double ox = (double)(cx * cfg::CHUNK_X) * cfg::BLOCK_SCALE - (double)eye.x;
+        double oy = (double)(chunkCY(key) * cfg::CHUNK_Y) * cfg::BLOCK_SCALE - (double)eye.y;
+        double oz = (double)(cz * cfg::CHUNK_Z) * cfg::BLOCK_SCALE - (double)eye.z;
+        Vec3 off{ (float)ox, (float)oy, (float)oz };
+        Mat4 model = Mat4::translate(off) * Mat4::scale({ cfg::BLOCK_SCALE, cfg::BLOCK_SCALE, cfg::BLOCK_SCALE });
+        drawHumSolid(ch.meshSolid, vp * model, &s, fogDensity, off.x, off.y, off.z, cfg::BLOCK_SCALE);
+    }
+    gl::UseProgram(progHum);
+    gl::Uniform3f(uHumFogOfs, 0.0f, 0.0f, 0.0f);
+    gl::Uniform1f(uHumFogMul, 1.0f);
+    gl::UseProgram(progWorld);
+    gl::ActiveTexture(GL_TEXTURE0);
+    gl::BindTexture(GL_TEXTURE_2D, atlasTex);
+    gl::Enable(GL_CULL_FACE);
     drawFallingTrees(w, eye, vp, s.sunDir);
     drawDrops(w, eye, vp, s);
 
@@ -2552,7 +2578,8 @@ void Renderer::drawBlockIcon(uint8_t block, float x, float y, float size) {
     drawModelItemIcon(block, mat::itemModel(block), x, y, size);
 }
 
-void Renderer::drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, const Sky* sun, float fogDensity) {
+void Renderer::drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, const Sky* sun, float fogDensity,
+                            float fogOx, float fogOy, float fogOz, float fogMul) {
     if (solid.empty() || !humVAO) return;
     gl::UseProgram(progHum);
     gl::UniformMatrix4fv(uHumMVP, 1, GL_FALSE, mvp.m);
@@ -2571,6 +2598,8 @@ void Renderer::drawHumSolid(const std::vector<float>& solid, const Mat4& mvp, co
         gl::Uniform3f(uHumFogColor, 0.0f, 0.0f, 0.0f);
         gl::Uniform1f(uHumFogDensity, 0.0f);
     }
+    gl::Uniform3f(uHumFogOfs, fogOx, fogOy, fogOz);
+    gl::Uniform1f(uHumFogMul, fogMul);
     gl::Disable(GL_CULL_FACE);
     gl::BindVertexArray(humVAO);
     gl::BindBuffer(GL_ARRAY_BUFFER, humVBO);

@@ -1149,6 +1149,7 @@ float World::vertexAO(int wx, int wy, int wz, int nx, int ny, int nz, int ox, in
 void World::buildMeshFor(Chunk& ch, int cx, int cy, int cz) {
     ch.meshOpaque.clear();
     ch.meshTransparent.clear();
+    ch.meshSolid.clear();
     ch.meshOpaque.reserve(8192);
     ch.meshTransparent.reserve(2048);
 

@@ -4,6 +4,7 @@
 #include "matchmap.hpp"
 #include "world.hpp"
 #include "loot.hpp"
+#include "drop_geom.hpp"
 #include "player_model.hpp"
 #include "asset_pack.hpp"
 #include "arcane.hpp"
@@ -868,6 +869,34 @@ bool damageGuardian(const World& world, int relic, int amount, int& x, int& y, i
         return true;
     }
     return false;
+}
+
+Vec3 guardianRelicDropPos(int relic, int tokenX, int tokenY, int tokenZ) {
+    const float S = cfg::BLOCK_SCALE;
+    float x = (tokenX + 0.5f) * S;
+    float y = (tokenY + 1) * S;
+    float z = (tokenZ + 0.5f) * S;
+    float yaw = 0.0f;
+    uint8_t swing = 0;
+    guardianPose(relic, x, y, z, yaw, swing);
+    int itemRelic = relic;
+    if (itemRelic < 0 || itemRelic >= ritual::RelicCount) itemRelic = 0;
+    const dropgeom::Shape& sh = dropgeom::cached((uint8_t)ritual::blockId(itemRelic));
+    return { x, y + sh.half.y + 0.04f, z };
+}
+
+void clearGuardianToken(World& world, int x, int y, int z) {
+    if (world.getBlock(x, y, z) != (uint8_t)GUARDIAN_CORE) return;
+    uint8_t floor = (uint8_t)STONE;
+    const int dx[4] = { 1, -1, 0, 0 };
+    const int dz[4] = { 0, 0, 1, -1 };
+    for (int i = 0; i < 4; ++i) {
+        uint8_t b = world.getBlock(x + dx[i], y, z + dz[i]);
+        if (b == AIR || b == (uint8_t)GUARDIAN_CORE || !blocksMotion(b)) continue;
+        floor = b;
+        break;
+    }
+    world.setBlock(x, y, z, floor, false, false);
 }
 
 int guardianStrikeHurt(uint8_t held, int relic) {
