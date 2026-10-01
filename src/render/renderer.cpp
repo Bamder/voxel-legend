@@ -239,6 +239,7 @@ bool Renderer::init(int w, int h) {
     uSunDisc = gl::GetUniformLocation(progSky, "uSunDisc");
     uMoonDisc = gl::GetUniformLocation(progSky, "uMoonDisc");
     uStarAmount = gl::GetUniformLocation(progSky, "uStarAmount");
+    uSkyTime = gl::GetUniformLocation(progSky, "uTime");
     uSkyBorderXZ = gl::GetUniformLocation(progSky, "uBorderXZ");
     uSkyRimHalf = gl::GetUniformLocation(progSky, "uRimHalf");
     uSkyCamera = gl::GetUniformLocation(progSky, "uCameraPos");
@@ -650,7 +651,7 @@ void Renderer::computeSky(float timeOfDay, Sky& s) {
 
     s.moonColor = { 0.85f, 0.87f, 0.95f };
     s.sunDisc = 0.9985f;
-    s.moonDisc = 0.9992f;
+    s.moonDisc = 0.897f;
     s.starAmount = 1.0f - day;
 }
 
@@ -698,7 +699,7 @@ void Renderer::drawMenuPortrait(const World& world, float timeOfDay, UIState& ui
     proj.m[8] = -shift;
     Mat4 view = Mat4::lookAt(Vec3{ 0, 0, 0 }, look, Vec3{ 0, 1, 0 });
     Mat4 worldVP = proj * view;
-    drawSky(sky, inverse(worldVP));
+    drawSky(sky, inverse(worldVP), Vec3{}, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, timeOfDay);
     gl::Enable(GL_DEPTH_TEST);
     gl::DepthMask(GL_TRUE);
     drawWorld(world, cam, worldVP, sky, Vec3{ 0, 0, 0 }, 0.0f, 0.0f, Vec3{ 0, 1, 0 },
@@ -768,7 +769,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
         bminZ = bminX;
         bmaxZ = bmaxX;
     }
-    drawSky(sky, invVP, eye, rimHalf, bminX, bmaxX, bminZ, bmaxZ);
+    drawSky(sky, invVP, eye, rimHalf, bminX, bmaxX, bminZ, bmaxZ, timeOfDay);
 
     if (ui.appScreen == AppScreen::Playing || menuWorld) {
         gl::Enable(GL_DEPTH_TEST);
@@ -959,7 +960,8 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
 }
 
 void Renderer::drawSky(const Sky& s, const Mat4& invVP, const Vec3& eye,
-                       float rimHalf, float bminX, float bmaxX, float bminZ, float bmaxZ) {
+                       float rimHalf, float bminX, float bmaxX, float bminZ, float bmaxZ,
+                       float timeOfDay) {
     gl::Disable(GL_DEPTH_TEST);
     gl::DepthMask(GL_FALSE);
     gl::Disable(GL_CULL_FACE);
@@ -978,6 +980,7 @@ void Renderer::drawSky(const Sky& s, const Mat4& invVP, const Vec3& eye,
     gl::Uniform4f(uSkyBorderXZ, bminX, bmaxX, bminZ, bmaxZ);
     gl::Uniform1f(uSkyRimHalf, rimHalf);
     gl::Uniform3f(uSkyCamera, eye.x, eye.y, eye.z);
+    gl::Uniform1f(uSkyTime, timeOfDay);
     gl::BindVertexArray(skyVAO);
     gl::DrawArrays(GL_TRIANGLES, 0, 3);
     gl::BindVertexArray(0);

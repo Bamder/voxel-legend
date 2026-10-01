@@ -4536,7 +4536,11 @@ int main(int argc, char** argv) {
             }
         } else if (!playing) {
             if (exploreScreen() || portraitScreen()) {
-                timeOfDay = 6000.0f;
+                // Only auto-set time to morning if debug menu is NOT open
+                // (so player can override via time slider in debug menu)
+                if (!ui.debugMenuOpen) {
+                    timeOfDay = 6000.0f;
+                }
                 uint32_t want = seedFromName(ui.playerName);
                 if (!menuSeedReady || menuSeedApplied != want || world.seed() != want) buildMenuWorld();
                 world.update(menuEye, 4);
