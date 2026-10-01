@@ -1502,6 +1502,7 @@ int main(int argc, char** argv) {
     std::chrono::steady_clock::time_point roomTickAt{};
     NetSample selfShown{};
     bool selfShownOk = false;
+    Vec3 roomCameraOffset{ 0, 0, 0 };
     bool spectating = false;
     bool deploying = false;
     bool deployDeath = false;
@@ -1610,6 +1611,7 @@ int main(int argc, char** argv) {
         roomTick = 0;
         roomTickInit = false;
         selfShownOk = false;
+        roomCameraOffset = { 0, 0, 0 };
         chunkNet.clear();
         resyncAsk.clear();
         loadSeedApplied = false;
@@ -2038,6 +2040,7 @@ int main(int argc, char** argv) {
         roomTick = 0;
         roomTickInit = false;
         selfShownOk = false;
+        roomCameraOffset = { 0, 0, 0 };
         player.privilegeMode = false;
         player.flying = spectating;
         player.noclip = spectating;
@@ -2197,7 +2200,17 @@ int main(int argc, char** argv) {
                     player.fatigue = d.body.fatigue;
                     player.dead = vitals::isDead(player.vitals);
                     if (!deploying && !storyOpen && (d.body.flags & 1)) {
-                        player.pos = {d.body.x, d.body.y, d.body.z};
+                        Vec3 serverPos{d.body.x, d.body.y, d.body.z};
+                        // Keep the rendered camera continuous across the
+                        // authoritative correction. The actual player position
+                        // remains server-authoritative for physics, raycasts,
+                        // and outgoing input.
+                        Vec3 renderedPos = player.pos + roomCameraOffset;
+                        roomCameraOffset = renderedPos - serverPos;
+                        float err2 = roomCameraOffset.lengthSq();
+                        if (err2 > 1.5f * 1.5f)
+                            roomCameraOffset = roomCameraOffset * (1.5f / std::sqrt(err2));
+                        player.pos = serverPos;
                         player.vel = {d.body.vx, d.body.vy, d.body.vz};
                         player.onGround = (d.body.flags & 2) != 0;
                         player.inWater = (d.body.flags & 4) != 0;
@@ -4439,7 +4452,11 @@ int main(int argc, char** argv) {
             }
             if (sub == cfg::MAX_SUBSTEPS) accumulator = 0.0f;
 
-            world.update(player.pos, 16);
+            int meshBudget = cfg::CLIENT_MESH_BUDGET;
+            if (dt > 0.030f) meshBudget = 1;
+            else if (dt > 0.022f) meshBudget = 2;
+            if (roomSession && meshBudget > 2) meshBudget = 2;
+            world.update(player.pos, meshBudget);
             if (deploying && deploySpan > 0) {
                 const float S = cfg::BLOCK_SCALE;
                 Vec3 zone{
@@ -4692,6 +4709,14 @@ int main(int argc, char** argv) {
         else ui.held.clear();
         ui.fps = fps;
         ui.loadedChunks = world.loadedChunks();
+        if (roomSession) {
+            float k = 1.0f - std::exp(-dt * 18.0f);
+            roomCameraOffset = roomCameraOffset * (1.0f - k);
+            if (roomCameraOffset.lengthSq() < 1.0e-5f) roomCameraOffset = { 0, 0, 0 };
+        } else {
+            roomCameraOffset = { 0, 0, 0 };
+        }
+        ui.cameraOffset = roomCameraOffset;
         ui.timeOfDay = timeOfDay;
         ui.playerPos = player.pos;
         ui.playerVel = player.vel;

@@ -744,6 +744,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
         renderLook = look * -1.0f;
         camUp = player.right().cross(look);
     }
+    eye += ui.cameraOffset;
     gl::Viewport(0, 0, scrW, scrH);
     Mat4 proj = Mat4::perspective(cfg::FOV_Y, (float)scrW / (float)scrH, cfg::NEAR_PLANE, cfg::FAR_PLANE);
     Mat4 view = Mat4::lookAt(Vec3{ 0, 0, 0 }, renderLook, camUp);
@@ -974,8 +975,16 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::Disable(GL_BLEND);
 
     auto drawRange = [&](bool transparent) {
+        const int eyeBlockX = (int)std::floor(eye.x / cfg::BLOCK_SCALE);
+        const int eyeBlockZ = (int)std::floor(eye.z / cfg::BLOCK_SCALE);
+        const int eyeChunkX = floorDiv(eyeBlockX, cfg::CHUNK_X);
+        const int eyeChunkZ = floorDiv(eyeBlockZ, cfg::CHUNK_Z);
         for (const auto& [key, ch] : w.chunks()) {
             if (!ch.hasMesh || !ch.uploaded) continue;
+            const int cx = chunkCX(key);
+            const int cz = chunkCZ(key);
+            if (std::max(std::abs(cx - eyeChunkX), std::abs(cz - eyeChunkZ)) > cfg::CLIENT_RENDER_RADIUS)
+                continue;
             auto it = m_chunkGL.find(key);
             if (it == m_chunkGL.end()) continue;
             const ChunkGL& cg = it->second;
