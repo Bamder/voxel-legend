@@ -118,6 +118,9 @@ struct UIState {
 
     float fps = 0.0f;
     int loadedChunks = 0;
+    // Visual-only camera correction used when client prediction is corrected by
+    // a room-server snapshot. Gameplay and network coordinates remain separate.
+    Vec3 cameraOffset{ 0, 0, 0 };
     float timeOfDay = 0.0f;
     Vec3 playerPos{ 0, 0, 0 };
     Vec3 playerVel{ 0, 0, 0 };

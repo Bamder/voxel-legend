@@ -15,6 +15,13 @@ namespace cfg {
     constexpr int SEA_LEVEL = 36;
     constexpr int LOAD_RADIUS = 3;        // horizontal chunks around the player
     constexpr int UNLOAD_RADIUS = LOAD_RADIUS + 2;
+    // Per-frame client mesh rebuild budget. Keeping this below the streaming
+    // radius prevents chunk remeshing from producing long render frames.
+    constexpr int CLIENT_MESH_BUDGET = 4;
+    // Rendering radius is intentionally smaller than the streaming radius:
+    // nearby chunks remain available for smooth movement while distant meshes
+    // are omitted from the local draw pass.
+    constexpr int CLIENT_RENDER_RADIUS = 2;
 
     // Block scale: edge length of one voxel in world units. Half-size blocks give
     // 2x resolution (finer, smoother terrain).
