@@ -456,8 +456,9 @@ void loadPackDir(const fs::path& dir) {
             else loadObjectFile(ent.path(), info.name);
         }
     };
-    loadFolder("block", false);
+    // Item first, then block: a stale item/<id>.def must not overwrite block/<id>.def.
     loadFolder("item", false);
+    loadFolder("block", false);
     loadFolder("entity", true);
 
     g_packs.push_back(info);

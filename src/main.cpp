@@ -4114,7 +4114,7 @@ int main(int argc, char** argv) {
                 if (structureEdit && lookLocked && hitOk && lmb && !prevLmb && structure::inVolume(hit.x, hit.y, hit.z))
                     world.setBlock(hit.x, hit.y, hit.z, AIR, false, true);
                 if (structureEdit && lookLocked && hitOk && rmb && !prevRmb && structure::inVolume(prev.x, prev.y, prev.z)
-                    && editBlock != AIR && loot::itemDef(editBlock).kind == loot::Kind::Block)
+                    && editBlock != AIR && plugin::blockStrategy(editBlock)->canPlace(editBlock))
                     world.setBlock(prev.x, prev.y, prev.z, editBlock, false, true,
                                    world.faceFromHitNormal(nrm));
                 bool quickBroke = false;

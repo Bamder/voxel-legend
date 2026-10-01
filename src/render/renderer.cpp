@@ -3810,17 +3810,34 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         if (maxScroll < 0) maxScroll = 0;
         if (ui.blockBarScroll > maxScroll) ui.blockBarScroll = maxScroll;
         if (ui.blockBarScroll < 0) ui.blockBarScroll = 0;
-        float panelH = (float)rowsFit * (cell + gap) + 8.0f;
-        quad(4, y0 - 8, cols * (cell + gap) + 12, panelH, 0, 0, 0, 0, 0.08f, 0.08f, 0.10f, 0.92f);
+        float contentH = (float)rowsFit * (cell + gap);
+        float panelH = contentH + 8.0f;
+        float panelX = 4.0f, panelW = cols * (cell + gap) + 12.0f;
+        float contentBottom = y0 + contentH;
+        quad(panelX, y0 - 8, panelW, panelH, 0, 0, 0, 0, 0.08f, 0.08f, 0.10f, 0.92f);
         ui.blockBarHover = -1;
         flushUI(progUI, whiteTex);
+        auto applyBlockBarScissor = [&]() {
+            int sx = (int)std::floor(panelX);
+            int sy = scrH - (int)std::floor(contentBottom);
+            int sw = (int)std::ceil(panelW);
+            int sh = (int)std::ceil(contentH);
+            if (sx < 0) { sw += sx; sx = 0; }
+            if (sy < 0) { sh += sy; sy = 0; }
+            if (sw < 1 || sh < 1) return;
+            gl::Enable(GL_SCISSOR_TEST);
+            gl::Scissor(sx, sy, sw, sh);
+        };
+        applyBlockBarScissor();
         for (int i = 0; i < (int)blocks.size(); i++) {
             int row = i / cols;
             int col = i % cols;
             float y = y0 + (float)(row - ui.blockBarScroll) * (cell + gap);
             float x = x0 + (float)col * (cell + gap);
-            if (y + cell < y0 || y > y0 + panelH - 8.0f) continue;
-            bool hov = ui.mouseX >= x && ui.mouseX < x + cell && ui.mouseY >= y && ui.mouseY < y + cell;
+            if (y + cell <= y0 || y >= contentBottom) continue;
+            bool hov = ui.mouseX >= x && ui.mouseX < x + cell
+                && ui.mouseY >= y && ui.mouseY < y + cell
+                && ui.mouseY >= y0 && ui.mouseY < contentBottom;
             if (hov) ui.blockBarHover = i;
             bool on = blocks[(size_t)i] == ui.structureBlock;
             if (on || hov) {
@@ -3828,7 +3845,10 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
                 flushUI(progUI, whiteTex);
             }
             drawBlockIcon(blocks[(size_t)i], x + 4, y + 4, cell - 8);
+            // drawBlockIcon may clear scissor; restore so subsequent cells stay clipped.
+            applyBlockBarScissor();
         }
+        gl::Disable(GL_SCISSOR_TEST);
         centeredText("方块", x0 + cell, y0 - 22.0f, 0.8f, 1, 1, 1, 1);
 
         const float opW = 248.0f;

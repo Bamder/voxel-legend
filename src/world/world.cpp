@@ -383,7 +383,9 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     it->second.setTreeId(lx, ly, lz, 0);
     if (prev != b) clearBlockDur(-1, x, y, z);
 
-    if (isTreeWood(prev) && b != prev) {
+    // Cut-face marks are for felling living trees (rings / stripped sides).
+    // Placed logs in the structure editor must not inherit them from neighbors.
+    if (cutAliveWood) {
         for (int f = 0; f < 6; f++) {
             const geo::FaceDef& F = geo::kFaces[f];
             int nx = x + F.n[0], ny = y + F.n[1], nz = z + F.n[2];

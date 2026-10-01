@@ -7,6 +7,7 @@
 #include "player_model.hpp"
 #include "asset_pack.hpp"
 #include "arcane.hpp"
+#include "../plugin/plugin.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -541,10 +542,18 @@ bool deleteFile(const std::string& name) {
 
 void collectBuildBlocks(std::vector<uint8_t>& out) {
     out.clear();
+    // Editor bar lists anything the strategy allows placing: solid cubes and
+    // light props (torch / lantern). Kind alone is not enough — a stale
+    // item/<id>.def can mark a placeable block as Kind::Item and hide it.
+    std::vector<uint8_t> lights;
     for (int i = 1; i < liveBlockCount(); i++) {
-        if (loot::itemDef((uint8_t)i).kind == loot::Kind::Block)
-            out.push_back((uint8_t)i);
+        uint8_t id = (uint8_t)i;
+        if (!plugin::blockStrategy(id)->canPlace(id)) continue;
+        if (blockEmission(id) > 0) lights.push_back(id);
+        else out.push_back(id);
     }
+    // Light props first so torch / lantern are not buried under the scroll.
+    out.insert(out.begin(), lights.begin(), lights.end());
 }
 
 const char* guardianAppearance(int relic) {
