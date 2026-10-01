@@ -934,12 +934,17 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
 
                         // Place 3 stonehenge structures
                         // Stonehenge is ~41 blocks diameter, so halfSize = 21
+                        // Find the first active team for stonehenge 0 placement
+                        int firstActiveTeam = 0;
+                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
+                            if (ritualAltarUsedForTeam[i]) { firstActiveTeam = i; break; }
+                        }
                         for (int shIdx = 0; shIdx < 3; shIdx++) {
                             int wx, wz;
                             if (shIdx == 0) {
-                                // First stonehenge: near team 1 spawn point (spawn point)
-                                wx = ritualAltarTeamSpawns[0][0];
-                                wz = ritualAltarTeamSpawns[0][2];
+                                // First stonehenge: near first active team's spawn point
+                                wx = ritualAltarTeamSpawns[firstActiveTeam][0];
+                                wz = ritualAltarTeamSpawns[firstActiveTeam][2];
                                 // Offset 60-80 blocks from spawn, towards north-east to avoid conflicts
                                 wx += 70;
                                 wz -= 70;
