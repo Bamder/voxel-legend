@@ -347,6 +347,7 @@ private:
     int uMVP = 0, uChunkOffset = 0, uAtlas = 0, uSunDir = 0, uSunColor = 0, uAmbient = 0;
     int uFogColor = 0, uFogDensity = 0, uBlockScale = 0;
     int uBorderXZ = 0, uRimHalf = 0, uCameraPos = 0;
+    int uHeldLightRel = 0, uHeldLightEmit = 0;
     int uSkyBorderXZ = 0, uSkyRimHalf = 0, uSkyCamera = 0;
     int uBreakRel = 0, uBreakProgress = 0, uBreakSod = 0, uBreakNrm = 0, uCrackReveal = 0;
     int uCrackFolds = 0, uCrackColor = 0, uCrackSeed = 0, uCrackShown = 0;
@@ -374,6 +375,11 @@ private:
     unsigned int fallVAO = 0, fallVBO = 0;
     unsigned int humVAO = 0, humVBO = 0;
     unsigned int humTexVAO = 0, humTexVBO = 0;
+    // Last frame's handheld light tip (world space), filled while drawing held items.
+    float m_heldLightEmit = 0.0f;
+    Vec3 m_heldLightPos{};
+    bool m_heldLightValid = false;
+    float m_flameClock = 0.0f;
 
     std::unordered_map<std::string, TextTex> m_textCache;
     std::unordered_map<int64_t, ChunkGL> m_chunkGL;
@@ -392,7 +398,8 @@ private:
                    const Vec3& breakRel, float breakProgress, float breakSod,
                    const Vec3& breakNrm, float fogDensity, const Vec3& fogColor,
                    float rimHalf = 0.0f, float bminX = 0.0f, float bmaxX = 0.0f,
-                   float bminZ = 0.0f, float bmaxZ = 0.0f);
+                   float bminZ = 0.0f, float bmaxZ = 0.0f,
+                   float heldLightEmit = 0.0f, const Vec3& heldLightRel = {});
     void drawFallingTrees(const World& w, const Vec3& eye, const Mat4& vp, const Vec3& sunDir);
     void drawDrops(const World& w, const Vec3& eye, const Mat4& vp, const Sky& sky);
     void drawOutlineOriented(const Mat4& vp, const Vec3& eye, const PhysicsIsland& t,
@@ -418,11 +425,13 @@ private:
                          const anim::Clip* strike = nullptr, float strikeAt = 0.0f,
                          const Sky* sun = nullptr,
                          uint8_t wearUpper = AIR, uint8_t wearLower = AIR, uint8_t wearShoes = AIR,
-                         bool bare = false);
+                         bool bare = false, bool trackHeldLight = false);
     void drawGuardians(const World& world, const Player& player, const UIState& ui,
                        const Vec3& eye, const Mat4& vp, const Sky* sun);
     void drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& player,
                            const UIState& ui, bool firstPerson);
+    void drawTorchFlames(const World& world, const Vec3& eye, const Mat4& vp, const UIState& ui);
+    void drawHeldTorchFlame(const Vec3& eye, const Mat4& vp, const Vec3& tipWorld, uint32_t seed);
     void drawUI(const World& w, const Player& p, float timeOfDay, UIState& ui);
     void drawDeploy(UIState& ui);
 

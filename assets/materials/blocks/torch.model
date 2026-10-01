@@ -1,3 +1,4 @@
-# Torch: stick plus a flame. Light itself is baked by the world, not the mesh.
-part 0.50 0.28 0.50 0.06 0.26 0.06 0.55 0.32 0.14 tex torch_wood
-part 0.50 0.72 0.50 0.12 0.14 0.12 1.00 0.72 0.18 tex flame
+# Material model (quad x y z u v per corner; optional flags / key value).
+# part cx cy cz hx hy hz r g b [tex name] [bind n] [card] [crop] [texs s] [face n] [uvf n] [rot x y z] [box x y w h d]
+# unknown records and quad keys are ignored by the parser and written back as-is.
+part 0.5000 0.3625 0.5000 0.0600 0.3425 0.0600 0.5500 0.3200 0.1400 tex torch_wood

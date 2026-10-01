@@ -215,6 +215,16 @@ inline void rebindPivots(Clip& c, const std::vector<pm::Part>& parts) {
     ensurePalmBones(c, parts);
 }
 
+// Locomotion clips on disk may omit palm (or other) bones. Overlay clips like
+// raise_r key those bones — without them in the base rig, layering drops the
+// keys and held items fall back to the hand instead of the authored palm grip.
+inline void ensureBonesFrom(Clip& dst, const Clip& rig) {
+    for (const Bone& b : rig.bones) {
+        if (findBone(dst, b.name) >= 0) continue;
+        dst.bones.push_back(b);
+    }
+}
+
 inline Key lerpKey(const Key& a, const Key& b, float t) {
     Key k;
     k.frame = a.frame;
@@ -307,9 +317,33 @@ inline bool trackIsRest(const Track& tr) {
     return true;
 }
 
+// Bones the overlay actually drives (non-rest keys) plus their parents. Rest
+// keys that only match idle — e.g. whole-pose fill on the off hand in raise_r —
+// stay out of this set so walk/run can still swing them. Rest keys on the
+// active chain (punch shoulder lock) stay authoritative.
+inline void layerActiveBones(const Clip& rig, const Clip& layer, std::vector<char>& active) {
+    active.assign(rig.bones.size(), 0);
+    for (const Track& tr : layer.tracks) {
+        if (trackIsRest(tr)) continue;
+        int bi = findBone(rig, tr.bone);
+        if (bi < 0) continue; // grip/face/etc. or unknown
+        while (bi >= 0 && bi < (int)active.size()) {
+            if (active[bi]) break;
+            active[bi] = 1;
+            bi = parentIndex(rig, bi);
+        }
+    }
+}
+
 inline std::vector<BoneXform> evalPoseLayered(const Clip& base, float baseFrame,
                                              const Clip* const* layers, int nLayers, float layerFrame) {
     std::vector<BoneXform> out(base.bones.size());
+    // Per-layer mask of bones the overlay intends to own.
+    std::vector<std::vector<char>> active(nLayers);
+    for (int li = 0; li < nLayers; li++) {
+        if (!layers[li]) continue;
+        layerActiveBones(base, *layers[li], active[li]);
+    }
     auto order = topoOrder(base);
     for (int i : order) {
         const Bone& b = base.bones[i];
@@ -319,8 +353,13 @@ inline std::vector<BoneXform> evalPoseLayered(const Clip& base, float baseFrame,
             if (!layers[li]) continue;
             int ti = findTrack(*layers[li], b.name);
             if (ti < 0) continue;
-            if (isLowerBodyBone(b.name) && trackIsRest(layers[li]->tracks[ti]))
-                continue;
+            const Track& tr = layers[li]->tracks[ti];
+            // Idle-matching fill: let locomotion (or a lower layer) through,
+            // unless this bone is on the overlay's active chain.
+            bool idleLike = trackIsRest(tr);
+            bool needed = i < (int)active[li].size() && active[li][i];
+            if (idleLike && !needed) continue;
+            if (isLowerBodyBone(b.name) && idleLike) continue;
             k = evalBone(*layers[li], b.name, layerFrame);
             fromLayer = true;
             break;
@@ -485,8 +524,9 @@ inline void setKey(Clip& c, const std::string& bone, int frame, const Vec3& t, c
 // Model-space grasp point on the held item. Not a skeleton bone. Empty means
 // the clip uses the static grip from the hold file.
 inline const char* kGripTrack = "hold_grip";
-// Per keyframe, the off-hand palm in the main palm's local space.
+// Per keyframe, the off-hand palm in the main (tool-owning) palm's local space.
 // In-betweens blend these stored points. The keyframe pose itself is not overwritten.
+// Two-hand tools: main palm parents the item; off-hand stays on the shaft via this track.
 inline const char* kTouchTrack = "hold_touch";
 // Extra model-space rotation of the held item. Identity means the hold-file
 // facing. Keyed per frame so one pose can turn without rewriting the others.
@@ -494,6 +534,23 @@ inline const char* kFaceTrack = "hold_face";
 
 inline bool isPoseTrack(const std::string& bone) {
     return bone != kGripTrack && bone != kTouchTrack && bone != kFaceTrack;
+}
+
+// Tool L / opposite-hand preview: swap arm_l↔arm_r tracks and mirror local
+// t.x / r.y / r.z. Authored clips stay Tool R; left is derived at runtime.
+inline Clip mirrorArmClip(Clip c) {
+    for (Track& tr : c.tracks) {
+        bool right = tr.bone.rfind("arm_r_", 0) == 0;
+        bool left = tr.bone.rfind("arm_l_", 0) == 0;
+        if (!right && !left) continue;
+        tr.bone = std::string(right ? "arm_l_" : "arm_r_") + tr.bone.substr(6);
+        for (Key& k : tr.keys) {
+            k.t.x = -k.t.x;
+            k.r.y = -k.r.y;
+            k.r.z = -k.r.z;
+        }
+    }
+    return c;
 }
 
 inline void armKeyFrames(const Clip& c, const std::string& carrier, std::vector<int>& marks) {
@@ -1436,6 +1493,25 @@ inline Clip makeTuckL(const Clip& rig) {
     return c;
 }
 
+// One-hand raise (Tool R): torch / lantern aloft; Tool L is mirrorArmClip of this.
+inline Clip makeRaiseR(const Clip& rig) {
+    Clip c = rig;
+    c.name = "raise_r";
+    c.length = 20;
+    c.fps = 20.0f;
+    c.loop = true;
+    c.tracks.clear();
+    auto pose = [&](const char* bone, float rx, float ry, float rz) {
+        if (findBone(c, bone) < 0) return;
+        setKey(c, bone, 0, {}, { rx, ry, rz });
+    };
+    pose("arm_r_shoulder", 0.00f, 0.00f, 0.00f);
+    pose("arm_r_upper", -1.18f, 0.00f, 0.00f);
+    pose("arm_r_fore", -0.42f, 0.00f, 0.00f);
+    pose("arm_r_hand", 0.10f, 0.00f, 0.00f);
+    return c;
+}
+
 // Right-arm punch. Shoulder is locked so a walk cycle cannot twist the jab.
 // Frame 10 (of length 20) is the hit: fist extended forward. Windup cocks the
 // fist beside the chest; recovery lowers the arm. Rx only, same as hold poses.
@@ -1820,7 +1896,7 @@ inline Clip armStrikeClip(const Clip& src) {
 
 struct PlayerClips {
     Clip idle, walk, run;
-    Clip holdBlock, tuckR, tuckL;
+    Clip holdBlock, tuckR, tuckL, raiseR, raiseL;
     Clip punch, axeChop, mineDown, mineUp, pickRaise, twoHandReady;
     Clip twoHandStrike; // two_hand_ready with only the arm and grip tracks
     std::vector<pm::Part> rest;
@@ -1829,14 +1905,31 @@ struct PlayerClips {
 inline PlayerClips& playerClips() {
     static PlayerClips lib;
     static bool once = false;
-    if (!once) {
+    static std::filesystem::file_time_type animStamp{};
+    auto stamp = []() {
+        std::filesystem::file_time_type t{};
+        const char* stems[] = {
+            "idle", "walk", "run", "hold_block", "tuck_r", "tuck_l", "raise_r",
+            "punch", "axe_chop", "mine_down", "mine_up", "pick_raise", "two_hand_ready"
+        };
+        for (const char* s : stems) {
+            std::error_code ec;
+            auto mt = std::filesystem::last_write_time(pack::animationFile(s), ec);
+            if (!ec && mt > t) t = mt;
+        }
+        return t;
+    };
+    std::filesystem::file_time_type now = stamp();
+    if (!once || now != animStamp) {
         once = true;
+        animStamp = now;
         lib.rest = pm::buildPlayerModel();
         Clip rig = rigFromParts(lib.rest, "player");
         auto loadOr = [&](Clip& dst, const char* stem, Clip (*make)(const Clip&)) {
             dst = load(pack::animationFile(stem).c_str());
             if (dst.bones.empty() || dst.tracks.empty()) dst = make(rig);
             if (dst.bones.empty()) dst.bones = rig.bones;
+            else ensureBonesFrom(dst, rig);
             if (dst.name.empty()) dst.name = stem;
             rebindPivots(dst, lib.rest);
         };
@@ -1846,6 +1939,10 @@ inline PlayerClips& playerClips() {
         loadOr(lib.holdBlock, "hold_block", makeHoldBlock);
         loadOr(lib.tuckR, "tuck_r", makeTuckR);
         loadOr(lib.tuckL, "tuck_l", makeTuckL);
+        loadOr(lib.raiseR, "raise_r", makeRaiseR);
+        // Left raise is Tool L of raise_r — no separate asset.
+        lib.raiseL = mirrorArmClip(lib.raiseR);
+        lib.raiseL.name = "raise_l";
         loadOr(lib.punch, "punch", makePunch);
         loadOr(lib.axeChop, "axe_chop", makeAxeChop);
         loadOr(lib.mineDown, "mine_down", makeMineDown);
@@ -1862,6 +1959,8 @@ inline PlayerClips& playerClips() {
         if (lib.holdBlock.name.empty()) lib.holdBlock.name = "hold_block";
         if (lib.tuckR.name.empty()) lib.tuckR.name = "tuck_r";
         if (lib.tuckL.name.empty()) lib.tuckL.name = "tuck_l";
+        if (lib.raiseR.name.empty()) lib.raiseR.name = "raise_r";
+        if (lib.raiseL.name.empty()) lib.raiseL.name = "raise_l";
         if (lib.punch.name.empty()) lib.punch.name = "punch";
         if (lib.axeChop.name.empty()) lib.axeChop.name = "axe_chop";
         if (lib.mineDown.name.empty()) lib.mineDown.name = "mine_down";
@@ -1878,6 +1977,7 @@ inline void reloadPlayerModel() {
     lib.rest = pm::buildPlayerModel();
     Clip* clips[] = {
         &lib.idle, &lib.walk, &lib.run, &lib.holdBlock, &lib.tuckR, &lib.tuckL,
+        &lib.raiseR, &lib.raiseL,
         &lib.punch, &lib.axeChop, &lib.mineDown, &lib.mineUp, &lib.pickRaise,
         &lib.twoHandReady, &lib.twoHandStrike
     };
@@ -1891,6 +1991,8 @@ inline const Clip& clipByName(const std::string& name) {
     if (name == "hold_block") return L.holdBlock;
     if (name == "tuck_r") return L.tuckR;
     if (name == "tuck_l") return L.tuckL;
+    if (name == "raise_r") return L.raiseR;
+    if (name == "raise_l") return L.raiseL;
     return L.idle;
 }
 
@@ -1909,6 +2011,8 @@ constexpr uint8_t kNetHold = 10;
 constexpr uint8_t kNetTuckR = 11;
 constexpr uint8_t kNetTuckL = 12;
 constexpr uint8_t kNetTwoHandReady = 13;
+constexpr uint8_t kNetRaiseR = 14;
+constexpr uint8_t kNetRaiseL = 15;
 constexpr float kNetFrameScale = 64.0f;
 
 inline uint16_t quantizeFrame(float frame) {
@@ -1935,6 +2039,8 @@ inline uint8_t netId(const Clip& c) {
     if (&c == &L.holdBlock) return kNetHold;
     if (&c == &L.tuckR) return kNetTuckR;
     if (&c == &L.tuckL) return kNetTuckL;
+    if (&c == &L.raiseR) return kNetRaiseR;
+    if (&c == &L.raiseL) return kNetRaiseL;
     return kNetIdle;
 }
 
@@ -1953,6 +2059,8 @@ inline const Clip& clipFromNet(uint8_t id) {
         case kNetHold: return L.holdBlock;
         case kNetTuckR: return L.tuckR;
         case kNetTuckL: return L.tuckL;
+        case kNetRaiseR: return L.raiseR;
+        case kNetRaiseL: return L.raiseL;
         default: return L.idle;
     }
 }
@@ -1977,6 +2085,8 @@ inline const Clip* holdOverlayClip(const std::string& name) {
     if (name == "hold_block") return &L.holdBlock;
     if (name == "tuck_r") return &L.tuckR;
     if (name == "tuck_l") return &L.tuckL;
+    if (name == "raise_r") return &L.raiseR;
+    if (name == "raise_l") return &L.raiseL;
     return nullptr;
 }
 

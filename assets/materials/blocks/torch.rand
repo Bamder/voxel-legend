@@ -1,1 +1,2 @@
-# no randomization
+# Material randomization parameters.
+# unknown lines are ignored by the parser and written back as-is.

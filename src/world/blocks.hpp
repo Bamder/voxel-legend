@@ -151,6 +151,10 @@ constexpr uint8_t FLAG_SETTLED = 2; // world log: written back from a fall
 constexpr uint8_t FLAG_LANTERN_HANG = 2;
 // bits 2..7 = cut faces (see log_appear.hpp flagCutFace)
 // Living wood/leaves of one generated tree share a unique treeId (0 = unbound).
+//
+// Torch attach face is stored in the cell's waterLevel byte (1..5). Face 0
+// (+Y / ceiling) is never used — torches sit on a floor or stick out of a wall.
+// 1 = -Y (upright on top of a block). 2..5 = wall mounts (geo::kFaces).
 
 // One structure-file tag per flag bit. Save and load walk this table, so a new
 // bit is persisted as soon as it has a name here. Do not rename an entry.

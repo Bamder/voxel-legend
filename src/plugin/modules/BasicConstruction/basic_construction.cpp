@@ -4,9 +4,13 @@
 #include "../../../material/model_mesh.hpp"
 #include "../../../material/blocks/grass_tuft_mat.hpp"
 #include "../../../render/textures.hpp"
+#include "../../../render/block_geo.hpp"
 #include "../../../world/player.hpp"
 #include "../../../world/animation.hpp"
+#include "../../../world/log_appear.hpp"
+#include "../../../world/torch_appear.hpp"
 #include "../../../core/config.hpp"
+#include <cmath>
 
 namespace plugin {
 namespace BasicConstruction {
@@ -139,11 +143,14 @@ struct ShrubStemStrategy : BlockStrategy {
     uint8_t dropItem(uint8_t) const override { return STICK; }
 };
 struct LightPropStrategy : BlockStrategy {
+    static bool torchSupport(uint8_t b) { return blocksMotion(b); }
+
     bool emitMesh(World::Chunk& ch, int lx, int y, int lz, int, int, uint8_t, uint8_t) override {
         uint8_t id = ch.get(lx, y, lz);
         const mat::Model& model = mat::g_itemModels[id];
         if (model.quads.empty() && !mat::modelHasSolidTex(model)) return false;
         float dy = 0.0f;
+        int torchAttach = 1;
         if (id == LANTERN) {
             float minY = 1.0f, maxY = 0.0f;
             bool bounded = false;
@@ -164,13 +171,35 @@ struct LightPropStrategy : BlockStrategy {
                 bool hang = (ch.flagAt(lx, y, lz) & FLAG_LANTERN_HANG) != 0;
                 dy = hang ? (1.0f - maxY) : -minY;
             }
+        } else if (id == TORCH) {
+            uint8_t lv = ch.levelAt(lx, y, lz);
+            torchAttach = (lv >= 1 && lv <= 5) ? (int)lv : 1;
         }
-        // Names must not shadow the cell's y, or the prop is drawn at the
+        // Names must not shadow the cell's y, or the tip is drawn at the
         // bottom of the chunk instead of in the placed cell.
         mat::emitModelMesh(model, ch.meshOpaque, [&](float mx, float my, float mz) {
+            if (id == TORCH) {
+                Vec3 p = torch_appear::localPoint(mx, my, mz, torchAttach);
+                return Vec3{ (float)lx + p.x, (float)y + p.y, (float)lz + p.z };
+            }
             return Vec3{ (float)lx + mx, (float)y + my + dy, (float)lz + mz };
         }, blockOf(id).icon);
         return true;
+    }
+
+    void onSelfCheck(BlockEvent& ev) override {
+        if (!ev.world || ev.id != TORCH) return;
+        int attach = ev.world->torchAttachAt(ev.x, ev.y, ev.z);
+        if (attach < 1) attach = 1;
+        // Only the support-side neighbor change matters.
+        if (ev.face != attach) return;
+        const geo::FaceDef& F = geo::kFaces[attach];
+        uint8_t support = ev.world->getBlock(ev.x + F.n[0], ev.y + F.n[1], ev.z + F.n[2]);
+        if (torchSupport(support)) return;
+        const float S = cfg::BLOCK_SCALE;
+        Vec3 pos{ ((float)ev.x + 0.5f) * S, ((float)ev.y + 0.5f) * S, ((float)ev.z + 0.5f) * S };
+        ev.world->setBlock(ev.x, ev.y, ev.z, AIR, ev.markModified, ev.updateMesh);
+        ev.world->spawnDrop(pos, TORCH, 1, true);
     }
 };
 struct GrassTuftStrategy : BlockStrategy {

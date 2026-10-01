@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,8 @@ namespace plugin { const char* blockId(uint8_t id); }
 // Binding file: model skeleton <-> action clip <-> held item.
 // Path: assets/entities/<rig>.hold
 // One row is a relative pose of an item on a bone (usually arm_*_palm).
+// side right/left = which palm OWNS the tool (tool is parented there).
+// Files are authored for side right; the editor Tool L button mirrors preview.
 // item/clip may be "*" (any). More specific rows win. Unknown keys round-trip.
 namespace hold {
 
@@ -42,14 +45,23 @@ inline const char* defaultBone(const std::string& side) {
 
 inline std::string itemNameOf(uint8_t block) {
     if (block == AIR || !validBlock(block)) return {};
+    // Lights must match player.hold stems even if a display name is registered.
+    if (block == TORCH) return "torch";
+    if (block == LANTERN) return "lantern";
     const char* id = plugin::blockId(block);
     if (id && id[0]) return std::string(id);
     const char* n = blockOf(block).name;
     return n ? std::string(n) : std::string{};
 }
 
+inline bool isHandLight(uint8_t b) {
+    return b == TORCH || b == LANTERN;
+}
+
 inline bool isCarryBlock(uint8_t b) {
     if (b == AIR || !validBlock(b)) return false;
+    // Torches and lanterns stay in the hand hotbar; they are not hug-carried.
+    if (isHandLight(b)) return false;
     if (loot::isTool(b)) return false;
     return loot::itemDef(b).kind == loot::Kind::Block;
 }
@@ -75,6 +87,9 @@ inline Spec fallbackSpec(const std::string& side) {
 }
 
 inline Spec resolve(const File& f, const std::string& item, const std::string& clip, const std::string& side) {
+    // Empty item id means "unknown block" — do not treat it as "*" or every
+    // item-specific row is skipped and everything collapses to the wild grip.
+    if (item.empty()) return fallbackSpec(side);
     int best = -1;
     int bestI = -1;
     for (int i = 0; i < (int)f.rows.size(); i++) {
@@ -510,6 +525,28 @@ inline File defaults(const std::string& rig) {
     // palm's inner plane (x=±0.20). Center = (±(0.20-half), -0.13, 0.12+half).
     addClip("tuck_r", "right", "chest", { 0.08f, -0.13f, 0.24f }, { 0.00f, 0.00f, 0.00f }, 0.24f);
     addClip("tuck_l", "left", "chest", { -0.08f, -0.13f, 0.24f }, { 0.00f, 0.00f, 0.00f }, 0.24f);
+    // Torch / lantern raise: shaft upright in the raised palm.
+    auto addLight = [&](const char* item, const char* side, const char* bone, const char* clip,
+                        Vec3 grip, Vec3 offset, Vec3 rot, float scale) {
+        Spec s;
+        s.item = item;
+        s.clip = clip;
+        s.side = side;
+        s.bone = bone;
+        s.grip = grip;
+        s.offset = offset;
+        s.rot = rot;
+        s.scale = scale;
+        f.rows.push_back(s);
+    };
+    addLight("torch", "right", "arm_r_palm", "raise_r",
+             { 0.50f, 0.18f, 0.50f }, { 0.00f, -0.02f, 0.04f }, { 0.20f, 0.00f, 0.00f }, 0.42f);
+    addLight("torch", "left", "arm_l_palm", "raise_r",
+             { 0.50f, 0.18f, 0.50f }, { 0.00f, -0.02f, 0.04f }, { 0.20f, 0.00f, 0.00f }, 0.42f);
+    addLight("lantern", "right", "arm_r_palm", "raise_r",
+             { 0.50f, 0.9754f, 0.50f }, { 0.00f, -0.02f, 0.03f }, { 0.07795f, 0.00f, 0.00f }, 0.40f);
+    addLight("lantern", "left", "arm_l_palm", "raise_r",
+             { 0.50f, 0.9754f, 0.50f }, { 0.00f, -0.02f, 0.03f }, { 0.07795f, 0.00f, 0.00f }, 0.40f);
     return f;
 }
 
@@ -590,7 +627,8 @@ inline bool save(const char* path, const File& f) {
 inline void ensureCarryRows(File& f) {
     File d = defaults(f.rig.empty() ? "player" : f.rig);
     for (const Spec& s : d.rows) {
-        if (s.clip != "hold_block" && s.clip != "tuck_r" && s.clip != "tuck_l") continue;
+        if (s.clip != "hold_block" && s.clip != "tuck_r" && s.clip != "tuck_l"
+            && s.clip != "raise_r") continue;
         if (findRow(f, s.item, s.clip, s.side) < 0) f.rows.push_back(s);
     }
 }
@@ -598,9 +636,19 @@ inline void ensureCarryRows(File& f) {
 inline File& playerHold() {
     static File f;
     static bool once = false;
-    if (!once) {
+    static std::filesystem::file_time_type mtime{};
+    const std::string path = pack::holdFile("player");
+    bool reload = !once;
+    if (once) {
+        std::error_code ec;
+        auto mt = std::filesystem::last_write_time(path, ec);
+        if (!ec && mt != mtime) reload = true;
+    }
+    if (reload) {
         once = true;
-        f = load(pack::holdFile("player").c_str());
+        std::error_code ec;
+        mtime = std::filesystem::last_write_time(path, ec);
+        f = load(path.c_str());
         if (f.rows.empty()) f = defaults("player");
         if (f.rig.empty()) f.rig = "player";
         ensureCarryRows(f);

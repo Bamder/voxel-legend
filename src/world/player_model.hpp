@@ -215,13 +215,14 @@ inline constexpr float kNeckY = 1.44f;
 inline constexpr float kHeadCenterY = 1.62f; // default head cuboid center; matches cfg::EYE_HEIGHT
 inline constexpr float kBodyFollowRad = 5.0f * kPi / 180.0f;
 
-// Model +Z is the face. lookDir(yaw=0) is -Z.
-// Rotate so the face follows lookDir while model +X (right) stays camera-right
-// (a π yaw would also mirror X and swap the hands on screen).
+// Model +Z is the face and follows lookDir (sin yaw, -cos yaw).
+// The rig's right hand (arm_r, editor Tool R) sits on model -X. Flip that
+// axis onto the character's right (cos yaw, sin yaw). Det +1, so the body
+// yaws with the mouse instead of mirroring the turn.
 inline void lookYawXZ(float lx, float lz, float lookYaw, float& ox, float& oz) {
     float cy = std::cos(lookYaw), sy = std::sin(lookYaw);
-    ox = lx * cy + lz * sy;
-    oz = lx * sy - lz * cy;
+    ox = -lx * cy + lz * sy;
+    oz = -lx * sy - lz * cy;
 }
 
 // Nod around the neck so model +Z (face) follows look pitch (positive = look up).

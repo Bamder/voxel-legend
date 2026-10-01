@@ -155,8 +155,13 @@ public:
     bool isAlive(int x, int y, int z) const;
     // placeFace is the clicked face (geo::kFaces). -1 means the face is unknown.
     // cellFlags >= 0 writes that flag byte and skips placement inference.
-    void setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh = true,
+    // Returns false when the write is refused (e.g. torch with no support).
+    bool setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh = true,
                   int placeFace = -1, int cellFlags = -1);
+    // Torch: which face of this cell touches its support (1..5), or -1 if not a torch.
+    int torchAttachAt(int x, int y, int z) const;
+    // Resolve attach face for a torch about to be placed at (x,y,z). -1 = cannot place.
+    int resolveTorchAttach(int x, int y, int z, int placeFace) const;
 
     void treeFallPhysics(float dt);
     void treeFallGameTick();

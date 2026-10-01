@@ -239,15 +239,22 @@ struct Editor {
     bool animRollChain = true;      // roll: true = limb below follows, false = this bone only
     bool animHoldEdit = false;       // gizmos edit item-on-palm bind instead of bones
     bool animGrasp = false;          // gizmos edit the per-frame grasp point
-    bool animLockDir = false;        // main-hand rotation keeps the tool's facing
-    bool animLockPos = false;        // main-hand motion keeps the tool's grip in place
+    bool animLockDir = false;        // tool-palm rotation keeps the tool's facing
+    bool animLockPos = false;        // tool-palm motion keeps the tool's grip in place
     bool animMask = false;           // paint a tint on cuboid faces
     int animMaskColor = 0;           // 0..5 shared mask color
     struct FaceMark { std::string part; int face = 0; int color = 0; };
     std::vector<FaceMark> faceMarks;
     bool animHoldDirty = false;
-    uint8_t animHoldItem = HAND_AXE; // 0 = wildcard *
-    int animHoldSide = 1;            // 1 right, -1 left
+    std::string animHoldItemKey = "hand_axe"; // hold row item stem, or "*"
+    bool animHoldPickOpen = false;   // item picker popup
+    int animHoldPickHover = -1;
+    float animHoldPickScroll = 0.0f;
+    bool animHoldApplyOpen = false;  // copy grip from another item
+    int animHoldApplyHover = -1;
+    float animHoldApplyScroll = 0.0f;
+    bool animHoldApplyAllAsk = false; // confirm apply-to-all
+    int animHoldSide = 1;            // 1 Tool R (right owns tool), -1 Tool L
     int animHoldHover = -1;
     int animScrub = 0;               // 1 = dragging playhead
     bool animDirty = false;
@@ -729,6 +736,19 @@ static void launchStructureEditor() {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
+    // Resolve assets/ relative to the executable, not the caller's cwd.
+    {
+        wchar_t path[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (n && n < MAX_PATH) {
+            wchar_t* slash = wcsrchr(path, L'\\');
+            if (!slash) slash = wcsrchr(path, L'/');
+            if (slash) {
+                *slash = 0;
+                SetCurrentDirectoryW(path);
+            }
+        }
+    }
     int startMode = -1; // -1 = chooser screen, 0 = texture, 1 = item model, 2 = entity model, 3 = animation
     if (lpCmdLine && *lpCmdLine) {
         std::string cl(lpCmdLine);
@@ -2452,10 +2472,100 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     std::vector<std::string> animNames;
     std::vector<pm::Part> animBindParts;
     std::string animBindName = "player";
-    const uint8_t kHoldItems[7] = { 0, HAND_AXE, HAND_PICK, HAND_SHOVEL, SHEARS, STICK, PLANKS };
+    // Hold Bind item choices: id 0 = "*", else a live block. Rebuilt from the
+    // hold file so the picker stays aligned with authored item rows.
+    struct HoldPick { uint8_t id = 0; std::string name; };
+    std::vector<HoldPick> holdPickList;
+    auto blockIdOfName = [&](const std::string& name) -> int {
+        if (name.empty() || name == "*") return 0;
+        plugin::init();
+        for (int i = 1; i < liveBlockCount(); i++) {
+            const char* id = plugin::blockId((uint8_t)i);
+            if (id && name == id) return i;
+            const char* n = blockOf((uint8_t)i).name;
+            if (n && name == n) return i;
+        }
+        return -1;
+    };
+    auto rebuildHoldPickList = [&]() {
+        holdPickList.clear();
+        holdPickList.push_back({ 0, "*" });
+        auto addId = [&](uint8_t id) {
+            if (id == 0 || !validBlock(id)) return;
+            std::string nm = hold::itemNameOf(id);
+            if (nm.empty()) return;
+            for (const HoldPick& p : holdPickList) if (p.name == nm) return;
+            holdPickList.push_back({ id, nm });
+        };
+        auto addName = [&](const std::string& nm) {
+            if (nm.empty() || nm == "*") return;
+            int id = blockIdOfName(nm);
+            // Prefer plugin id (English stem) so hold rows / UI stay ASCII.
+            std::string key = nm;
+            if (id > 0) {
+                const char* pid = plugin::blockId((uint8_t)id);
+                if (pid && pid[0]) key = pid;
+            }
+            for (const HoldPick& p : holdPickList) if (p.name == key) return;
+            holdPickList.push_back({ id > 0 ? (uint8_t)id : (uint8_t)0, key });
+        };
+        for (const hold::Spec& s : editHold.rows)
+            if (!hold::isWild(s.item)) addName(s.item);
+        // Common holdables even if not yet in the .hold file.
+        const uint8_t extras[] = {
+            HAND_AXE, HAND_PICK, HAND_SHOVEL, SHEARS, STICK, PLANKS,
+            TORCH, LANTERN, ITEM_GUIDE_BOOK,
+            ITEM_ARCANE_FIREBALL, ITEM_ARCANE_FREEZE, ITEM_ARCANE_HEAL, ITEM_TARGET
+        };
+        for (uint8_t id : extras) addId(id);
+        std::sort(holdPickList.begin() + 1, holdPickList.end(),
+                  [](const HoldPick& a, const HoldPick& b) { return a.name < b.name; });
+    };
     auto holdItemName = [&]() -> std::string {
-        if (ed.animHoldItem == 0) return "*";
-        return hold::itemNameOf(ed.animHoldItem);
+        return ed.animHoldItemKey.empty() ? "*" : ed.animHoldItemKey;
+    };
+    auto holdItemBlock = [&]() -> uint8_t {
+        std::string nm = holdItemName();
+        if (nm == "*") return HAND_AXE; // preview mesh only
+        for (const HoldPick& p : holdPickList)
+            if (p.name == nm && p.id > 0) return p.id;
+        int id = blockIdOfName(nm);
+        return id > 0 ? (uint8_t)id : (uint8_t)HAND_AXE;
+    };
+    auto heldPreviewModel = [&](uint8_t block) -> const mat::Model& {
+        const mat::Material* tm = mat::toolMaterial(block);
+        if (tm && tm->model.ok()) return tm->model;
+        return mat::itemModel(block);
+    };
+    auto setHoldItemByName = [&](const std::string& nm) {
+        if (nm.empty() || nm == "*") { ed.animHoldItemKey = "*"; return; }
+        int id = blockIdOfName(nm);
+        if (id > 0) {
+            const char* pid = plugin::blockId((uint8_t)id);
+            if (pid && pid[0]) { ed.animHoldItemKey = pid; return; }
+        }
+        ed.animHoldItemKey = nm;
+    };
+    // Keep Hold Bind item aligned with the clip: prefer an item-specific row
+    // for this clip when the current pick has none.
+    auto syncHoldItemToClip = [&]() {
+        rebuildHoldPickList();
+        std::string clip = editClip.name;
+        std::string cur = holdItemName();
+        auto itemHasClipRow = [&](const std::string& item) {
+            for (const hold::Spec& s : editHold.rows) {
+                if (hold::isWild(s.item) || s.item != item) continue;
+                if (hold::isWild(s.clip) || s.clip == clip) return true;
+            }
+            return false;
+        };
+        if (!hold::isWild(cur) && itemHasClipRow(cur)) return;
+        for (const hold::Spec& s : editHold.rows) {
+            if (hold::isWild(s.item) || hold::isWild(s.clip)) continue;
+            if (s.clip != clip) continue;
+            setHoldItemByName(s.item);
+            return;
+        }
     };
     auto holdSideName = [&]() -> std::string {
         return (ed.animHoldSide < 0) ? "left" : "right";
@@ -2465,7 +2575,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         editHold = hold::load(pack::holdFile(stem).c_str());
         if (editHold.rows.empty()) editHold = hold::defaults(stem);
         editHold.rig = stem;
+        // Normalize display/legacy names (e.g. 标靶) to plugin ids.
+        for (hold::Spec& s : editHold.rows) {
+            if (hold::isWild(s.item)) continue;
+            int id = blockIdOfName(s.item);
+            if (id <= 0) continue;
+            const char* pid = plugin::blockId((uint8_t)id);
+            if (pid && pid[0]) s.item = pid;
+        }
         ed.animHoldDirty = false;
+        rebuildHoldPickList();
+        setHoldItemByName(ed.animHoldItemKey);
     };
     auto saveHoldFile = [&]() {
         std::string stem = editHold.rig.empty() ? (animBindName.empty() ? "player" : animBindName) : editHold.rig;
@@ -2473,8 +2593,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         hold::save(pack::holdFile(stem).c_str(), editHold);
         ed.animHoldDirty = false;
     };
-    // Selected side is the main-hand preview. If that side has no item row, reuse the
-    // other side's grasp and retarget the palm so the tool actually moves hands.
+    // Selected side is the tool-owning palm (Tool R / Tool L). If that side has no
+    // item row, reuse the other side's grasp and retarget the palm so the tool moves.
     auto previewHoldSpec = [&]() {
         std::string side = holdSideName();
         std::string item = holdItemName();
@@ -2505,39 +2625,75 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         }
         return finish(hold::resolve(editHold, item, editClip.name, side));
     };
-    auto editableHoldSpec = [&]() -> hold::Spec& {
-        hold::Spec s = previewHoldSpec();
-        s.item = holdItemName();
-        s.clip = editClip.name.empty() ? "*" : editClip.name;
-        s.side = holdSideName();
-        if (s.bone.empty()) s.bone = hold::defaultBone(s.side);
-        return hold::upsert(editHold, s);
-    };
-    // Main L previews the clip with the arms exchanged. Local +X is the same
-    // direction on both arms, so the swap also mirrors X translation and Ry/Rz.
-    auto mirrorArmClip = [](anim::Clip c) {
-        for (anim::Track& tr : c.tracks) {
-            bool right = tr.bone.rfind("arm_r_", 0) == 0;
-            bool left = tr.bone.rfind("arm_l_", 0) == 0;
-            if (!right && !left) continue;
-            tr.bone = std::string(right ? "arm_l_" : "arm_r_") + tr.bone.substr(6);
-            for (anim::Key& k : tr.keys) {
-                k.t.x = -k.t.x;
-                k.r.y = -k.r.y;
-                k.r.z = -k.r.z;
-            }
+    // Grasp / From / To All persist the per-item default (clip "*") for the game.
+    // If the current clip already has an override (raise_r, mine_down, …), that
+    // row is refreshed with the SAME pose after the edit — otherwise preview
+    // keeps resolving to the stale override and Grasp looks stuck.
+    auto purgeLocoHoldRows = [&](const std::string& item, const std::string& side) {
+        for (int i = (int)editHold.rows.size() - 1; i >= 0; --i) {
+            const hold::Spec& o = editHold.rows[i];
+            if (o.item != item || o.side != side) continue;
+            if (o.clip == "idle" || o.clip == "walk" || o.clip == "run")
+                editHold.rows.erase(editHold.rows.begin() + i);
         }
-        return c;
     };
+    // Grip is a property of the item, not of which hand holds it. A Tool R
+    // edit writes the same grip/offset/rot/scale onto the other side; only the
+    // palm bone name changes (arm_r_* <-> arm_l_*).
+    auto retargetHoldBone = [](std::string bone, const std::string& side) {
+        if (side == "left" && bone.rfind("arm_r_", 0) == 0)
+            return "arm_l_" + bone.substr(6);
+        if (side == "right" && bone.rfind("arm_l_", 0) == 0)
+            return "arm_r_" + bone.substr(6);
+        if (bone.empty()) return std::string(hold::defaultBone(side));
+        return bone;
+    };
+    auto storeHoldPose = [&](hold::Spec pose) {
+        if (pose.side != "left" && pose.side != "right") pose.side = "right";
+        pose.bone = retargetHoldBone(pose.bone, pose.side);
+        pose.clip = "*";
+        hold::upsert(editHold, pose);
+        purgeLocoHoldRows(pose.item, pose.side);
+        const std::string& cur = editClip.name;
+        auto writeClipRow = [&](const hold::Spec& src) {
+            if (cur.empty() || cur == "*") return;
+            int hi = hold::findRow(editHold, src.item, cur, src.side);
+            if (hi < 0) return;
+            editHold.rows[hi].grip = src.grip;
+            editHold.rows[hi].offset = src.offset;
+            editHold.rows[hi].rot = src.rot;
+            editHold.rows[hi].scale = src.scale;
+            editHold.rows[hi].bone = src.bone;
+        };
+        writeClipRow(pose);
+        hold::Spec other = pose;
+        other.side = (pose.side == "left") ? "right" : "left";
+        other.bone = retargetHoldBone(pose.bone, other.side);
+        other.clip = "*";
+        hold::upsert(editHold, other);
+        purgeLocoHoldRows(other.item, other.side);
+        writeClipRow(other);
+        ed.animHoldDirty = true;
+    };
+    auto persistItemHold = [&](hold::Spec pose) {
+        pose.item = holdItemName();
+        pose.side = holdSideName();
+        storeHoldPose(pose);
+    };
+    auto commitHoldSpec = [&](const hold::Spec& edited) {
+        persistItemHold(edited);
+    };
+    // Tool L previews the clip with the arms exchanged. Local +X is the same
+    // direction on both arms, so the swap also mirrors X translation and Ry/Rz.
     auto previewClipNow = [&]() {
         if (ed.animHoldSide >= 0) return editClip;
-        return mirrorArmClip(editClip);
+        return anim::mirrorArmClip(editClip);
     };
     auto storeViewClip = [&](anim::Clip view) {
         hold::Spec spec = previewHoldSpec();
         if (ed.animHoldSide < 0) hold::mirrorPalmX(spec);
         hold::recordTouches(view, spec);
-        if (ed.animHoldSide < 0) view = mirrorArmClip(std::move(view));
+        if (ed.animHoldSide < 0) view = anim::mirrorArmClip(std::move(view));
         editClip.tracks = std::move(view.tracks);
         editClip.toolTurns = std::move(view.toolTurns);
     };
@@ -2602,7 +2758,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     };
     auto captureTool = [&](const anim::Clip& view, anim::BoneXform& palm0, float toolR[9], Vec3& grip0) -> bool {
         hold::Spec spec = toolSpecAt(view, (float)ed.animFrame);
-        spec.grip = anim::evalGrip(view, (float)ed.animFrame, spec.grip);
         auto pose = poseShown(view, (float)ed.animFrame);
         if (!anim::boneXformOf(view, pose, spec.bone, palm0)) return false;
         grip0 = hold::pointOnBone(spec, palm0, spec.grip.x, spec.grip.y, spec.grip.z);
@@ -2672,6 +2827,63 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         ed.animModelDirty = s.modelDirty;
         ed.animPlaying = false;
     };
+    // Copy grip/offset/rot/scale/bone; retarget arm_* bone to dst.side.
+    auto copyHoldPose = [&](hold::Spec& dst, const hold::Spec& src) {
+        dst.grip = src.grip;
+        dst.offset = src.offset;
+        dst.rot = src.rot;
+        dst.scale = src.scale;
+        std::string bone = src.bone;
+        if (dst.side == "left") {
+            if (bone.rfind("arm_r_", 0) == 0) bone = "arm_l_" + bone.substr(6);
+        } else {
+            if (bone.rfind("arm_l_", 0) == 0) bone = "arm_r_" + bone.substr(6);
+        }
+        if (bone.empty()) bone = hold::defaultBone(dst.side);
+        dst.bone = bone;
+        if (dst.scale < 1e-4f) dst.scale = 0.48f;
+    };
+    // Grasp / Lower-Higher write the per-item Spec.grip (hold file), not the
+    // shared clip hold_grip track — that track would override every item.
+    auto stripClipGrip = [&](anim::Clip& c) {
+        int ti = anim::findTrack(c, anim::kGripTrack);
+        if (ti >= 0) c.tracks.erase(c.tracks.begin() + ti);
+    };
+    auto writeItemGrip = [&](Vec3 g) {
+        hold::Spec s = previewHoldSpec();
+        s.grip = anim::clampGrip(g);
+        persistItemHold(s);
+        stripClipGrip(editClip);
+    };
+    auto itemGrip = [&]() -> Vec3 {
+        return previewHoldSpec().grip;
+    };
+    auto applyHoldFromItem = [&](const std::string& srcItem) {
+        if (srcItem.empty() || srcItem == "*") return;
+        pushAnimUndo();
+        hold::Spec src = hold::resolve(editHold, srcItem,
+            editClip.name.empty() ? "*" : editClip.name, holdSideName());
+        hold::Spec dst = previewHoldSpec();
+        dst.item = holdItemName();
+        dst.side = holdSideName();
+        copyHoldPose(dst, src);
+        persistItemHold(dst);
+        stripClipGrip(editClip);
+    };
+    auto applyHoldToAllItems = [&]() {
+        pushAnimUndo();
+        hold::Spec src = previewHoldSpec();
+        src.side = holdSideName();
+        for (const HoldPick& p : holdPickList) {
+            if (p.name.empty() || p.name == "*") continue;
+            hold::Spec dst = src;
+            dst.item = p.name;
+            dst.side = src.side;
+            copyHoldPose(dst, src);
+            storeHoldPose(dst);
+        }
+        stripClipGrip(editClip);
+    };
     auto scanAnimFiles = [&]() {
         animNames.clear();
         std::error_code ec;
@@ -2717,6 +2929,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         else if (animBindParts.empty()) loadAnimBind("player");
         if (ed.animSelBone >= (int)editClip.bones.size()) ed.animSelBone = 0;
         anim::ensurePalmBones(editClip, animBindParts);
+        syncHoldItemToClip();
+        ed.animHoldPickOpen = false;
+        ed.animHoldApplyOpen = false;
+        ed.animHoldApplyAllAsk = false;
     };
     auto saveAnimClip = [&]() {
         std::error_code ec;
@@ -4351,9 +4567,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         };
         float animNewRect[4] = {}, animDupRect[4] = {}, animDelRect[4] = {};
         float animSaveRect[4] = {}, animRebuildRect[4] = {};
-        float animHoldPrev[4] = {}, animHoldNext[4] = {}, animHoldL[4] = {}, animHoldR[4] = {};
+        float animHoldItemBtn[4] = {}, animHoldL[4] = {}, animHoldR[4] = {};
         float animHoldGrip[4] = {}, animHoldGrasp[4] = {}, animHoldBone[4] = {}, animHoldSave[4] = {};
+        float animHoldFrom[4] = {}, animHoldToAll[4] = {};
         float animHoldLower[4] = {}, animHoldHigher[4] = {};
+        float animHoldPickRect[4] = {};      // centered modal panel
+        float animHoldPickList[4] = {};      // scrollable list viewport inside panel
+        float animHoldConfirmRect[4] = {}, animHoldConfirmYes[4] = {}, animHoldConfirmNo[4] = {};
+        const float holdPickRowH = 40.0f;
+        const float holdPickTitleH = 40.0f;
+        const float holdPickPad = 12.0f;
+        const float holdPickThumb = 32.0f;
+        int holdPickVis = 10;
+        std::vector<std::string> holdApplyNames;
         float animLockDir[4] = {}, animLockPos[4] = {};
         float animLenMinus[4] = {}, animLenPlus[4] = {};
         float animScaleRect[4][4] = {};
@@ -4373,7 +4599,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             animPaneTop = animVY;
             animPaneBot = animVY + animVH;
             inAnim3d = mx >= animVX && mx < animVX + animVW && my >= animVY && my < animVY + animVH;
-            if (g_wheel != 0) {
+            bool holdModalOpen = ed.animHoldPickOpen || ed.animHoldApplyOpen || ed.animHoldApplyAllAsk;
+            if (g_wheel != 0 && !holdModalOpen) {
                 float ticks = (float)g_wheel / 120.0f;
                 bool overLeft = mx >= 0.0f && mx < animLeftW && my >= animPaneTop && my < animPaneBot;
                 bool overRight = mx >= (float)g_winW - animRightW && mx < (float)g_winW
@@ -4420,7 +4647,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             animBindN = (int)entNames.size();
             if (animBindN > 48) animBindN = 48;
             const float holdRow = 36.0f, holdH = 28.0f, holdPad = 10.0f;
-            float rightH = 8.0f + (float)animBindN * 24.0f + 470.0f;
+            float rightH = 8.0f + (float)animBindN * 24.0f + 640.0f;
             animScrollMaxR = rightH - animVH;
             if (animScrollMaxR < 0.0f) animScrollMaxR = 0.0f;
             if (ed.animScrollR < 0.0f) ed.animScrollR = 0.0f;
@@ -4439,20 +4666,96 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             animModelSave[2] = animRightW - 20.0f; animModelSave[3] = 26.0f;
             float hy = animModelSave[1] + animModelSave[3] + 34.0f;
             float inner = animRightW - holdPad * 2.0f;
-            animHoldPrev[0] = rx + holdPad; animHoldPrev[1] = hy; animHoldPrev[2] = 36.0f; animHoldPrev[3] = holdH;
-            animHoldNext[0] = rx + animRightW - holdPad - 36.0f; animHoldNext[1] = hy; animHoldNext[2] = 36.0f; animHoldNext[3] = holdH;
+            // Hold Bind: item / hand / bind / locks / bone / save
+            animHoldItemBtn[0] = rx + holdPad; animHoldItemBtn[1] = hy; animHoldItemBtn[2] = inner; animHoldItemBtn[3] = holdH;
             float half = (inner - 8.0f) * 0.5f;
             animHoldL[0] = rx + holdPad; animHoldL[1] = hy + holdRow; animHoldL[2] = half; animHoldL[3] = holdH;
             animHoldR[0] = rx + holdPad + half + 8.0f; animHoldR[1] = hy + holdRow; animHoldR[2] = half; animHoldR[3] = holdH;
-            animHoldGrip[0] = rx + holdPad; animHoldGrip[1] = hy + holdRow * 2.0f; animHoldGrip[2] = half; animHoldGrip[3] = holdH;
-            animHoldGrasp[0] = rx + holdPad + half + 8.0f; animHoldGrasp[1] = hy + holdRow * 2.0f; animHoldGrasp[2] = half; animHoldGrasp[3] = holdH;
-            animHoldLower[0] = rx + holdPad; animHoldLower[1] = hy + holdRow * 3.0f; animHoldLower[2] = half; animHoldLower[3] = holdH;
-            animHoldHigher[0] = rx + holdPad + half + 8.0f; animHoldHigher[1] = hy + holdRow * 3.0f; animHoldHigher[2] = half; animHoldHigher[3] = holdH;
+            animHoldGrip[0] = rx + holdPad; animHoldGrip[1] = hy + holdRow * 2.0f; animHoldGrip[2] = inner; animHoldGrip[3] = holdH;
             const float gripGap = 22.0f;
-            animLockDir[0] = rx + holdPad; animLockDir[1] = hy + holdRow * 4.0f + gripGap; animLockDir[2] = half; animLockDir[3] = holdH;
-            animLockPos[0] = rx + holdPad + half + 8.0f; animLockPos[1] = hy + holdRow * 4.0f + gripGap; animLockPos[2] = half; animLockPos[3] = holdH;
-            animHoldBone[0] = rx + holdPad; animHoldBone[1] = hy + holdRow * 5.0f + gripGap; animHoldBone[2] = inner; animHoldBone[3] = holdH;
-            animHoldSave[0] = rx + holdPad; animHoldSave[1] = hy + holdRow * 6.0f + gripGap; animHoldSave[2] = inner; animHoldSave[3] = holdH;
+            animLockDir[0] = rx + holdPad; animLockDir[1] = hy + holdRow * 3.0f + gripGap; animLockDir[2] = half; animLockDir[3] = holdH;
+            animLockPos[0] = rx + holdPad + half + 8.0f; animLockPos[1] = hy + holdRow * 3.0f + gripGap; animLockPos[2] = half; animLockPos[3] = holdH;
+            animHoldBone[0] = rx + holdPad; animHoldBone[1] = hy + holdRow * 4.0f + gripGap; animHoldBone[2] = inner; animHoldBone[3] = holdH;
+            animHoldSave[0] = rx + holdPad; animHoldSave[1] = hy + holdRow * 5.0f + gripGap; animHoldSave[2] = inner; animHoldSave[3] = holdH;
+            // Hold Edit: grasp point tools (visualized + Move/Rot in 3D)
+            const float holdEditGap = 28.0f;
+            float ey = hy + holdRow * 6.0f + gripGap + holdEditGap;
+            animHoldGrasp[0] = rx + holdPad; animHoldGrasp[1] = ey; animHoldGrasp[2] = inner; animHoldGrasp[3] = holdH;
+            animHoldLower[0] = rx + holdPad; animHoldLower[1] = ey + holdRow; animHoldLower[2] = half; animHoldLower[3] = holdH;
+            animHoldHigher[0] = rx + holdPad + half + 8.0f; animHoldHigher[1] = ey + holdRow; animHoldHigher[2] = half; animHoldHigher[3] = holdH;
+            const float gripReadGap = 22.0f;
+            animHoldFrom[0] = rx + holdPad; animHoldFrom[1] = ey + holdRow * 2.0f + gripReadGap; animHoldFrom[2] = inner; animHoldFrom[3] = holdH;
+            animHoldToAll[0] = rx + holdPad; animHoldToAll[1] = ey + holdRow * 3.0f + gripReadGap; animHoldToAll[2] = inner; animHoldToAll[3] = holdH;
+            {
+                // Centered modal (inventory-style): dim the rest of the window.
+                // Shared geometry for item pick and "apply grip from" lists.
+                float pw = 420.0f;
+                float listH = (float)holdPickVis * holdPickRowH;
+                float ph = holdPickTitleH + listH + holdPickPad * 2.0f;
+                if (ph > (float)g_winH - 40.0f) {
+                    ph = (float)g_winH - 40.0f;
+                    listH = ph - holdPickTitleH - holdPickPad * 2.0f;
+                    if (listH < holdPickRowH) listH = holdPickRowH;
+                    holdPickVis = std::max(1, (int)(listH / holdPickRowH));
+                    listH = (float)holdPickVis * holdPickRowH;
+                    ph = holdPickTitleH + listH + holdPickPad * 2.0f;
+                }
+                animHoldPickRect[0] = ((float)g_winW - pw) * 0.5f;
+                animHoldPickRect[1] = ((float)g_winH - ph) * 0.5f;
+                animHoldPickRect[2] = pw;
+                animHoldPickRect[3] = ph;
+                animHoldPickList[0] = animHoldPickRect[0] + holdPickPad;
+                animHoldPickList[1] = animHoldPickRect[1] + holdPickTitleH;
+                animHoldPickList[2] = pw - holdPickPad * 2.0f - 10.0f; // room for scrollbar
+                animHoldPickList[3] = listH;
+                auto clampScroll = [&](float& scroll, int n) {
+                    float contentH = (float)n * holdPickRowH;
+                    float maxS = std::max(0.0f, contentH - animHoldPickList[3]);
+                    if (scroll < 0.0f) scroll = 0.0f;
+                    if (scroll > maxS) scroll = maxS;
+                    return maxS;
+                };
+                int applyN = 0;
+                holdApplyNames.clear();
+                {
+                    std::string cur = holdItemName();
+                    for (const HoldPick& p : holdPickList) {
+                        if (p.name.empty() || p.name == "*" || p.name == cur) continue;
+                        holdApplyNames.push_back(p.name);
+                    }
+                    applyN = (int)holdApplyNames.size();
+                }
+                float maxPick = clampScroll(ed.animHoldPickScroll, (int)holdPickList.size());
+                float maxApply = clampScroll(ed.animHoldApplyScroll, applyN);
+                if ((ed.animHoldPickOpen || ed.animHoldApplyOpen) && g_wheel != 0) {
+                    float ticks = (float)g_wheel / 120.0f;
+                    if (ed.animHoldApplyOpen) {
+                        ed.animHoldApplyScroll -= ticks * holdPickRowH;
+                        clampScroll(ed.animHoldApplyScroll, applyN);
+                        (void)maxApply;
+                    } else {
+                        ed.animHoldPickScroll -= ticks * holdPickRowH;
+                        clampScroll(ed.animHoldPickScroll, (int)holdPickList.size());
+                        (void)maxPick;
+                    }
+                    g_wheel = 0;
+                }
+                // Confirm dialog for apply-to-all.
+                float cw = 360.0f, ch = 140.0f;
+                animHoldConfirmRect[0] = ((float)g_winW - cw) * 0.5f;
+                animHoldConfirmRect[1] = ((float)g_winH - ch) * 0.5f;
+                animHoldConfirmRect[2] = cw;
+                animHoldConfirmRect[3] = ch;
+                float bw = 120.0f, bh = 32.0f;
+                float by2 = animHoldConfirmRect[1] + ch - bh - 18.0f;
+                animHoldConfirmNo[0] = animHoldConfirmRect[0] + 36.0f;
+                animHoldConfirmNo[1] = by2;
+                animHoldConfirmNo[2] = bw; animHoldConfirmNo[3] = bh;
+                animHoldConfirmYes[0] = animHoldConfirmRect[0] + cw - bw - 36.0f;
+                animHoldConfirmYes[1] = by2;
+                animHoldConfirmYes[2] = bw; animHoldConfirmYes[3] = bh;
+                if (ed.animHoldApplyAllAsk && g_wheel != 0) g_wheel = 0;
+            }
             float ty = (float)g_winH - kTimeH;
             float btnY = ty + 8.0f;
             const float bw = 36.0f, bh = 26.0f, gap = 6.0f;
@@ -5695,7 +5998,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             else if (ed.animTool == 3 && !ed.animHoldEdit && !ed.animGrasp)
                 ed.gizmoHover = hitBoneRoll();
             else
-                ed.gizmoHover = hitAnimGizmo(ed.animGrasp || ed.animTool == 0, !ed.animGrasp && ed.animTool == 1);
+                ed.gizmoHover = hitAnimGizmo(ed.animTool == 0, ed.animTool == 1);
         }
         auto gizmoAxisOf = [](int id) -> int {
             if (id >= 1 && id <= 3) return id - 1;
@@ -5910,11 +6213,52 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             for (int i = 0; i < animBoneN; i++) if (hitCol(animBoneRect[i], true)) ed.animBoneHover = i;
             for (int i = 0; i < animBindN; i++) if (hitCol(animBindRect[i], false)) ed.animBindHover = i;
             for (int i = 0; i < 13; i++) if (hitR(animBtnRect[i])) ed.animBtnHover = i;
+            // Source items for "apply grip from" (exclude wild + current).
+            // holdApplyNames filled during layout above.
+            ed.animHoldPickHover = -1;
+            ed.animHoldApplyHover = -1;
+            if (ed.animHoldPickOpen
+                && mx >= animHoldPickList[0] && mx < animHoldPickList[0] + animHoldPickList[2]
+                && my >= animHoldPickList[1] && my < animHoldPickList[1] + animHoldPickList[3]) {
+                float localY = my - animHoldPickList[1] + ed.animHoldPickScroll;
+                int idx = (int)(localY / holdPickRowH);
+                if (idx >= 0 && idx < (int)holdPickList.size()) ed.animHoldPickHover = idx;
+            }
+            if (ed.animHoldApplyOpen
+                && mx >= animHoldPickList[0] && mx < animHoldPickList[0] + animHoldPickList[2]
+                && my >= animHoldPickList[1] && my < animHoldPickList[1] + animHoldPickList[3]) {
+                float localY = my - animHoldPickList[1] + ed.animHoldApplyScroll;
+                int idx = (int)(localY / holdPickRowH);
+                if (idx >= 0 && idx < (int)holdApplyNames.size()) ed.animHoldApplyHover = idx;
+            }
             if (lmb && !prevLmb) {
                 bool scaleClick = hitR(animScaleRect[0]) || hitR(animScaleRect[1])
                     || hitR(animScaleRect[2]) || hitR(animScaleRect[3]);
                 if (!scaleClick) scaleHoldOn = false;
-                if (ed.animClipHover >= 0 && ed.animClipHover < (int)animNames.size())
+                if (ed.animHoldApplyAllAsk) {
+                    if (hitR(animHoldConfirmYes)) {
+                        applyHoldToAllItems();
+                        ed.animHoldApplyAllAsk = false;
+                    } else if (hitR(animHoldConfirmNo) || !hitR(animHoldConfirmRect)) {
+                        ed.animHoldApplyAllAsk = false;
+                    }
+                }
+                else if (ed.animHoldApplyOpen) {
+                    bool inPanel = hitR(animHoldPickRect);
+                    bool inList = mx >= animHoldPickList[0] && mx < animHoldPickList[0] + animHoldPickList[2]
+                        && my >= animHoldPickList[1] && my < animHoldPickList[1] + animHoldPickList[3];
+                    if (inList) {
+                        float localY = my - animHoldPickList[1] + ed.animHoldApplyScroll;
+                        int idx = (int)(localY / holdPickRowH);
+                        if (idx >= 0 && idx < (int)holdApplyNames.size()) {
+                            applyHoldFromItem(holdApplyNames[idx]);
+                            ed.animHoldApplyOpen = false;
+                        }
+                    } else if (!inPanel) {
+                        ed.animHoldApplyOpen = false;
+                    }
+                }
+                else if (ed.animClipHover >= 0 && ed.animClipHover < (int)animNames.size())
                     loadAnimClip(animNames[ed.animClipHover]);
                 else if (ed.animBoneHover >= 0) ed.animSelBone = ed.animBoneHover;
                 else if (ed.animBindHover >= 0 && ed.animBindHover < (int)entNames.size())
@@ -5936,13 +6280,41 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     anim::ensurePalmBones(editClip, animBindParts);
                     ed.animDirty = true;
                 }
-                else if (hitCol(animHoldPrev, false) || hitCol(animHoldNext, false)) {
-                    int dir = hitCol(animHoldNext, false) ? 1 : -1;
-                    int n = (int)(sizeof(kHoldItems) / sizeof(kHoldItems[0]));
-                    int idx = 0;
-                    for (int i = 0; i < n; i++) if (kHoldItems[i] == ed.animHoldItem) { idx = i; break; }
-                    idx = (idx + dir + n) % n;
-                    ed.animHoldItem = kHoldItems[idx];
+                else if (hitCol(animHoldItemBtn, false)) {
+                    rebuildHoldPickList();
+                    ed.animHoldApplyOpen = false;
+                    ed.animHoldApplyAllAsk = false;
+                    ed.animHoldPickOpen = !ed.animHoldPickOpen;
+                    ed.animHoldPickHover = -1;
+                    if (ed.animHoldPickOpen) {
+                        ed.animHoldPickScroll = 0.0f;
+                        for (int i = 0; i < (int)holdPickList.size(); i++) {
+                            if (holdPickList[i].name == holdItemName()) {
+                                float mid = (float)i * holdPickRowH - animHoldPickList[3] * 0.5f + holdPickRowH * 0.5f;
+                                float contentH = (float)holdPickList.size() * holdPickRowH;
+                                float maxS = std::max(0.0f, contentH - animHoldPickList[3]);
+                                ed.animHoldPickScroll = mid;
+                                if (ed.animHoldPickScroll < 0.0f) ed.animHoldPickScroll = 0.0f;
+                                if (ed.animHoldPickScroll > maxS) ed.animHoldPickScroll = maxS;
+                                break;
+                            }
+                        }
+                    }
+                }
+                else if (ed.animHoldPickOpen) {
+                    bool inPanel = hitR(animHoldPickRect);
+                    bool inList = mx >= animHoldPickList[0] && mx < animHoldPickList[0] + animHoldPickList[2]
+                        && my >= animHoldPickList[1] && my < animHoldPickList[1] + animHoldPickList[3];
+                    if (inList) {
+                        float localY = my - animHoldPickList[1] + ed.animHoldPickScroll;
+                        int idx = (int)(localY / holdPickRowH);
+                        if (idx >= 0 && idx < (int)holdPickList.size()) {
+                            setHoldItemByName(holdPickList[idx].name);
+                            ed.animHoldPickOpen = false;
+                        }
+                    } else if (!inPanel) {
+                        ed.animHoldPickOpen = false;
+                    }
                 }
                 else if (hitCol(animHoldL, false)) ed.animHoldSide = -1;
                 else if (hitCol(animHoldR, false)) ed.animHoldSide = 1;
@@ -5954,22 +6326,33 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     pushAnimUndo();
                     float step = keyDown(VK_SHIFT) ? 0.10f : 0.02f;
                     float dy = hitCol(animHoldHigher, false) ? step : -step;
-                    anim::Clip view = previewClipNow();
-                    Vec3 g = anim::evalGrip(view, (float)ed.animFrame, previewHoldSpec().grip);
+                    Vec3 g = itemGrip();
                     g.y += dy;
-                    anim::setGripKey(view, ed.animFrame, g, previewHoldSpec().grip);
-                    storeViewClip(std::move(view));
-                    ed.animDirty = true;
+                    writeItemGrip(g);
                     ed.animPlaying = false;
                 }
                 else if (hitCol(animHoldBone, false)) {
                     if (ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size()) {
                         pushAnimUndo();
-                        editableHoldSpec().bone = editClip.bones[ed.animSelBone].name;
-                        ed.animHoldDirty = true;
+                        hold::Spec s = previewHoldSpec();
+                        s.bone = editClip.bones[ed.animSelBone].name;
+                        persistItemHold(s);
                     }
                 }
                 else if (hitCol(animHoldSave, false)) saveHoldFile();
+                else if (hitCol(animHoldFrom, false)) {
+                    rebuildHoldPickList();
+                    ed.animHoldPickOpen = false;
+                    ed.animHoldApplyAllAsk = false;
+                    ed.animHoldApplyOpen = !ed.animHoldApplyOpen;
+                    ed.animHoldApplyHover = -1;
+                    ed.animHoldApplyScroll = 0.0f;
+                }
+                else if (hitCol(animHoldToAll, false)) {
+                    ed.animHoldPickOpen = false;
+                    ed.animHoldApplyOpen = false;
+                    ed.animHoldApplyAllAsk = true;
+                }
                 else if (ed.animBtnHover == 0) {
                     std::string bn = ed.animGrasp ? std::string(anim::kGripTrack)
                         : ((ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size())
@@ -5989,24 +6372,24 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 }                 else if (ed.animBtnHover == 4) {
                     if (ed.animGrasp || (ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size())) {
                         pushAnimUndo();
-                        anim::Clip view = previewClipNow();
                         if (ed.animGrasp) {
-                            hold::Spec spec = previewHoldSpec();
-                            Vec3 g = anim::evalGrip(view, (float)ed.animFrame, spec.grip);
-                            anim::setGripKey(view, ed.animFrame, g, spec.grip);
+                            writeItemGrip(itemGrip());
                         } else {
+                            anim::Clip view = previewClipNow();
                             auto pose = poseShown(view, (float)ed.animFrame);
                             anim::writeShownPose(view, ed.animFrame, pose);
+                            stripClipGrip(view);
+                            storeViewClip(std::move(view));
+                            ed.animDirty = true;
                         }
-                        storeViewClip(std::move(view));
-                        ed.animDirty = true;
                     }
                 } else if (ed.animBtnHover == 5) {
-                    if (ed.animGrasp || (ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size())) {
+                    if (ed.animGrasp) {
+                        // Grip is per-item Spec; nothing to delete on the clip.
+                    } else if (ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size()) {
                         pushAnimUndo();
                         anim::Clip view = previewClipNow();
-                        if (ed.animGrasp) anim::deleteKey(view, anim::kGripTrack, ed.animFrame);
-                        else anim::deleteKey(view, view.bones[ed.animSelBone].name, ed.animFrame);
+                        anim::deleteKey(view, view.bones[ed.animSelBone].name, ed.animFrame);
                         storeViewClip(std::move(view));
                         ed.animDirty = true;
                     }
@@ -6027,7 +6410,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 else if (hitR(animKeyOp[0])) {
                     pushAnimUndo();
                     anim::Clip view = previewClipNow();
-                    anim::blankKeyframe(view, ed.animFrame, previewHoldSpec().grip);
+                    anim::blankKeyframe(view, ed.animFrame, itemGrip());
+                    stripClipGrip(view);
                     storeViewClip(std::move(view));
                     ed.animDirty = true;
                     ed.animPlaying = false;
@@ -6040,27 +6424,28 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         poseCopy.bones.push_back(view.bones[i].name);
                         poseCopy.keys.push_back(anim::keyFromWorld(view, i, shown));
                     }
-                    poseCopy.grip = anim::evalGrip(view, (float)ed.animFrame, previewHoldSpec().grip);
+                    poseCopy.grip = itemGrip();
                     poseCopy.face = anim::evalFace(view, (float)ed.animFrame);
                     poseCopy.faceOff = anim::evalFaceOff(view, (float)ed.animFrame);
                     poseCopy.has = !poseCopy.bones.empty();
                 } else if (hitR(animKeyOp[2]) && poseCopy.has) {
                     pushAnimUndo();
                     anim::Clip view = previewClipNow();
-                    anim::writePose(view, ed.animFrame, poseCopy.bones, poseCopy.keys, poseCopy.grip, previewHoldSpec().grip);
+                    anim::writePose(view, ed.animFrame, poseCopy.bones, poseCopy.keys, poseCopy.grip, itemGrip());
                     anim::setFaceKey(view, ed.animFrame, poseCopy.faceOff, poseCopy.face);
+                    stripClipGrip(view);
                     storeViewClip(std::move(view));
+                    writeItemGrip(poseCopy.grip);
                     ed.animDirty = true;
                     ed.animPlaying = false;
                 }                 else if (hitR(animKeyOp[3])) {
                     pushAnimUndo();
                     anim::Clip view = previewClipNow();
-                    hold::Spec spec = previewHoldSpec();
                     auto pose = poseShown(view, (float)ed.animFrame);
-                    Vec3 g = anim::evalGrip(view, (float)ed.animFrame, spec.grip);
                     anim::writeShownPose(view, ed.animFrame, pose);
-                    anim::setGripKey(view, ed.animFrame, g, spec.grip);
+                    stripClipGrip(view);
                     storeViewClip(std::move(view));
+                    writeItemGrip(itemGrip());
                     ed.animDirty = true;
                     ed.animPlaying = false;
                 } else if (hitR(animKeyOp[4])) {
@@ -6488,35 +6873,55 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     ed.animClock = (float)ed.animFrame;
                 }
                 animGzAng = ang;
-            } else if (lmb && animGzDrag != 0 && ed.animGrasp && !gizmoIsRot(animGzDrag)) {
+            } else if (lmb && animGzDrag != 0 && ed.animGrasp) {
                 Vec3 ro, rd;
                 animRay(mx, my, ro, rd);
                 int axis = gizmoAxisOf(animGzDrag);
-                Vec3 dragU = kAxis[axis];
-                Vec3 axes[3];
-                if (itemModelAxes(axes)) dragU = axes[axis];
-                float t = closestAxisT(animGzGrabC, dragU, ro, rd);
-                float dt = t - animGzT;
-                if (std::fabs(dt) > 1e-6f) {
-                    anim::Clip view = previewClipNow();
+                if (gizmoIsRot(animGzDrag)) {
+                    // Rot tool: turn the held item (Spec.rot), same as Bind.
                     hold::Spec spec = previewHoldSpec();
-                    float scale = (spec.scale < 1e-4f) ? 0.48f : spec.scale;
-                    Vec3 g = anim::evalGrip(view, (float)ed.animFrame, spec.grip);
-                    float delta = -dt / scale;
-                    if (axis == 0) g.x += delta;
-                    else if (axis == 1) g.y += delta;
-                    else g.z += delta;
-                    anim::setGripKey(view, ed.animFrame, g, spec.grip);
-                    storeViewClip(std::move(view));
-                    ed.animDirty = true;
-                    ed.animClock = (float)ed.animFrame;
+                    const bool mirrorTool = ed.animHoldSide < 0;
+                    if (mirrorTool) hold::mirrorPalmX(spec);
+                    anim::Clip viewClip = previewClipNow();
+                    auto pose = anim::evalPose(viewClip, ed.animClock);
+                    anim::BoneXform xf{};
+                    if (anim::boneXformOf(viewClip, pose, spec.bone, xf)) {
+                        float ang = rotAngleAt(axis, animGzGrabC, ro, rd);
+                        float d = ang - animGzAng;
+                        while (d > 3.14159265f) d -= 6.2831853f;
+                        while (d < -3.14159265f) d += 6.2831853f;
+                        if (std::fabs(d) > 1e-5f) {
+                            hold::nudge(spec, xf, {}, kAxis[axis], d);
+                            if (mirrorTool) hold::mirrorPalmX(spec);
+                            commitHoldSpec(spec);
+                        }
+                        animGzAng = ang;
+                    }
+                } else {
+                    // Move tool: slide the per-item grasp point (Spec.grip).
+                    Vec3 dragU = kAxis[axis];
+                    Vec3 axes[3];
+                    if (itemModelAxes(axes)) dragU = axes[axis];
+                    float t = closestAxisT(animGzGrabC, dragU, ro, rd);
+                    float dt = t - animGzT;
+                    if (std::fabs(dt) > 1e-6f) {
+                        hold::Spec spec = previewHoldSpec();
+                        float scale = (spec.scale < 1e-4f) ? 0.48f : spec.scale;
+                        Vec3 g = itemGrip();
+                        float delta = -dt / scale;
+                        if (axis == 0) g.x += delta;
+                        else if (axis == 1) g.y += delta;
+                        else g.z += delta;
+                        writeItemGrip(g);
+                        ed.animClock = (float)ed.animFrame;
+                    }
+                    animGzT = t;
                 }
-                animGzT = t;
             } else if (lmb && animGzDrag != 0 && ed.animHoldEdit) {
                 Vec3 ro, rd;
                 animRay(mx, my, ro, rd);
                 int axis = gizmoAxisOf(animGzDrag);
-                hold::Spec& spec = editableHoldSpec();
+                hold::Spec spec = previewHoldSpec();
                 const bool mirrorTool = ed.animHoldSide < 0;
                 if (mirrorTool) hold::mirrorPalmX(spec);
                 anim::Clip viewClip = previewClipNow();
@@ -6530,7 +6935,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         while (d < -3.14159265f) d += 6.2831853f;
                         if (std::fabs(d) > 1e-5f) {
                             hold::nudge(spec, xf, {}, kAxis[axis], d);
-                            ed.animHoldDirty = true;
+                            if (mirrorTool) hold::mirrorPalmX(spec);
+                            commitHoldSpec(spec);
                         }
                         animGzAng = ang;
                     } else {
@@ -6538,12 +6944,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         float dt = t - animGzT;
                         if (std::fabs(dt) > 1e-6f) {
                             hold::nudge(spec, xf, kAxis[axis] * dt, {}, 0.0f);
-                            ed.animHoldDirty = true;
+                            if (mirrorTool) hold::mirrorPalmX(spec);
+                            commitHoldSpec(spec);
                         }
                         animGzT = t;
                     }
                 }
-                if (mirrorTool) hold::mirrorPalmX(spec);
             } else if (lmb && animGzDrag != 0 && ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size()) {
                 Vec3 ro, rd;
                 animRay(mx, my, ro, rd);
@@ -6598,12 +7004,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             bool keyI = keyDown('I');
             if (keyI && !prevI && ed.animGrasp) {
                 pushAnimUndo();
-                anim::Clip view = previewClipNow();
-                hold::Spec spec = previewHoldSpec();
-                Vec3 g = anim::evalGrip(view, (float)ed.animFrame, spec.grip);
-                anim::setGripKey(view, ed.animFrame, g, spec.grip);
-                storeViewClip(std::move(view));
-                ed.animDirty = true;
+                writeItemGrip(itemGrip());
             } else if (keyI && !prevI && ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size()) {
                 pushAnimUndo();
                 anim::Clip view = previewClipNow();
@@ -6659,7 +7060,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     ed.animClock = (float)ed.animFrame;
                 } else if (ed.animHoldEdit) {
                     int axis = gizmoAxisOf(ed.gizmoHover);
-                    hold::Spec& spec = editableHoldSpec();
+                    hold::Spec spec = previewHoldSpec();
                     const bool mirrorTool = ed.animHoldSide < 0;
                     if (mirrorTool) hold::mirrorPalmX(spec);
                     anim::Clip viewClip = previewClipNow();
@@ -6668,21 +7069,31 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     if (anim::boneXformOf(viewClip, pose, spec.bone, xf)) {
                         if (gizmoIsRot(ed.gizmoHover)) hold::nudge(spec, xf, {}, kAxis[axis], deg);
                         else hold::nudge(spec, xf, kAxis[axis] * dist, {}, 0.0f);
-                        ed.animHoldDirty = true;
+                        if (mirrorTool) hold::mirrorPalmX(spec);
+                        commitHoldSpec(spec);
                     }
-                    if (mirrorTool) hold::mirrorPalmX(spec);
                 } else if (ed.animGrasp) {
                     int axis = gizmoAxisOf(ed.gizmoHover);
-                    anim::Clip view = previewClipNow();
-                    hold::Spec spec = previewHoldSpec();
-                    Vec3 g = anim::evalGrip(view, (float)ed.animFrame, spec.grip);
-                    if (axis == 0) g.x += dist;
-                    else if (axis == 1) g.y += dist;
-                    else g.z += dist;
-                    anim::setGripKey(view, ed.animFrame, g, spec.grip);
-                    storeViewClip(std::move(view));
-                    ed.animDirty = true;
-                    ed.animClock = (float)ed.animFrame;
+                    if (gizmoIsRot(ed.gizmoHover)) {
+                        hold::Spec spec = previewHoldSpec();
+                        const bool mirrorTool = ed.animHoldSide < 0;
+                        if (mirrorTool) hold::mirrorPalmX(spec);
+                        anim::Clip viewClip = previewClipNow();
+                        auto pose = anim::evalPose(viewClip, (float)ed.animFrame);
+                        anim::BoneXform xf{};
+                        if (anim::boneXformOf(viewClip, pose, spec.bone, xf)) {
+                            hold::nudge(spec, xf, {}, kAxis[axis], deg);
+                            if (mirrorTool) hold::mirrorPalmX(spec);
+                            commitHoldSpec(spec);
+                        }
+                    } else {
+                        Vec3 g = itemGrip();
+                        if (axis == 0) g.x += dist;
+                        else if (axis == 1) g.y += dist;
+                        else g.z += dist;
+                        writeItemGrip(g);
+                        ed.animClock = (float)ed.animFrame;
+                    }
                 } else if (gizmoIsRot(ed.gizmoHover)) {
                     int axis = gizmoAxisOf(ed.gizmoHover);
                     anim::Clip view = previewClipNow();
@@ -6723,12 +7134,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 if (d.lengthSq() <= 0.0f) animKeyUndo = false;
                 else {
                     if (!animKeyUndo) { pushAnimUndo(); animKeyUndo = true; }
-                    anim::Clip view = previewClipNow();
-                    hold::Spec spec = previewHoldSpec();
-                    Vec3 g = anim::evalGrip(view, (float)ed.animFrame, spec.grip) + d;
-                    anim::setGripKey(view, ed.animFrame, g, spec.grip);
-                    storeViewClip(std::move(view));
-                    ed.animDirty = true;
+                    Vec3 g = itemGrip() + d;
+                    writeItemGrip(g);
                     ed.animClock = (float)ed.animFrame;
                 }
             } else if (animGzDrag == 0 && ed.animSelBone >= 0 && ed.animSelBone < (int)editClip.bones.size()) {
@@ -10531,8 +10938,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 fillR(animBindRect[i], 0.16f, 0.16f, 0.18f, ed.animBindHover == i, entNames[i] == animBindName);
             fillR(animRebuildRect, 0.20f, 0.22f, 0.18f, hitRA(animRebuildRect), false);
             fillR(animModelSave, 0.28f, 0.20f, 0.12f, hitRA(animModelSave), ed.animModelDirty);
-            fillR(animHoldPrev, 0.18f, 0.18f, 0.20f, hitRA(animHoldPrev), false);
-            fillR(animHoldNext, 0.18f, 0.18f, 0.20f, hitRA(animHoldNext), false);
+            fillR(animHoldItemBtn, 0.18f, 0.18f, 0.20f, hitRA(animHoldItemBtn), ed.animHoldPickOpen);
             fillR(animHoldL, 0.16f, 0.16f, 0.18f, hitRA(animHoldL), ed.animHoldSide < 0);
             fillR(animHoldR, 0.16f, 0.16f, 0.18f, hitRA(animHoldR), ed.animHoldSide > 0);
             fillR(animHoldGrip, 0.18f, 0.16f, 0.14f, hitRA(animHoldGrip), ed.animHoldEdit);
@@ -10543,6 +10949,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             fillR(animLockPos, 0.16f, 0.22f, 0.20f, hitRA(animLockPos), ed.animLockPos);
             fillR(animHoldBone, 0.16f, 0.18f, 0.16f, hitRA(animHoldBone), false);
             fillR(animHoldSave, 0.22f, 0.28f, 0.18f, hitRA(animHoldSave), ed.animHoldDirty);
+            fillR(animHoldFrom, 0.16f, 0.20f, 0.24f, hitRA(animHoldFrom), ed.animHoldApplyOpen);
+            fillR(animHoldToAll, 0.24f, 0.18f, 0.14f, hitRA(animHoldToAll), ed.animHoldApplyAllAsk);
             gl::Disable(GL_SCISSOR_TEST);
             auto drawScroll = [&](float x, float scroll, float maxScroll) {
                 if (maxScroll <= 1.0f || animVH < 8.0f) return;
@@ -10739,16 +11147,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             }
             {
                 // Left / Right chooses which palm previews the tool. The other palm stays a marker.
-                uint8_t hb = ed.animHoldItem ? ed.animHoldItem : (uint8_t)HAND_AXE;
+                uint8_t hb = holdItemBlock();
                 auto pushHeld = [&](const hold::Spec& spec) {
                     anim::BoneXform xf{};
                     if (!anim::boneXformOf(viewClip, pose, spec.bone, xf)) return;
                     std::vector<Vertex> hmesh;
                     auto hx = [&](float x, float y, float z) { return hold::pointOnBone(spec, xf, x, y, z); };
-                    const mat::Material* tm = mat::toolMaterial(hb);
-                    if (tm && tm->model.ok() && !tm->model.cube)
-                        mat::emitModelMesh(tm->model, hmesh, hx, blockOf(hb).icon);
-                    else {
+                    const mat::Model& mdl = heldPreviewModel(hb);
+                    bool custom = !mdl.quads.empty() || mat::modelHasSolidTex(mdl);
+                    if (custom && !mdl.cube)
+                        mat::emitModelMesh(mdl, hmesh, hx, blockOf(hb).icon);
+                    else if (mdl.cube || mdl.solids.empty()) {
                         const BlockInfo& info = blockOf(hb);
                         for (int f = 0; f < 6; f++) {
                             const geo::FaceDef& F = geo::kFaces[f];
@@ -10766,7 +11175,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                             hmesh.push_back(vv[0]); hmesh.push_back(vv[1]); hmesh.push_back(vv[2]);
                             hmesh.push_back(vv[0]); hmesh.push_back(vv[2]); hmesh.push_back(vv[3]);
                         }
+                        if (custom)
+                            mat::emitModelMesh(mdl, hmesh, hx, blockOf(hb).icon);
                     }
+                    if (!mdl.solids.empty())
+                        mat::emitSolidMesh(mdl.solids, entSolid, hx, true);
+                    if (hmesh.empty()) return;
                     std::vector<float> tv;
                     tv.reserve(hmesh.size() * 9);
                     for (const Vertex& v : hmesh) {
@@ -10774,7 +11188,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                         float row[9] = { v.px, v.py, v.pz, s, s, s, 1.0f, v.u, v.v };
                         for (int i = 0; i < 9; i++) tv.push_back(row[i]);
                     }
-                    if (tv.empty()) return;
                     for (TexBatch& b : entBatches) {
                         if (b.tex == atlasTex) {
                             b.verts.insert(b.verts.end(), tv.begin(), tv.end());
@@ -10785,7 +11198,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 };
                 {
                     hold::Spec spec = toolSpecAt(viewClip, ed.animClock);
-                    spec.grip = anim::evalGrip(viewClip, ed.animClock, spec.grip);
                     pushHeld(spec);
                     anim::BoneXform txf{};
                     if (anim::boneXformOf(viewClip, pose, spec.bone, txf)) {
@@ -10816,12 +11228,54 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                             pline(g + Vec3{ 0, -s, 0 }, g + Vec3{ 0, s, 0 }, 1.0f, 0.85f, 0.2f, 1.0f);
                             pline(g + Vec3{ 0, 0, -s }, g + Vec3{ 0, 0, s }, 1.0f, 0.85f, 0.2f, 1.0f);
                         }
+                        // Grasp-point marker (Spec.grip on the item → bone origin).
+                        {
+                            Vec3 g = hold::originOnBone(spec, txf);
+                            const float s = ed.animGrasp ? 0.055f : 0.040f;
+                            float cr = ed.animGrasp ? 1.0f : 0.95f;
+                            float cg = ed.animGrasp ? 0.45f : 0.55f;
+                            float cb = ed.animGrasp ? 0.10f : 0.20f;
+                            // Octahedron so the grasp sits clearly on the tool.
+                            Vec3 px{ g.x + s, g.y, g.z }, nx{ g.x - s, g.y, g.z };
+                            Vec3 py{ g.x, g.y + s, g.z }, ny{ g.x, g.y - s, g.z };
+                            Vec3 pz{ g.x, g.y, g.z + s }, nz{ g.x, g.y, g.z - s };
+                            pline(px, py, cr, cg, cb, 1.0f); pline(py, nx, cr, cg, cb, 1.0f);
+                            pline(nx, ny, cr, cg, cb, 1.0f); pline(ny, px, cr, cg, cb, 1.0f);
+                            pline(pz, py, cr, cg, cb, 1.0f); pline(py, nz, cr, cg, cb, 1.0f);
+                            pline(nz, ny, cr, cg, cb, 1.0f); pline(ny, pz, cr, cg, cb, 1.0f);
+                            pline(px, pz, cr, cg, cb, 1.0f); pline(pz, nx, cr, cg, cb, 1.0f);
+                            pline(nx, nz, cr, cg, cb, 1.0f); pline(nz, px, cr, cg, cb, 1.0f);
+                            // Tiny item-local axes at the grasp (same frame Move uses).
+                            Vec3 axes[3] = { kAxis[0], kAxis[1], kAxis[2] };
+                            float Rh[9], Ri[9];
+                            pm::eulerToMat(spec.rot, Rh);
+                            pm::mat3Mul(txf.R, Rh, Ri);
+                            for (int a = 0; a < 3; a++) {
+                                axes[a] = { Ri[a * 3 + 0], Ri[a * 3 + 1], Ri[a * 3 + 2] };
+                                if (axes[a].lengthSq() > 1e-8f) axes[a] = axes[a].normalized();
+                                else axes[a] = kAxis[a];
+                            }
+                            const float al = ed.animGrasp ? 0.14f : 0.10f;
+                            const float acol[3][3] = { {1.0f,0.28f,0.28f},{0.28f,0.92f,0.32f},{0.32f,0.45f,1.0f} };
+                            for (int a = 0; a < 3; a++)
+                                pline(g, g + axes[a] * al, acol[a][0], acol[a][1], acol[a][2], 1.0f);
+                        }
                     }
                 }
                 {
-                    std::string off = (holdSideName() == "left") ? "right" : "left";
-                    const char* offPalm = (off == "left") ? "arm_l_palm" : "arm_r_palm";
-                    const char* offHand = (off == "left") ? "arm_l_hand" : "arm_r_hand";
+                    hold::Spec toolSpec = previewToolSpec();
+                    const char* offPalm = "arm_l_palm";
+                    const char* offHand = "arm_l_hand";
+                    if (toolSpec.bone.rfind("arm_l_", 0) == 0) {
+                        offPalm = "arm_r_palm";
+                        offHand = "arm_r_hand";
+                    } else if (toolSpec.bone.rfind("arm_r_", 0) == 0) {
+                        offPalm = "arm_l_palm";
+                        offHand = "arm_l_hand";
+                    } else if (holdSideName() == "left") {
+                        offPalm = "arm_r_palm";
+                        offHand = "arm_r_hand";
+                    }
                     anim::BoneXform xf{};
                     bool ok = anim::boneXformOf(editClip, pose, offPalm, xf)
                            || anim::boneXformOf(editClip, pose, offHand, xf);
@@ -10847,7 +11301,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     pline(pose[p].pivot, pose[i].pivot, 0.95f, 0.85f, 0.25f, 1);
                 Vec3 o = pose[i].pivot;
                 float s = (i == ed.animSelBone) ? 0.035f : 0.022f;
-                const char* offPrefix = (ed.animHoldSide < 0) ? "arm_r_" : "arm_l_";
+                hold::Spec toolSpec = previewToolSpec();
+                std::string offPrefix = "arm_l_";
+                if (toolSpec.bone.rfind("arm_l_", 0) == 0) offPrefix = "arm_r_";
+                else if (toolSpec.bone.rfind("arm_r_", 0) == 0) offPrefix = "arm_l_";
+                else offPrefix = (ed.animHoldSide < 0) ? "arm_r_" : "arm_l_";
                 bool offHand = editClip.bones[i].name.rfind(offPrefix, 0) == 0;
                 float cr = (i == ed.animSelBone) ? 1.0f : (offHand ? 0.25f : 0.9f);
                 float cg = (i == ed.animSelBone) ? 0.45f : (offHand ? 0.82f : 0.9f);
@@ -10888,10 +11346,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     float Rarc = L * 0.72f;
                     const float col[3][3] = { {1.0f,0.28f,0.28f},{0.28f,0.92f,0.32f},{0.32f,0.45f,1.0f} };
                     int hov = ed.gizmoHover;
-                    bool drawTrans = !animBonePick && (ed.animGrasp || ed.animTool == 0);
-                    bool drawRot = !animBonePick && !ed.animGrasp && (ed.animTool == 1);
+                    bool drawTrans = !animBonePick && ed.animTool == 0;
+                    bool drawRot = !animBonePick && ed.animTool == 1;
                     Vec3 axes[3] = { kAxis[0], kAxis[1], kAxis[2] };
-                    if (ed.animGrasp) itemModelAxes(axes);
+                    if (ed.animGrasp && ed.animTool == 0) itemModelAxes(axes);
                     for (int a = 0; a < 3; a++) {
                         bool hotT = (hov == 1 + a) || (hov == 10 + a * 2) || (hov == 11 + a * 2);
                         bool hotR = (hov == 4 + a) || (hov == 20 + a * 2) || (hov == 21 + a * 2);
@@ -12746,6 +13204,178 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                 gl::BindVertexArray(0);
                 gl::DepthMask(GL_TRUE);
             }
+            if (ed.animHoldPickOpen || ed.animHoldApplyOpen || ed.animHoldApplyAllAsk) {
+                // Overlay after the 3D pane so the centered modal sits on top.
+                gl::Viewport(0, 0, g_winW, g_winH);
+                gl::Disable(GL_DEPTH_TEST);
+                gl::DepthMask(GL_FALSE);
+                gl::Enable(GL_BLEND);
+                std::vector<float> modal;
+                auto mrect = [&](float x, float y, float w, float h, float r, float g, float b, float a) {
+                    float v[6][7] = {
+                        {x,y,0,r,g,b,a},{x+w,y,0,r,g,b,a},{x+w,y+h,0,r,g,b,a},
+                        {x,y,0,r,g,b,a},{x+w,y+h,0,r,g,b,a},{x,y+h,0,r,g,b,a},
+                    };
+                    for (auto& e : v) for (int i = 0; i < 7; i++) modal.push_back(e[i]);
+                };
+                mrect(0.0f, 0.0f, (float)g_winW, (float)g_winH, 0.0f, 0.0f, 0.0f, 0.55f);
+                if (ed.animHoldApplyAllAsk) {
+                    mrect(animHoldConfirmRect[0], animHoldConfirmRect[1], animHoldConfirmRect[2], animHoldConfirmRect[3],
+                          0.14f, 0.14f, 0.17f, 1.0f);
+                    bool yesH = mx >= animHoldConfirmYes[0] && mx < animHoldConfirmYes[0] + animHoldConfirmYes[2]
+                        && my >= animHoldConfirmYes[1] && my < animHoldConfirmYes[1] + animHoldConfirmYes[3];
+                    bool noH = mx >= animHoldConfirmNo[0] && mx < animHoldConfirmNo[0] + animHoldConfirmNo[2]
+                        && my >= animHoldConfirmNo[1] && my < animHoldConfirmNo[1] + animHoldConfirmNo[3];
+                    mrect(animHoldConfirmNo[0], animHoldConfirmNo[1], animHoldConfirmNo[2], animHoldConfirmNo[3],
+                          noH ? 0.28f : 0.20f, noH ? 0.22f : 0.18f, noH ? 0.22f : 0.20f, 1.0f);
+                    mrect(animHoldConfirmYes[0], animHoldConfirmYes[1], animHoldConfirmYes[2], animHoldConfirmYes[3],
+                          yesH ? 0.42f : 0.32f, yesH ? 0.28f : 0.20f, yesH ? 0.16f : 0.12f, 1.0f);
+                    gl::BindVertexArray(vao);
+                    gl::BindBuffer(GL_ARRAY_BUFFER, vbo);
+                    gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(modal.size() * sizeof(float)), modal.data(), GL_STREAM_DRAW);
+                    gl::UseProgram(prog);
+                    gl::UniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.m);
+                    gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(modal.size() / 7));
+                    gl::BindVertexArray(0);
+                } else {
+                    mrect(animHoldPickRect[0], animHoldPickRect[1], animHoldPickRect[2], animHoldPickRect[3],
+                          0.14f, 0.14f, 0.17f, 1.0f);
+                    float listTop = animHoldPickList[1];
+                    float listBot = listTop + animHoldPickList[3];
+                    float scroll = ed.animHoldApplyOpen ? ed.animHoldApplyScroll : ed.animHoldPickScroll;
+                    int nRows = ed.animHoldApplyOpen ? (int)holdApplyNames.size() : (int)holdPickList.size();
+                    for (int i = 0; i < nRows; i++) {
+                        float y = listTop + (float)i * holdPickRowH - scroll;
+                        float y0 = y + 1.0f, y1 = y + holdPickRowH - 1.0f;
+                        if (y1 <= listTop || y0 >= listBot) continue;
+                        if (y0 < listTop) y0 = listTop;
+                        if (y1 > listBot) y1 = listBot;
+                        bool on = false;
+                        bool hov = false;
+                        if (ed.animHoldApplyOpen) {
+                            hov = ed.animHoldApplyHover == i;
+                        } else {
+                            on = holdPickList[i].name == holdItemName();
+                            hov = ed.animHoldPickHover == i;
+                        }
+                        float r0 = on ? 0.42f : (hov ? 0.28f : 0.18f);
+                        float g0 = on ? 0.38f : (hov ? 0.30f : 0.18f);
+                        float b0 = on ? 0.22f : (hov ? 0.22f : 0.20f);
+                        mrect(animHoldPickList[0], y0, animHoldPickList[2], y1 - y0, r0, g0, b0, 1.0f);
+                        if (hov) mrect(animHoldPickList[0] - 1.0f, y0 - 1.0f,
+                                       animHoldPickList[2] + 2.0f, y1 - y0 + 2.0f, 1, 1, 1, 1);
+                    }
+                    float contentH = (float)nRows * holdPickRowH;
+                    float maxS = std::max(0.0f, contentH - animHoldPickList[3]);
+                    if (maxS > 1.0f) {
+                        float trackX = animHoldPickList[0] + animHoldPickList[2] + 3.0f;
+                        float trackY = animHoldPickList[1];
+                        float trackH = animHoldPickList[3];
+                        float thumb = trackH * animHoldPickList[3] / contentH;
+                        if (thumb < 18.0f) thumb = 18.0f;
+                        if (thumb > trackH) thumb = trackH;
+                        float travel = trackH - thumb;
+                        float ty = trackY + travel * (scroll / maxS);
+                        mrect(trackX, trackY, 6.0f, trackH, 0.16f, 0.16f, 0.18f, 1);
+                        mrect(trackX, ty, 6.0f, thumb, 0.72f, 0.74f, 0.78f, 1);
+                    }
+                    gl::BindVertexArray(vao);
+                    gl::BindBuffer(GL_ARRAY_BUFFER, vbo);
+                    gl::BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(modal.size() * sizeof(float)), modal.data(), GL_STREAM_DRAW);
+                    gl::UseProgram(prog);
+                    gl::UniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.m);
+                    gl::DrawArrays(GL_TRIANGLES, 0, (GLsizei)(modal.size() / 7));
+                    gl::BindVertexArray(0);
+                    // Per-row item thumbnails (same framing as Items panel).
+                    {
+                        gl::Enable(GL_SCISSOR_TEST);
+                        int sx = (int)std::floor(animHoldPickList[0]);
+                        int sy = (int)std::floor((float)g_winH - (animHoldPickList[1] + animHoldPickList[3]));
+                        int sw = (int)std::ceil(animHoldPickList[2]);
+                        int sh = (int)std::ceil(animHoldPickList[3]);
+                        if (sx < 0) { sw += sx; sx = 0; }
+                        if (sy < 0) { sh += sy; sy = 0; }
+                        if (sw < 1 || sh < 1) { gl::Disable(GL_SCISSOR_TEST); }
+                        else {
+                            gl::Scissor(sx, sy, sw, sh);
+                            const Vec3 iconDir = Vec3{ 1.05f, 0.77f, 1.05f }.normalized();
+                            const Vec3 iconUp{ 0.0f, 1.0f, 0.0f };
+                            std::vector<float> noLines;
+                            auto drawThumb = [&](int i, const std::string& nm, uint8_t bid) {
+                                float y = listTop + (float)i * holdPickRowH - scroll;
+                                if (y + holdPickRowH < listTop - 1.0f) return;
+                                if (y > listBot + 1.0f) return;
+                                if (bid == 0 && nm != "*") {
+                                    int id = blockIdOfName(nm);
+                                    bid = id > 0 ? (uint8_t)id : (uint8_t)0;
+                                }
+                                if (bid == 0) bid = HAND_AXE;
+                                const mat::Model& mdl = heldPreviewModel(bid);
+                                std::vector<Vertex> iconMesh;
+                                mat::buildItemDisplayMesh(bid, mdl, iconMesh);
+                                std::vector<float> iconSolid;
+                                if (!mdl.solids.empty()) {
+                                    mat::emitSolidMesh(mdl.solids, iconSolid, [](float x, float y, float z) {
+                                        return Vec3{ x, y, z };
+                                    }, true);
+                                }
+                                if (iconMesh.empty() && iconSolid.empty()) return;
+                                Vec3 ctr{ 0.0f, 0.0f, 0.0f };
+                                int nctr = 0;
+                                for (const Vertex& v : iconMesh) { ctr += Vec3{ v.px, v.py, v.pz }; nctr++; }
+                                for (const mat::Solid& s : mdl.solids) { ctr += Vec3{ s.c[0], s.c[1], s.c[2] }; nctr++; }
+                                if (nctr > 0) ctr = ctr / (float)nctr;
+                                Mat4 iconView = Mat4::lookAt(ctr + iconDir * 8.0f, ctr, iconUp);
+                                float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f, minZ = 1e9f, maxZ = -1e9f;
+                                auto expandIcon = [&](const Vec3& w) {
+                                    Vec4 p = iconView * Vec4{ w.x, w.y, w.z, 1.0f };
+                                    if (p.x < minX) minX = p.x;
+                                    if (p.x > maxX) maxX = p.x;
+                                    if (p.y < minY) minY = p.y;
+                                    if (p.y > maxY) maxY = p.y;
+                                    if (p.z < minZ) minZ = p.z;
+                                    if (p.z > maxZ) maxZ = p.z;
+                                };
+                                for (const Vertex& v : iconMesh) expandIcon({ v.px, v.py, v.pz });
+                                for (const mat::Solid& s : mdl.solids) {
+                                    for (int c = 0; c < 8; c++) {
+                                        expandIcon({
+                                            s.c[0] + ((c & 1) ? s.h[0] : -s.h[0]),
+                                            s.c[1] + ((c & 2) ? s.h[1] : -s.h[1]),
+                                            s.c[2] + ((c & 4) ? s.h[2] : -s.h[2])
+                                        });
+                                    }
+                                }
+                                float span = std::max(maxX - minX, maxY - minY) * 0.58f;
+                                if (span < 0.02f) span = 0.02f;
+                                float mx2 = 0.5f * (minX + maxX), my2 = 0.5f * (minY + maxY);
+                                float znear = -maxZ - 0.5f;
+                                float zfar = -minZ + 0.5f;
+                                if (znear < 0.05f) znear = 0.05f;
+                                if (zfar < znear + 0.2f) zfar = znear + 0.2f;
+                                Mat4 iconMvp = Mat4::ortho(mx2 - span, mx2 + span, my2 - span, my2 + span, znear, zfar) * iconView;
+                                std::vector<float> iconVerts;
+                                appendMesh(iconVerts, iconMesh);
+                                float pad = (holdPickRowH - holdPickThumb) * 0.5f;
+                                drawPane3D(animHoldPickList[0] + 4.0f, y + pad, holdPickThumb, holdPickThumb,
+                                           iconMvp, &iconVerts, atlasTex, nullptr, noLines, true, &iconSolid);
+                            };
+                            if (ed.animHoldApplyOpen) {
+                                for (int i = 0; i < (int)holdApplyNames.size(); i++)
+                                    drawThumb(i, holdApplyNames[i], 0);
+                            } else {
+                                for (int i = 0; i < (int)holdPickList.size(); i++)
+                                    drawThumb(i, holdPickList[i].name, holdPickList[i].id);
+                            }
+                            gl::Disable(GL_SCISSOR_TEST);
+                        }
+                        gl::Viewport(0, 0, g_winW, g_winH);
+                        gl::Disable(GL_DEPTH_TEST);
+                        gl::DepthMask(GL_FALSE);
+                        gl::Enable(GL_BLEND);
+                    }
+                }
+            }
         } else if (startMode >= 0 && ed.entityMode) {
             if (!ed.entSkinView) {
                 float entLeftH = paneLH;
@@ -13369,31 +13999,35 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
             TextTex& stt = getTextTex(st);
             if (stt.tex) drawTextTex(stt, (float)g_winW - animRightW + 10.0f, animRebuildRect[1] + animRebuildRect[3] + 4.0f);
             TextTex& holdLab = getTextTex("Hold Bind");
-            if (holdLab.tex) drawTextTex(holdLab, (float)g_winW - animRightW + 10.0f, animHoldPrev[1] - 22.0f);
-            labelR("<", animHoldPrev);
-            labelR(">", animHoldNext);
+            if (holdLab.tex) drawTextTex(holdLab, (float)g_winW - animRightW + 10.0f, animHoldItemBtn[1] - 22.0f);
             {
                 std::string nm = holdItemName();
-                TextTex& it = getTextTex(nm.c_str());
+                if (nm.empty()) nm = "*";
+                std::string lab = nm + (ed.animHoldPickOpen ? "  ^" : "  v");
+                TextTex& it = getTextTex(lab.c_str());
                 if (it.tex) {
-                    float nameL = animHoldPrev[0] + animHoldPrev[2] + 6.0f;
-                    float nameR = animHoldNext[0] - 6.0f;
-                    float cx = nameL + (nameR - nameL - (float)it.w) * 0.5f;
-                    if (cx < nameL) cx = nameL;
-                    drawTextTex(it, cx, animHoldPrev[1] + (animHoldPrev[3] - (float)it.h) * 0.5f);
+                    float cx = animHoldItemBtn[0] + (animHoldItemBtn[2] - (float)it.w) * 0.5f;
+                    if (cx < animHoldItemBtn[0] + 4.0f) cx = animHoldItemBtn[0] + 4.0f;
+                    drawTextTex(it, cx, animHoldItemBtn[1] + (animHoldItemBtn[3] - (float)it.h) * 0.5f);
                 }
             }
-            labelR("Main L", animHoldL);
-            labelR("Main R", animHoldR);
+            labelR("Tool L", animHoldL);
+            labelR("Tool R", animHoldR);
             labelR(ed.animHoldEdit ? "Bind ON" : "Bind", animHoldGrip);
+            labelR(ed.animLockDir ? "Dir ON" : "Dir", animLockDir);
+            labelR(ed.animLockPos ? "Pos ON" : "Pos", animLockPos);
+            labelR("Use Bone", animHoldBone);
+            labelR(ed.animHoldDirty ? "Save Hold*" : "Save Hold", animHoldSave);
+            {
+                TextTex& editLab = getTextTex("Hold Edit");
+                if (editLab.tex)
+                    drawTextTex(editLab, (float)g_winW - animRightW + 10.0f, animHoldGrasp[1] - 22.0f);
+            }
             labelR(ed.animGrasp ? "Grasp ON" : "Grasp", animHoldGrasp);
             labelR("Lower", animHoldLower);
             labelR("Higher", animHoldHigher);
-            labelR(ed.animLockDir ? "Dir ON" : "Dir", animLockDir);
-            labelR(ed.animLockPos ? "Pos ON" : "Pos", animLockPos);
             {
-                anim::Clip view = previewClipNow();
-                Vec3 g = anim::evalGrip(view, (float)ed.animFrame, previewHoldSpec().grip);
+                Vec3 g = itemGrip();
                 char gy[64];
                 snprintf(gy, sizeof(gy), "grip  %.2f   %.2f   %.2f", g.x, g.y, g.z);
                 TextTex& gt = getTextTex(gy);
@@ -13402,16 +14036,73 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
                     drawTextTex(gt, animHoldLower[0], rowY);
                 }
             }
-            labelR("Use Bone", animHoldBone);
-            labelR(ed.animHoldDirty ? "Save Hold*" : "Save Hold", animHoldSave);
+            labelR(ed.animHoldApplyOpen ? "From Item ^" : "From Item", animHoldFrom);
+            labelR("To All Items", animHoldToAll);
             {
                 hold::Spec spec = previewHoldSpec();
                 char hb[96];
                 snprintf(hb, sizeof(hb), "%s", spec.bone.c_str());
                 TextTex& bn = getTextTex(hb);
-                if (bn.tex) drawTextTex(bn, (float)g_winW - animRightW + 10.0f, animHoldSave[1] + animHoldSave[3] + 8.0f);
-                TextTex& off = getTextTex("Dark blue = other palm");
-                if (off.tex) drawTextTex(off, (float)g_winW - animRightW + 10.0f, animHoldSave[1] + animHoldSave[3] + 28.0f);
+                if (bn.tex) drawTextTex(bn, (float)g_winW - animRightW + 10.0f, animHoldToAll[1] + animHoldToAll[3] + 8.0f);
+                TextTex& off = getTextTex("Cyan = off-hand (shaft)");
+                if (off.tex) drawTextTex(off, (float)g_winW - animRightW + 10.0f, animHoldToAll[1] + animHoldToAll[3] + 28.0f);
+            }
+            if (ed.animHoldApplyAllAsk) {
+                TextTex& title = getTextTex("Apply grip to ALL items?");
+                if (title.tex) {
+                    float tx = animHoldConfirmRect[0] + (animHoldConfirmRect[2] - (float)title.w) * 0.5f;
+                    float ty = animHoldConfirmRect[1] + 28.0f;
+                    drawTextTex(title, tx, ty);
+                }
+                TextTex& sub = getTextTex("Current clip + side only");
+                if (sub.tex) {
+                    float tx = animHoldConfirmRect[0] + (animHoldConfirmRect[2] - (float)sub.w) * 0.5f;
+                    drawTextTex(sub, tx, animHoldConfirmRect[1] + 52.0f);
+                }
+                labelR("Cancel", animHoldConfirmNo);
+                labelR("Apply", animHoldConfirmYes);
+            } else if (ed.animHoldPickOpen || ed.animHoldApplyOpen) {
+                TextTex& title = getTextTex(ed.animHoldApplyOpen ? "Apply Grip From" : "Select Item");
+                if (title.tex) {
+                    float tx = animHoldPickRect[0] + (animHoldPickRect[2] - (float)title.w) * 0.5f;
+                    float ty = animHoldPickRect[1] + (holdPickTitleH - (float)title.h) * 0.5f;
+                    drawTextTex(title, tx, ty);
+                }
+                gl::Enable(GL_SCISSOR_TEST);
+                int sx = (int)std::floor(animHoldPickList[0]);
+                int sy = (int)std::floor((float)g_winH - (animHoldPickList[1] + animHoldPickList[3]));
+                int sw = (int)std::ceil(animHoldPickList[2]);
+                int sh = (int)std::ceil(animHoldPickList[3]);
+                if (sx < 0) { sw += sx; sx = 0; }
+                if (sy < 0) { sh += sy; sy = 0; }
+                if (sw < 0) sw = 0;
+                if (sh < 0) sh = 0;
+                gl::Scissor(sx, sy, sw, sh);
+                float listTop = animHoldPickList[1];
+                float listBot = listTop + animHoldPickList[3];
+                float scroll = ed.animHoldApplyOpen ? ed.animHoldApplyScroll : ed.animHoldPickScroll;
+                if (ed.animHoldApplyOpen) {
+                    for (int i = 0; i < (int)holdApplyNames.size(); i++) {
+                        float y = listTop + (float)i * holdPickRowH - scroll;
+                        if (y + holdPickRowH < listTop - 1.0f) continue;
+                        if (y > listBot + 1.0f) break;
+                        TextTex& it = getTextTex(holdApplyNames[i].c_str());
+                        if (it.tex)
+                            drawTextTex(it, animHoldPickList[0] + 12.0f + holdPickThumb + 8.0f,
+                                        y + (holdPickRowH - (float)it.h) * 0.5f);
+                    }
+                } else {
+                    for (int i = 0; i < (int)holdPickList.size(); i++) {
+                        float y = listTop + (float)i * holdPickRowH - scroll;
+                        if (y + holdPickRowH < listTop - 1.0f) continue;
+                        if (y > listBot + 1.0f) break;
+                        TextTex& it = getTextTex(holdPickList[i].name.c_str());
+                        if (it.tex)
+                            drawTextTex(it, animHoldPickList[0] + 12.0f + holdPickThumb + 8.0f,
+                                        y + (holdPickRowH - (float)it.h) * 0.5f);
+                    }
+                }
+                gl::Disable(GL_SCISSOR_TEST);
             }
             gl::Disable(GL_SCISSOR_TEST);
             const char* kBtn[6] = { "|<", ed.animPlaying ? "||" : ">", ">|", "[]", "+K", "-K" };

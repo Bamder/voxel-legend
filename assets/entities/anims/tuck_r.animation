@@ -11,21 +11,21 @@ bone abs parent hip pivot 0.0000 1.0600 0.0000
 bone chest parent abs pivot 0.0000 1.2900 0.0000
 bone neck parent chest pivot 0.0000 1.4100 0.0000
 bone head parent neck pivot 0.0000 1.4400 0.0000
-bone arm_l_shoulder parent chest pivot -0.2800 1.4200 0.0000
-bone arm_l_upper parent arm_l_shoulder pivot -0.2800 1.3000 0.0000
-bone arm_l_fore parent arm_l_upper pivot -0.2800 1.0600 0.0000
-bone arm_l_hand parent arm_l_fore pivot -0.2800 0.8600 0.0000
-bone arm_r_shoulder parent chest pivot 0.2800 1.4200 0.0000
-bone arm_r_upper parent arm_r_shoulder pivot 0.2800 1.3000 0.0000
-bone arm_r_fore parent arm_r_upper pivot 0.2800 1.0600 0.0000
-bone arm_r_hand parent arm_r_fore pivot 0.2800 0.8600 0.0000
+bone arm_r_shoulder parent chest pivot -0.2800 1.4200 0.0000
+bone arm_r_upper parent arm_r_shoulder pivot -0.2800 1.3000 0.0000
+bone arm_r_fore parent arm_r_upper pivot -0.2800 1.0600 0.0000
+bone arm_r_hand parent arm_r_fore pivot -0.2800 0.8600 0.0000
+bone arm_l_shoulder parent chest pivot 0.2800 1.4200 0.0000
+bone arm_l_upper parent arm_l_shoulder pivot 0.2800 1.3000 0.0000
+bone arm_l_fore parent arm_l_upper pivot 0.2800 1.0600 0.0000
+bone arm_l_hand parent arm_l_fore pivot 0.2800 0.8600 0.0000
 bone leg_l_thigh parent hip pivot -0.1200 0.8000 0.0000
 bone leg_l_shin parent leg_l_thigh pivot -0.1200 0.4000 0.0000
 bone leg_l_foot parent leg_l_shin pivot -0.1200 0.0800 0.0000
 bone leg_r_thigh parent hip pivot 0.1200 0.8000 0.0000
 bone leg_r_shin parent leg_r_thigh pivot 0.1200 0.4000 0.0000
 bone leg_r_foot parent leg_r_shin pivot 0.1200 0.0800 0.0000
-key 0 arm_r_shoulder 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
-key 0 arm_r_upper 0.00000 0.00000 0.00000 -0.22000 0.00000 0.00000
-key 0 arm_r_fore 0.00000 0.00000 0.00000 -1.72000 0.00000 0.00000
-key 0 arm_r_hand 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 0 arm_l_shoulder 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000
+key 0 arm_l_upper 0.00000 0.00000 0.00000 -0.22000 0.00000 0.00000
+key 0 arm_l_fore 0.00000 0.00000 0.00000 -1.72000 0.00000 0.00000
+key 0 arm_l_hand 0.00000 0.00000 0.00000 0.00000 0.00000 0.00000

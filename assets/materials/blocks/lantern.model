@@ -1,9 +1,12 @@
-# Lantern cage. The glow core sits in the opening so light reads from every side.
-part 0.36 0.42 0.36 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
-part 0.64 0.42 0.36 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
-part 0.36 0.42 0.64 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
-part 0.64 0.42 0.64 0.025 0.16 0.025 0.40 0.28 0.16 tex lantern
-part 0.50 0.60 0.50 0.16 0.025 0.16 0.40 0.28 0.16 tex lantern
-part 0.50 0.24 0.50 0.16 0.025 0.16 0.40 0.28 0.16 tex lantern
-part 0.50 0.72 0.50 0.02 0.07 0.02 0.40 0.28 0.16 tex lantern
-part 0.50 0.42 0.50 0.09 0.11 0.09 1.00 0.86 0.42 tex lantern_glow
+# Material model (quad x y z u v per corner; optional flags / key value).
+# part cx cy cz hx hy hz r g b [tex name] [bind n] [card] [crop] [texs s] [face n] [uvf n] [rot x y z] [box x y w h d]
+# unknown records and quad keys are ignored by the parser and written back as-is.
+part 0.3600 0.4200 0.3600 0.0250 0.1600 0.0250 0.4000 0.2800 0.1600 tex lantern
+part 0.6400 0.4200 0.3600 0.0250 0.1600 0.0250 0.4000 0.2800 0.1600 tex lantern
+part 0.3600 0.4200 0.6400 0.0250 0.1600 0.0250 0.4000 0.2800 0.1600 tex lantern
+part 0.6400 0.4200 0.6400 0.0250 0.1600 0.0250 0.4000 0.2800 0.1600 tex lantern
+part 0.5000 0.6000 0.5000 0.1600 0.0250 0.1600 0.4000 0.2800 0.1600 tex log_side
+part 0.5000 0.2400 0.5000 0.1600 0.0250 0.1600 0.4000 0.2800 0.1600 tex log_side
+part 0.5000 0.7200 0.5000 0.0200 0.0937 0.0200 0.4000 0.2800 0.1600 tex log_side
+part 0.5000 0.4200 0.5000 0.0900 0.1100 0.0900 1.0000 0.8600 0.4200 tex lantern_glow
+part 0.4981 0.6375 0.5003 0.1245 0.0299 0.1249 0.0000 1.0000 0.0000 tex cobble crop texs 0.1250

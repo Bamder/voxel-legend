@@ -359,17 +359,68 @@ static bool lanternHangs(const World& world, int x, int y, int z, int placeFace)
     return false;
 }
 
-void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh,
+static bool torchSupportBlock(uint8_t b) {
+    return blocksMotion(b);
+}
+
+static int tryTorchAttach(const World& world, int x, int y, int z, int attachFace) {
+    // Ceiling mounts (+Y) are not allowed. Floor = 1, walls = 2..5.
+    if (attachFace < 1 || attachFace > 5) return -1;
+    const geo::FaceDef& F = geo::kFaces[attachFace];
+    if (!torchSupportBlock(world.getBlock(x + F.n[0], y + F.n[1], z + F.n[2])))
+        return -1;
+    return attachFace;
+}
+
+int World::resolveTorchAttach(int x, int y, int z, int placeFace) const {
+    // Clicked face of the support block → attach face on the torch cell.
+    if (placeFace == 0) return tryTorchAttach(*this, x, y, z, 1);
+    if (placeFace >= 2 && placeFace <= 5)
+        return tryTorchAttach(*this, x, y, z, oppositeFace(placeFace));
+    if (placeFace == 1) return -1;
+    if (tryTorchAttach(*this, x, y, z, 1) >= 0) return 1;
+    for (int f = 2; f <= 5; f++) {
+        int a = tryTorchAttach(*this, x, y, z, f);
+        if (a >= 0) return a;
+    }
+    return -1;
+}
+
+int World::torchAttachAt(int x, int y, int z) const {
+    if (getBlock(x, y, z) != TORCH) return -1;
+    CellLoc c;
+    if (!cellLoc(x, y, z, c)) return -1;
+    auto it = m_chunks.find(chunkKey(c.cx, c.cy, c.cz));
+    if (it == m_chunks.end()) return -1;
+    uint8_t lv = it->second.levelAt(c.lx, c.ly, c.lz);
+    if (lv >= 1 && lv <= 5) return (int)lv;
+    return 1;
+}
+
+bool World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool updateMesh,
                      int placeFace, int cellFlags) {
     CellLoc c;
-    if (!cellLoc(x, y, z, c)) return;
+    if (!cellLoc(x, y, z, c)) return false;
     int cx = c.cx, cy = c.cy, cz = c.cz, lx = c.lx, ly = c.ly, lz = c.lz;
     int64_t key = chunkKey(cx, cy, cz);
     auto it = m_chunks.find(key);
     if (it == m_chunks.end()) {
-        if (!ensureLoadedSlice(cx, cy, cz)) return;
+        if (!ensureLoadedSlice(cx, cy, cz)) return false;
         it = m_chunks.find(key);
     }
+
+    int torchAttach = -1;
+    if (b == TORCH) {
+        // Structure load passes the stored attach face in placeFace together with
+        // cellFlags >= 0 (even when flags are zero). Trust the blueprint; support
+        // may be painted later in the same pass.
+        if (cellFlags >= 0 && placeFace >= 1 && placeFace <= 5)
+            torchAttach = placeFace;
+        else
+            torchAttach = resolveTorchAttach(x, y, z, placeFace);
+        if (torchAttach < 0) return false;
+    }
+
     uint8_t prev = it->second.get(lx, ly, lz);
     uint8_t prevFlags = it->second.flagAt(lx, ly, lz);
     uint32_t prevBind = it->second.treeIdAt(lx, ly, lz);
@@ -405,9 +456,12 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     // Water: placing water creates a temporary source (level 16); any other block
     // clears the dynamic-water level. Generated ocean water keeps level 0 (static).
     // Log and stripped wood reuse that byte for the placement axis (17 = X, 18 = Z).
+    // Torch stores its support attach face (1..5) in the same byte.
     if (b == WATER) {
         it->second.setLevel(lx, ly, lz, cfg::WATER_SOURCE_LEVEL);
         it->second.hasWater = true;
+    } else if (b == TORCH) {
+        it->second.setLevel(lx, ly, lz, (uint8_t)torchAttach);
     } else if (isOrientedWood(b) &&
                (cellFlags < 0 || (cellFlags & (FLAG_ALIVE | FLAG_SETTLED)) == 0)) {
         int axis = (placeFace >= 0 && placeFace < 6) ? faceAxis(placeFace) : 1;
@@ -505,6 +559,7 @@ void World::setBlock(int x, int y, int z, uint8_t b, bool markModified, bool upd
     }
 
     if (cutAliveWood) detachAliveTree(x, y, z, prevBind);
+    return true;
 }
 
 int World::computeHeight(int wx, int wz) const {

@@ -1303,6 +1303,19 @@ static bool stepLocalGuardians(World& world, Player& player, float dt) {
 }
 
 int main(int argc, char** argv) {
+    // Resolve assets/ relative to the executable, not the caller's cwd.
+    {
+        wchar_t path[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (n && n < MAX_PATH) {
+            wchar_t* slash = wcsrchr(path, L'\\');
+            if (!slash) slash = wcsrchr(path, L'/');
+            if (slash) {
+                *slash = 0;
+                SetCurrentDirectoryW(path);
+            }
+        }
+    }
     plugin::init();
     data::init();
     SetUnhandledExceptionFilter(crashFilter);
@@ -4075,10 +4088,11 @@ int main(int argc, char** argv) {
                     if (world.getBlock(place.x, place.y, place.z) == AIR
                         && plugin::blockStrategy(carry.block)->canPlace(carry.block)) {
                         int face = world.faceFromHitNormal(nrm);
-                        world.setBlock(place.x, place.y, place.z, carry.block, true, true, face);
-                        noteRoomEdit(place.x, place.y, place.z, carry.block, face);
-                        carry.clear();
-                        ui.hasPlacePreview = false;
+                        if (world.setBlock(place.x, place.y, place.z, carry.block, true, true, face)) {
+                            noteRoomEdit(place.x, place.y, place.z, carry.block, face);
+                            carry.clear();
+                            ui.hasPlacePreview = false;
+                        }
                     }
                 }
             } else {
@@ -4343,9 +4357,10 @@ int main(int argc, char** argv) {
                                     uint8_t existing = world.getBlock(place.x, place.y, place.z);
                                     if ((existing == AIR || isLiquid(existing)) && !playerOverlapsCell(place, player.pos)) {
                                         int face = world.faceFromHitNormal(nrm);
-                                        world.setBlock(place.x, place.y, place.z, sel.block, true, true, face);
-                                        noteRoomEdit(place.x, place.y, place.z, sel.block, face);
-                                        if (--sel.count == 0) sel.clear();
+                                        if (world.setBlock(place.x, place.y, place.z, sel.block, true, true, face)) {
+                                            noteRoomEdit(place.x, place.y, place.z, sel.block, face);
+                                            if (--sel.count == 0) sel.clear();
+                                        }
                                     }
                                 }
                             }

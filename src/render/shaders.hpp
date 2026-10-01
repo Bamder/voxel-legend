@@ -78,6 +78,8 @@ uniform vec4 uCrackCorner;    // back-support on four diagonal neighbors
 uniform vec4 uBorderXZ;       // playable minX, maxX, minZ, maxZ
 uniform float uRimHalf;       // world units; opaque at this distance past the edge. 0 = off
 uniform vec3 uCameraPos;
+uniform vec3 uHeldLightRel;   // handheld light position relative to camera
+uniform float uHeldLightEmit; // 0..15 torch/lantern emission while held
 
 out vec4 fragColor;
 
@@ -90,6 +92,18 @@ float borderFogAt(vec2 xz) {
     if (xz.y < uBorderXZ.z) oz = uBorderXZ.z - xz.y;
     else if (xz.y > uBorderXZ.w) oz = xz.y - uBorderXZ.w;
     return clamp(max(ox, oz) / uRimHalf, 0.0, 1.0);
+}
+
+float heldDynamicLight() {
+    if (uHeldLightEmit < 0.5) return 0.0;
+    vec3 rel = vLocalPos + uChunkOffset;
+    float distBlocks = length(uHeldLightRel - rel) / max(uBlockScale, 0.001);
+    float level = max(0.0, uHeldLightEmit - distBlocks);
+    return pow(level / 15.0, 1.2);
+}
+
+float combinedBlockLight() {
+    return max(vBlockLight, heldDynamicLight());
 }
 
 float crackHash(vec3 p) {
@@ -168,7 +182,7 @@ void main() {
         float diff = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
         diff = diff * diff;
         float face = mix(1.0, vFaceShade, 0.40);
-        vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * vBlockLight;
+        vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * combinedBlockLight();
         vec3 col = uCrackColor * light * face;
         float dist = length(vLocalPos + uChunkOffset);
         float f = 1.0 - exp(-uFogDensity * dist);
@@ -196,7 +210,7 @@ void main() {
     float diff = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
     diff = diff * diff;
     float face = mix(1.0, vFaceShade, 0.40);
-    vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * vBlockLight;
+    vec3 light = uAmbient + uSunColor * diff + vec3(1.20, 0.62, 0.22) * combinedBlockLight();
     float ao = sodTile ? 1.0 : mix(1.0, vAO, 0.85);
     vec3 col = tex.rgb * light * face * ao;
     float dist = length(vLocalPos + uChunkOffset);

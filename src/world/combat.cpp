@@ -54,15 +54,17 @@ std::optional<LimbHit> hitPlayer(const Vec3& origin, const Vec3& direction,
         !std::isfinite(direction.lengthSq()) || direction.lengthSq() < 1e-10f)
         return std::nullopt;
     float c = std::cos(bodyYaw), s = std::sin(bodyYaw);
-    auto local = [&](Vec3 p) { return Vec3{p.x*c + p.z*s, p.y, p.x*s - p.z*c}; };
+    // Inverse of pm::lookYawXZ.
+    auto local = [&](Vec3 p) { return Vec3{-p.x*c - p.z*s, p.y, p.x*s - p.z*c}; };
     Vec3 o = local(origin - feet), d = local(direction.normalized());
     struct Box { Vec3 lo, hi; int limb; };
     const Box boxes[] = {
         {{-.18f,1.44f,-.18f},{.18f,1.80f,.18f},vitals::Head},
         {{-.20f,1.08f,-.16f},{.20f,1.44f,.16f},vitals::Chest},
         {{-.20f,.72f,-.16f},{.20f,1.08f,.16f},vitals::Core},
-        {{-.36f,.80f,-.16f},{-.20f,1.44f,.16f},vitals::HandL},
-        {{.20f,.80f,-.16f},{.36f,1.44f,.16f},vitals::HandR},
+        // arm_r is model -X (editor Tool R); arm_l is model +X.
+        {{-.36f,.80f,-.16f},{-.20f,1.44f,.16f},vitals::HandR},
+        {{.20f,.80f,-.16f},{.36f,1.44f,.16f},vitals::HandL},
         {{-.20f,0,-.16f},{0,.72f,.16f},vitals::FootL},
         {{0,0,-.16f},{.20f,.72f,.16f},vitals::FootR}
     };

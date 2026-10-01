@@ -18,6 +18,7 @@
 #include "../world/matchmap.hpp"
 #include "../world/structure.hpp"
 #include "../world/ritual.hpp"
+#include "../world/torch_appear.hpp"
 #include <algorithm>
 #include <cstdarg>
 #include <cstddef>
@@ -181,6 +182,8 @@ bool Renderer::init(int w, int h) {
     uBorderXZ = gl::GetUniformLocation(progWorld, "uBorderXZ");
     uRimHalf = gl::GetUniformLocation(progWorld, "uRimHalf");
     uCameraPos = gl::GetUniformLocation(progWorld, "uCameraPos");
+    uHeldLightRel = gl::GetUniformLocation(progWorld, "uHeldLightRel");
+    uHeldLightEmit = gl::GetUniformLocation(progWorld, "uHeldLightEmit");
     uBlockScale = gl::GetUniformLocation(progWorld, "uBlockScale");
     uBreakRel = gl::GetUniformLocation(progWorld, "uBreakRel");
     uBreakProgress = gl::GetUniformLocation(progWorld, "uBreakProgress");
@@ -206,6 +209,8 @@ bool Renderer::init(int w, int h) {
     gl::Uniform3f(uBreakRel, 0, 0, 0);
     gl::Uniform1f(uBreakProgress, 0);
     gl::Uniform1f(uBreakSod, 0);
+    gl::Uniform3f(uHeldLightRel, 0, 0, 0);
+    gl::Uniform1f(uHeldLightEmit, 0);
     gl::Uniform3f(uBreakNrm, 0, 1, 0);
     gl::Uniform1f(uCrackReveal, 0);
     gl::Uniform1f(uCrackFolds, (float)loot::kDefaultCrackFolds);
@@ -784,8 +789,37 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
             const int* n = geo::kFaces[ui.targetFace].n;
             breakNrm = { (float)n[0], (float)n[1], (float)n[2] };
         }
+
+        float heldEmit = 0.0f;
+        Vec3 heldLightWorld = player.pos + Vec3{ 0.0f, cfg::EYE_HEIGHT * 0.70f, 0.0f };
+        if (!menuWorld && ui.inventory && !ui.spectating && !player.dead) {
+            auto consider = [&](uint8_t b) {
+                int e = blockEmission(b);
+                if ((float)e > heldEmit) heldEmit = (float)e;
+            };
+            if (ui.selectedSlot >= 0 && ui.selectedSlot < cfg::HOTBAR_SLOTS)
+                consider(ui.inventory[ui.selectedSlot].block);
+            if (ui.selectedLeft >= 0 && ui.selectedLeft < cfg::HAND_SLOTS)
+                consider(ui.inventory[ui.selectedLeft].block);
+            if (heldEmit > 0.0f && m_heldLightValid)
+                heldLightWorld = m_heldLightPos;
+            else if (ui.camMode == 0 && heldEmit > 0.0f)
+                heldLightWorld = eye + look * 0.35f;
+        }
+        Vec3 heldRel = heldLightWorld - eye;
+
         drawWorld(world, eye, vp, sky, breakRel, breakProg, breakSod, breakNrm,
-                  cfg::FOG_DENSITY, sky.fogColor, rimHalf, bminX, bmaxX, bminZ, bmaxZ);
+                  cfg::FOG_DENSITY, sky.fogColor, rimHalf, bminX, bmaxX, bminZ, bmaxZ,
+                  heldEmit, heldRel);
+
+        // Tips are re-sampled while drawing held meshes this frame.
+        m_heldLightEmit = 0.0f;
+        m_heldLightValid = false;
+        {
+            float fdt = clampf(ui.fps > 1.0f ? 1.0f / ui.fps : 1.0f / 60.0f, 0.0f, 0.05f);
+            m_flameClock += fdt;
+            if (m_flameClock > 1.0e6f) m_flameClock = 0.0f;
+        }
 
         if (!menuWorld) {
         const bool firstPerson = (ui.camMode == 0);
@@ -824,7 +858,8 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
         if (!ui.spectating && !ui.hideAvatar) {
             drawPlayerModel(player.pos, shownBody, shownYaw, shownPitch, eye, vp, firstPerson,
                             &shownClip, shownFrame, heldR, heldL, carried,
-                            nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes);
+                            nullptr, shownStrike, shownStrikeAt, &sky, wearUpper, wearLower, wearShoes,
+                            false, true);
         }
         for (const RemoteAvatar& rp : ui.remotes) {
             if (rp.spectator || rp.dead) continue;
@@ -837,6 +872,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
                             rp.wearU, rp.wearL, rp.wearS);
         }
         drawArcaneEffects(eye, vp, player, ui, firstPerson);
+        drawTorchFlames(world, eye, vp, ui);
 
         // Observation dummy: loops walk in place. Head/body yaw stay a runtime overlay.
         if (ui.dummyActive) {
@@ -949,7 +985,8 @@ void Renderer::drawSky(const Sky& s, const Mat4& invVP, const Vec3& eye,
 void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const Sky& s,
                          const Vec3& breakRel, float breakProgress, float breakSod,
                          const Vec3& breakNrm, float fogDensity, const Vec3& fogColor,
-                         float rimHalf, float bminX, float bmaxX, float bminZ, float bmaxZ) {
+                         float rimHalf, float bminX, float bmaxX, float bminZ, float bmaxZ,
+                         float heldLightEmit, const Vec3& heldLightRel) {
     gl::UseProgram(progWorld);
     gl::ActiveTexture(GL_TEXTURE0);
     gl::BindTexture(GL_TEXTURE_2D, atlasTex);
@@ -963,6 +1000,8 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::Uniform4f(uBorderXZ, bminX, bmaxX, bminZ, bmaxZ);
     gl::Uniform1f(uRimHalf, rimHalf);
     gl::Uniform3f(uCameraPos, eye.x, eye.y, eye.z);
+    gl::Uniform3f(uHeldLightRel, heldLightRel.x, heldLightRel.y, heldLightRel.z);
+    gl::Uniform1f(uHeldLightEmit, heldLightEmit);
     gl::Uniform3f(uBreakRel, breakRel.x, breakRel.y, breakRel.z);
     gl::Uniform1f(uBreakProgress, breakProgress);
     gl::Uniform1f(uBreakSod, breakSod);
@@ -1403,6 +1442,143 @@ void Renderer::drawArcaneEffects(const Vec3& eye, const Mat4& vp, const Player& 
     gl::Disable(GL_BLEND);
 }
 
+void Renderer::drawHeldTorchFlame(const Vec3& eye, const Mat4& vp, const Vec3& tipWorld, uint32_t seed) {
+    const float clock = m_flameClock;
+    const float S = cfg::BLOCK_SCALE;
+    auto hash01 = [](uint32_t n) {
+        n ^= n >> 16; n *= 0x7feb352du; n ^= n >> 15; n *= 0x846ca68bu; n ^= n >> 16;
+        return float(n & 0x00ffffffu) / float(0x01000000u);
+    };
+    float flicker = 0.5f + 0.5f * std::sin(clock * 14.0f + seed * 0.017f);
+    float wobble = 0.5f + 0.5f * std::sin(clock * 9.3f + seed * 0.031f);
+    float core = 0.1375f * S * (1.05f + flicker * 0.18f);
+    float mid = 0.2375f * S * (1.0f + wobble * 0.22f);
+    float outer = 0.3625f * S * (0.95f + flicker * 0.28f);
+
+    gl::Enable(GL_BLEND);
+    gl::Disable(GL_CULL_FACE);
+    gl::DepthMask(GL_FALSE);
+    gl::BlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    drawParticle(vp, eye, tipWorld, core, core * 1.35f,
+                 1.0f, 0.95f, 0.55f, 0.95f, 0.20f);
+    drawParticle(vp, eye, tipWorld + Vec3{ 0, 0.030f * S, 0 }, mid, mid * 1.55f,
+                 1.0f, 0.45f + flicker * 0.20f, 0.04f, 0.72f, 0.30f);
+    drawParticle(vp, eye, tipWorld + Vec3{ 0, 0.070f * S, 0 }, outer, outer * 1.75f,
+                 1.0f, 0.22f + wobble * 0.12f, 0.02f, 0.38f, 0.42f);
+
+    for (int i = 0; i < 7; ++i) {
+        float phase = std::fmod(clock * (1.6f + hash01(seed + (uint32_t)i * 19u) * 1.1f)
+            + hash01(seed + (uint32_t)i * 47u), 1.0f);
+        if (phase < 0.0f) phase += 1.0f;
+        float ang = seed * 0.11f + i * 0.95f + clock * 2.4f;
+        float rad = (0.025f + hash01(seed + (uint32_t)i * 13u) * 0.0875f) * S;
+        Vec3 at = tipWorld + Vec3{
+            std::cos(ang) * rad * (1.0f - phase),
+            (0.05f + phase * 0.40f) * S,
+            std::sin(ang) * rad * (1.0f - phase)
+        };
+        float size = (0.045f + (1.0f - phase) * 0.070f) * S;
+        float alpha = 0.85f * (1.0f - phase) * (1.0f - phase);
+        drawParticle(vp, eye, at, size, size * 1.6f,
+                     1.0f, 0.55f + (1.0f - phase) * 0.35f, 0.05f, alpha, 0.28f);
+    }
+
+    gl::DepthMask(GL_TRUE);
+    gl::Enable(GL_CULL_FACE);
+    gl::Disable(GL_BLEND);
+}
+
+void Renderer::drawTorchFlames(const World& world, const Vec3& eye, const Mat4& vp, const UIState& ui) {
+    (void)ui;
+    const float clock = m_flameClock;
+
+    const float S = cfg::BLOCK_SCALE;
+    const float viewR = 48.0f * S;
+    const float viewR2 = viewR * viewR;
+    auto hash01 = [](uint32_t n) {
+        n ^= n >> 16; n *= 0x7feb352du; n ^= n >> 15; n *= 0x846ca68bu; n ^= n >> 16;
+        return float(n & 0x00ffffffu) / float(0x01000000u);
+    };
+    auto drawFlameAt = [&](const Vec3& pos, uint32_t seed) {
+        float flicker = 0.5f + 0.5f * std::sin(clock * 14.0f + seed * 0.017f);
+        float wobble = 0.5f + 0.5f * std::sin(clock * 9.3f + seed * 0.031f);
+        float core = 0.1375f * S * (1.05f + flicker * 0.18f);
+        float mid = 0.2375f * S * (1.0f + wobble * 0.22f);
+        float outer = 0.3625f * S * (0.95f + flicker * 0.28f);
+
+        drawParticle(vp, eye, pos, core, core * 1.35f,
+                     1.0f, 0.95f, 0.55f, 0.95f, 0.20f);
+        drawParticle(vp, eye, pos + Vec3{ 0, 0.030f * S, 0 }, mid, mid * 1.55f,
+                     1.0f, 0.45f + flicker * 0.20f, 0.04f, 0.72f, 0.30f);
+        drawParticle(vp, eye, pos + Vec3{ 0, 0.070f * S, 0 }, outer, outer * 1.75f,
+                     1.0f, 0.22f + wobble * 0.12f, 0.02f, 0.38f, 0.42f);
+
+        for (int i = 0; i < 7; ++i) {
+            float phase = std::fmod(clock * (1.6f + hash01(seed + (uint32_t)i * 19u) * 1.1f)
+                + hash01(seed + (uint32_t)i * 47u), 1.0f);
+            if (phase < 0.0f) phase += 1.0f;
+            float ang = seed * 0.11f + i * 0.95f + clock * 2.4f;
+            float rad = (0.025f + hash01(seed + (uint32_t)i * 13u) * 0.0875f) * S;
+            Vec3 at = pos + Vec3{
+                std::cos(ang) * rad * (1.0f - phase),
+                (0.05f + phase * 0.40f) * S,
+                std::sin(ang) * rad * (1.0f - phase)
+            };
+            float size = (0.045f + (1.0f - phase) * 0.070f) * S;
+            float alpha = 0.85f * (1.0f - phase) * (1.0f - phase);
+            drawParticle(vp, eye, at, size, size * 1.6f,
+                         1.0f, 0.55f + (1.0f - phase) * 0.35f, 0.05f, alpha, 0.28f);
+        }
+    };
+
+    gl::Enable(GL_BLEND);
+    gl::Disable(GL_CULL_FACE);
+    gl::DepthMask(GL_FALSE);
+    gl::BlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    for (const auto& [key, ch] : world.chunks()) {
+        if (ch.emissionKnown && !ch.hasEmission) continue;
+        int cx = chunkCX(key), cy = chunkCY(key), cz = chunkCZ(key);
+        float ccx = ((float)cx * cfg::CHUNK_X + 0.5f * cfg::CHUNK_X) * S;
+        float ccy = ((float)cy * cfg::CHUNK_Y + 0.5f * cfg::CHUNK_Y) * S;
+        float ccz = ((float)cz * cfg::CHUNK_Z + 0.5f * cfg::CHUNK_Z) * S;
+        float cdx = ccx - eye.x, cdy = ccy - eye.y, cdz = ccz - eye.z;
+        float chunkRad = 0.5f * S * std::sqrt((float)(cfg::CHUNK_X * cfg::CHUNK_X
+            + cfg::CHUNK_Y * cfg::CHUNK_Y + cfg::CHUNK_Z * cfg::CHUNK_Z));
+        if (cdx * cdx + cdy * cdy + cdz * cdz > (viewR + chunkRad) * (viewR + chunkRad))
+            continue;
+
+        for (int ly = 0; ly < cfg::CHUNK_Y; ++ly) {
+            for (int lz = 0; lz < cfg::CHUNK_Z; ++lz) {
+                for (int lx = 0; lx < cfg::CHUNK_X; ++lx) {
+                    if (ch.get(lx, ly, lz) != TORCH) continue;
+                    int wx = cx * cfg::CHUNK_X + lx;
+                    int wy = cy * cfg::CHUNK_Y + ly;
+                    int wz = cz * cfg::CHUNK_Z + lz;
+                    uint8_t lv = ch.levelAt(lx, ly, lz);
+                    int attach = (lv >= 1 && lv <= 5) ? (int)lv : 1;
+                    Vec3 tip = torch_appear::flameTip(attach);
+                    Vec3 pos{
+                        ((float)wx + tip.x) * S,
+                        ((float)wy + tip.y) * S,
+                        ((float)wz + tip.z) * S
+                    };
+                    float dx = pos.x - eye.x, dy = pos.y - eye.y, dz = pos.z - eye.z;
+                    if (dx * dx + dy * dy + dz * dz > viewR2) continue;
+                    uint32_t seed = (uint32_t)(wx * 73856093) ^ (uint32_t)(wy * 19349663)
+                        ^ (uint32_t)(wz * 83492791) ^ (uint32_t)attach * 0x9e3779b9u;
+                    drawFlameAt(pos, seed);
+                }
+            }
+        }
+    }
+
+    gl::DepthMask(GL_TRUE);
+    gl::Enable(GL_CULL_FACE);
+    gl::Disable(GL_BLEND);
+}
+
 void Renderer::drawCrackFace(const Mat4& vp, const Vec3& eye, const World& world,
                              int phys, int bx, int by, int bz, int face,
                              const float* steps, int nSteps) {
@@ -1662,20 +1838,28 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
                                const anim::Clip* clip, float frame, uint8_t heldRight,
                                uint8_t heldLeft, uint8_t carried, const vitals::Vitals* tint,
                                const anim::Clip* strike, float strikeAt, const Sky* sun,
-                               uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes, bool bare) {
+                               uint8_t wearUpper, uint8_t wearLower, uint8_t wearShoes, bool bare,
+                               bool trackHeldLight) {
     const anim::PlayerClips& lib = anim::playerClips();
     const bool hugging = hold::isCarrying(carried);
     std::vector<anim::BoneXform> pose;
     std::vector<pm::Part> parts;
     if (clip && !clip->bones.empty()) {
-        const anim::Clip* layers[1] = {};
+        const anim::Clip* layers[3] = {};
         int nLayers = 0;
         float layerFrame = 0.0f;
+        const bool raiseR = !hugging && hold::isHandLight(heldRight);
+        const bool raiseL = !hugging && hold::isHandLight(heldLeft);
         if (hugging) {
             layers[nLayers++] = &lib.holdBlock;
         } else if (strike && !strike->tracks.empty()) {
+            // Strikes replace the raise pose; off-hand light still raises.
+            if (raiseL) layers[nLayers++] = &lib.raiseL;
             layers[nLayers++] = strike;
             layerFrame = strikeAt;
+        } else {
+            if (raiseR) layers[nLayers++] = &lib.raiseR;
+            if (raiseL) layers[nLayers++] = &lib.raiseL;
         }
         pose = (nLayers > 0)
             ? anim::evalPoseLayered(*clip, frame, layers, nLayers, layerFrame)
@@ -1854,10 +2038,13 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         if (block == AIR || !validBlock(block)) return;
         hold::Spec spec = hold::resolveBlock(holds, block, clipName, side);
         if (strike && !strike->name.empty() && strike->name == clipName) {
-            spec.grip = anim::evalGrip(*strike, strikeAt, spec.grip);
+            // Grip comes from the per-item hold Spec (not shared clip hold_grip).
             hold::composeFace(spec, anim::evalFace(*strike, strikeAt), anim::evalFaceOff(*strike, strikeAt));
+        } else if (clipName == "raise_r") {
+            hold::composeFace(spec, anim::evalFace(lib.raiseR, 0.0f), anim::evalFaceOff(lib.raiseR, 0.0f));
+        } else if (clipName == "raise_l") {
+            hold::composeFace(spec, anim::evalFace(lib.raiseL, 0.0f), anim::evalFaceOff(lib.raiseL, 0.0f));
         } else if (clip && clip->name == clipName) {
-            spec.grip = anim::evalGrip(*clip, frame, spec.grip);
             hold::composeFace(spec, anim::evalFace(*clip, frame), anim::evalFaceOff(*clip, frame));
         }
         anim::BoneXform xf{};
@@ -1911,7 +2098,6 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
         } else {
             gl::DepthMask(GL_TRUE);
         }
-        // lookYawXZ is a reflection (det -1), which flips triangle winding.
         // Same as drops: draw both sides so no held face is culled.
         gl::Disable(GL_CULL_FACE);
         if (!held.empty()) {
@@ -1929,11 +2115,33 @@ void Renderer::drawPlayerModel(const Vec3& pos, float bodyYaw, float headYaw, fl
             gl::DepthMask(GL_TRUE);
             gl::Disable(GL_BLEND);
         }
+
+        // Flame / light tip share the same bone transform as the held mesh.
+        float emit = (float)blockEmission(block);
+        if (emit > 0.0f || block == TORCH) {
+            Vec3 tipLocal = (block == TORCH)
+                ? torch_appear::flameTip(1)
+                : Vec3{ 0.50f, 0.65f, 0.50f };
+            Vec3 tipRel = holdXform(tipLocal.x, tipLocal.y, tipLocal.z);
+            Vec3 tipWorld = tipRel + eye;
+            if (emit > 0.0f && trackHeldLight && emit >= m_heldLightEmit) {
+                m_heldLightEmit = emit;
+                m_heldLightPos = tipWorld;
+                m_heldLightValid = true;
+            }
+            if (block == TORCH) {
+                uint32_t seed = 0xA11CE ^ (uint32_t)(std::strcmp(side, "left") == 0 ? 97 : 0);
+                drawHeldTorchFlame(eye, vp, tipWorld, seed);
+            }
+        }
     };
     std::string rightClip = locClip;
+    std::string leftClip = locClip;
     if (strike && !hugging && !strike->name.empty()) rightClip = strike->name;
+    else if (!hugging && hold::isHandLight(heldRight)) rightClip = "raise_r";
+    if (!hugging && hold::isHandLight(heldLeft)) leftClip = "raise_r";
     drawBound(heldRight, "right", rightClip);
-    drawBound(heldLeft, "left", locClip);
+    drawBound(heldLeft, "left", leftClip);
     if (hugging) drawBound(carried, "right", "hold_block", 0.5f);
     gl::Enable(GL_CULL_FACE);
 }

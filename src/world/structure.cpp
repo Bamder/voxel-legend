@@ -55,6 +55,17 @@ struct Blueprint {
         }
         return face;
     }
+    // Torch support attach face (1..5). -1 = infer on place.
+    int torchAttachAt(int x, int y, int z) const {
+        for (const CellTag& t : tags) {
+            if (t.x != x || t.y != y || t.z != z) continue;
+            if (t.name.size() == 6 && t.name.compare(0, 5, "torch") == 0) {
+                int face = t.name[5] - '0';
+                if (face >= 1 && face <= 5) return face;
+            }
+        }
+        return -1;
+    }
 };
 
 struct Site {
@@ -415,7 +426,12 @@ bool paintFile(World& world, const std::string& path) {
                 int z = kEditZ + lz;
                 if (!inVolume(x, y, z)) continue;
                 uint8_t block = b.at(lx, ly, lz);
-                world.setBlock(x, y, z, block, false, true, b.axisFaceAt(lx, ly, lz), b.flagsAt(lx, ly, lz));
+                int face = b.axisFaceAt(lx, ly, lz);
+                if (block == TORCH) {
+                    int attach = b.torchAttachAt(lx, ly, lz);
+                    if (attach >= 1) face = attach;
+                }
+                world.setBlock(x, y, z, block, false, true, face, b.flagsAt(lx, ly, lz));
             }
         }
     }
@@ -464,6 +480,14 @@ bool saveFile(const World& world, const std::string& path) {
                 int axis = world.logAxisAt(x, y, z);
                 if (axis == 0) b.tags.push_back(CellTag{ lx, ly, lz, "axisx" });
                 else if (axis == 2) b.tags.push_back(CellTag{ lx, ly, lz, "axisz" });
+                if (block == TORCH) {
+                    int attach = world.torchAttachAt(x, y, z);
+                    if (attach >= 1 && attach <= 5) {
+                        char name[8];
+                        std::snprintf(name, sizeof(name), "torch%d", attach);
+                        b.tags.push_back(CellTag{ lx, ly, lz, name });
+                    }
+                }
             }
         }
     }
@@ -939,8 +963,13 @@ int stampBlueprint(World& world, int worldX, int worldZ, const Blueprint& b, int
             for (int lx = 0; lx < b.sx; ++lx) {
                 uint8_t block = b.at(lx, ly, lz);
                 if (block == AIR) continue;
+                int face = b.axisFaceAt(lx, ly, lz);
+                if (block == TORCH) {
+                    int attach = b.torchAttachAt(lx, ly, lz);
+                    if (attach >= 1) face = attach;
+                }
                 putSolid(world, x0 + lx, floorY + ly, z0 + lz, block,
-                         b.axisFaceAt(lx, ly, lz), b.flagsAt(lx, ly, lz));
+                         face, b.flagsAt(lx, ly, lz));
                 placed++;
             }
         }

@@ -73,6 +73,7 @@ Fail-IfLocked "editor.exe"
 $editorSrc = @(
     "src/editor/editor_main.cpp",
     "src/editor/data_editor.cpp",
+    "src/editor/world_stubs.cpp",
     "src/core/gl_loader.cpp",
     "src/material/image.cpp",
     "src/material/material.cpp",
@@ -90,7 +91,4 @@ $editorSrc | ForEach-Object { Write-Output "  $_" }
 if ($LASTEXITCODE -ne 0) { Explain-LinkFailure "editor.exe" $LASTEXITCODE }
 Write-Output "BUILD OK -> editor.exe"
 
-# Tree growth sandbox (step playback + live sliders).
-Write-Output ""
-& "$PSScriptRoot\tools\tree_lab\build.ps1"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# tree_lab is opt-in: run tools\tree_lab\build.ps1 separately when needed.
