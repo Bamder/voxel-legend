@@ -373,6 +373,7 @@ private:
     int uCrackStep = 0, uCrackGaussZ = 0, uCrackEdge = 0, uCrackCorner = 0;
     int uInvVP = 0, uSkySunDir = 0, uSkyMoonDir = 0, uZenith = 0, uHorizon = 0, uBelow = 0;
     int uSkySunColor = 0, uSkyMoonColor = 0, uSunDisc = 0, uMoonDisc = 0, uStarAmount = 0;
+    int uSkyTime = 0;
     int uFlatMVP = 0, uFlatColor = 0;
     int uParticleMVP = 0, uParticleColor = 0, uParticleSoftness = 0, uParticleRing = 0;
     int uHumMVP = 0, uHumTexMVP = 0, uHumTexAtlas = 0;
@@ -410,7 +411,7 @@ private:
     unsigned int renderTextTexture(const std::string& utf8, int& outW, int& outH);
     void drawSky(const Sky& s, const Mat4& invVP, const Vec3& eye = Vec3{},
                  float rimHalf = 0.0f, float bminX = 0.0f, float bmaxX = 0.0f,
-                 float bminZ = 0.0f, float bmaxZ = 0.0f);
+                 float bminZ = 0.0f, float bmaxZ = 0.0f, float timeOfDay = 0.0f);
     void drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const Sky& s,
                    const Vec3& breakRel, float breakProgress, float breakSod,
                    const Vec3& breakNrm, float fogDensity, const Vec3& fogColor,

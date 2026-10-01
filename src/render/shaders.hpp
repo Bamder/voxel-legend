@@ -252,36 +252,256 @@ uniform float uStarAmount;  // 0..1
 uniform vec4 uBorderXZ;
 uniform float uRimHalf;
 uniform vec3 uCameraPos;
+uniform float uTime;        // 用于流星动画
 
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+// Simple hash for stars
+float hash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+// Star color based on temperature
+vec3 starColor(float t) {
+    // 0 = blue, 0.5 = white, 1 = orange
+    t = clamp(t, 0.0, 1.0);
+    if (t < 0.5) {
+        return mix(vec3(0.7, 0.85, 1.0), vec3(1.0, 1.0, 1.0), t * 2.0);
+    }
+    return mix(vec3(1.0, 1.0, 1.0), vec3(1.0, 0.75, 0.5), (t - 0.5) * 2.0);
+}
 
 void main() {
     vec3 d = normalize(vDir);
     float h = d.y;
 
+    // Sky gradient
     vec3 sky = mix(uHorizon, uZenith, clamp(pow(max(h, 0.0), 0.55), 0.0, 1.0));
     if (h < 0.0) sky = mix(uBelow, uHorizon, clamp(1.0 + h * 1.8, 0.0, 1.0));
 
     // Sun
     float sd = dot(d, uSunDir);
     if (sd > uSunDisc) sky = mix(sky, uSunColor, smoothstep(uSunDisc, uSunDisc + 0.03, sd));
-    // Sun glow
-    float glow = max(sd - uSunDisc, 0.0);
-    sky += uSunColor * pow(glow, 3.0) * 0.6;
+    float sunGlow = max(sd - uSunDisc, 0.0);
+    sky += uSunColor * pow(sunGlow, 3.0) * 0.6;
 
-    // Moon
+    // Moon - gorgeous with craters and glow
     float md = dot(d, uMoonDir);
-    if (md > uMoonDisc) sky = mix(sky, uMoonColor, smoothstep(uMoonDisc, uMoonDisc + 0.03, md));
+    float moonDist = acos(clamp(md, -1.0, 1.0));
+    float moonRadius = 0.13; // Angular radius
+    
+    if (moonDist < moonRadius * 2.0) {
+        // Moon surface coordinates
+        vec3 moonUp = vec3(0.0, 1.0, 0.0);
+        if (abs(dot(d, moonUp)) > 0.99) moonUp = vec3(1.0, 0.0, 0.0);
+        vec3 moonRight = normalize(cross(uMoonDir, moonUp));
+        vec3 moonUp2 = cross(moonRight, uMoonDir);
+        
+        // Get 2D moon surface position
+        vec2 moonUV;
+        moonUV.x = dot(d - uMoonDir * md, moonRight);
+        moonUV.y = dot(d - uMoonDir * md, moonUp2);
+        
+        // Convert to polar for texture
+        float moonR = length(moonUV);
+        float moonAngle = atan(moonUV.y, moonUV.x);
+        
+        if (moonR < moonRadius) {
+            // Moon surface color with procedural craters
+            vec3 moonBase = vec3(0.88, 0.87, 0.82); // Bright white-gray
+            
+            // Create crater pattern using multiple hash layers
+            float craters = 0.0;
+            float craterScale = 15.0;
+            for (int i = 0; i < 3; i++) {
+                float scale = craterScale * pow(2.0, float(i));
+                vec2 uv2 = moonUV * scale;
+                vec2 cell = floor(uv2);
+                vec2 f = fract(uv2);
+                
+                float cr = hash(vec3(cell, i * 17));
+                if (cr > 0.7) {
+                    float cx = hash(vec3(cell + 1.0, i * 31));
+                    float cy = hash(vec3(cell + 2.0, i * 47));
+                    vec2 center = vec2(cx, cy) - 0.5;
+                    float dist = length(f - 0.5 - center * 0.4);
+                    float craterSize = 0.1 + cr * 0.15;
+                    float crater = smoothstep(craterSize, craterSize * 0.5, dist);
+                    craters += crater * (1.0 - float(i) * 0.2);
+                }
+            }
+            
+            // Apply craters
+            vec3 moonColor = mix(moonBase, vec3(0.65, 0.63, 0.58), craters * 0.7);
+            
+            // Dark side shading (crescent effect)
+            float darkSide = smoothstep(-0.3, 0.3, moonUV.x / moonRadius);
+            moonColor *= mix(0.3, 1.0, darkSide);
+            
+            // Limb darkening
+            float limbDark = 1.0 - pow(moonR / moonRadius, 2.0) * 0.3;
+            moonColor *= limbDark;
+            
+            // Moon disk
+            float edge = smoothstep(moonRadius, moonRadius - 0.002, moonR);
+            sky = mix(sky, moonColor, edge);
+        }
+        
+        // Moon glow/aura - multiple layers
+        float moonIntensity = exp(-moonDist * 40.0);
+        sky += vec3(0.6, 0.65, 0.8) * moonIntensity * 0.15;
+        
+        float moonGlow2 = exp(-moonDist * 15.0);
+        sky += vec3(0.4, 0.45, 0.6) * moonGlow2 * 0.1;
+    }
 
-    // Stars (fixed on the world-space sky sphere)
-    if (uStarAmount > 0.0001 && d.y > 0.02) {
-        vec3 p = d * 18.0;
-        vec3 id = floor(p);
-        float star = step(0.996, hash3(id));
-        star *= uStarAmount;
-        star *= smoothstep(0.02, 0.18, d.y);
-        sky += vec3(star);
+    // Stars - ONLY render when it's night
+    if (uStarAmount > 0.5 && h > 0.0) {
+        
+        // MILKY WAY BAND - soft haze across sky (brighter)
+        float milkyAngle = atan(d.z, d.x);
+        float milkyLat = abs(d.y);
+        float milkyBand = exp(-milkyLat * 5.0) * (0.4 + 0.6 * abs(sin(milkyAngle * 4.0 + d.y * 12.0)));
+        sky += vec3(0.6, 0.7, 1.0) * milkyBand * uStarAmount * 0.5;
+        
+        // LAYER 1: Tiny distant stars - very dense
+        vec3 p1 = d * 30.0;
+        ivec3 i1 = ivec3(floor(p1));
+        for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+        for (int z = -1; z <= 1; z++) {
+            ivec3 cell = i1 + ivec3(x, y, z);
+            float h1 = hash(vec3(cell));
+            if (h1 > 0.03) continue; // Very dense: was 0.08
+            
+            // Star position in cell
+            float sx = hash(vec3(cell) + 100.0);
+            float sy = hash(vec3(cell) + 200.0);
+            float sz = hash(vec3(cell) + 300.0);
+            vec3 starPos = vec3(cell) + vec3(sx, sy, sz);
+            float dist = length(p1 - starPos);
+            
+            // Star brightness (brighter)
+            float brightness = hash(vec3(cell) + 400.0);
+            float starSize = 0.025 + brightness * 0.04;
+            
+            // Only visible stars
+            if (dist < starSize) {
+                float intensity = (1.0 - dist / starSize) * (0.6 + brightness * 0.6);
+                float temp = hash(vec3(cell) + 500.0);
+                sky += starColor(temp) * intensity * uStarAmount * 1.8;
+            }
+        }}}
+        
+        // LAYER 2: Small stars - dense
+        vec3 p2 = d * 22.0;
+        ivec3 i2 = ivec3(floor(p2));
+        for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+        for (int z = -1; z <= 1; z++) {
+            ivec3 cell = i2 + ivec3(x, y, z);
+            float h2 = hash(vec3(cell) + 800.0);
+            if (h2 > 0.04) continue; // Dense: was 0.06
+            
+            // Star position
+            float sx = hash(vec3(cell) + 1100.0);
+            float sy = hash(vec3(cell) + 1200.0);
+            float sz = hash(vec3(cell) + 1300.0);
+            vec3 starPos = vec3(cell) + vec3(sx, sy, sz);
+            float dist = length(p2 - starPos);
+            
+            // Star brightness (brighter)
+            float brightness = hash(vec3(cell) + 1400.0);
+            float starSize = 0.04 + brightness * 0.05;
+            
+            if (dist < starSize) {
+                float intensity = (1.0 - dist / starSize) * (0.7 + brightness * 0.5);
+                float temp = hash(vec3(cell) + 1500.0);
+                sky += starColor(temp) * intensity * uStarAmount * 2.0;
+            }
+        }}}
+        
+        // LAYER 3: Medium bright stars
+        vec3 p3 = d * 15.0;
+        ivec3 i3 = ivec3(floor(p3));
+        for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+        for (int z = -1; z <= 1; z++) {
+            ivec3 cell = i3 + ivec3(x, y, z);
+            float h3 = hash(vec3(cell) + 2000.0);
+            if (h3 > 0.08) continue;
+            
+            // Star position
+            float sx = hash(vec3(cell) + 2100.0);
+            float sy = hash(vec3(cell) + 2200.0);
+            float sz = hash(vec3(cell) + 2300.0);
+            vec3 starPos = vec3(cell) + vec3(sx, sy, sz);
+            float dist = length(p3 - starPos);
+            
+            // Brighter stars get glow
+            float brightness = hash(vec3(cell) + 2400.0);
+            float starSize = 0.06 + brightness * 0.07;
+            
+            if (dist < starSize) {
+                float core = 1.0 - dist / starSize;
+                // Glow effect
+                float glowDist = starSize * 3.5;
+                float glow = max(0.0, 1.0 - dist / glowDist);
+                glow = glow * glow;
+                
+                float intensity = (core * 0.6 + glow * 0.4) * (0.7 + brightness * 0.5);
+                float temp = hash(vec3(cell) + 2500.0);
+                vec3 col = starColor(temp);
+                
+                // Bright stars get extra glow
+                if (brightness > 0.6) {
+                    col += vec3(0.4, 0.4, 0.5) * glow * brightness;
+                }
+                
+                sky += col * intensity * uStarAmount * 2.2;
+            }
+        }}}
+        
+        // LAYER 4: Bright prominent stars with strong glow
+        vec3 p4 = d * 10.0;
+        ivec3 i4 = ivec3(floor(p4));
+        for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+        for (int z = -1; z <= 1; z++) {
+            ivec3 cell = i4 + ivec3(x, y, z);
+            float h4 = hash(vec3(cell) + 3000.0);
+            if (h4 > 0.15) continue;
+            
+            // Star position
+            float sx = hash(vec3(cell) + 3100.0);
+            float sy = hash(vec3(cell) + 3200.0);
+            float sz = hash(vec3(cell) + 3300.0);
+            vec3 starPos = vec3(cell) + vec3(sx, sy, sz);
+            float dist = length(p4 - starPos);
+            
+            float brightness = hash(vec3(cell) + 3400.0);
+            float starSize = 0.08 + brightness * 0.1;
+            
+            if (dist < starSize) {
+                float core = 1.0 - dist / starSize;
+                float glowDist = starSize * 4.0;
+                float glow = max(0.0, 1.0 - dist / glowDist);
+                glow = glow * glow;
+                
+                float intensity = (core * 0.5 + glow * 0.5) * (0.8 + brightness * 0.4);
+                float temp = hash(vec3(cell) + 3500.0);
+                vec3 col = starColor(temp);
+                
+                // Strong glow for bright stars
+                col += vec3(0.5, 0.5, 0.6) * glow * brightness * 0.8;
+                
+                sky += col * intensity * uStarAmount * 2.5;
+            }
+        }}}
+        
+        // Horizon fade for stars
+        float fade = smoothstep(0.0, 0.15, h);
+        sky = mix(sky, mix(uBelow, uHorizon, clamp(1.0 + h * 1.8, 0.0, 1.0)), 1.0 - fade);
     }
 
     if (uRimHalf > 0.001) {
