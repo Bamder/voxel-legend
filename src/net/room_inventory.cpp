@@ -121,10 +121,9 @@ bool pickup(State& state, uint32_t sequence, World& world, uint32_t dropId,
             Vec3 eye, Vec3 feet) {
     if (!newer(sequence, state.lastPickupSequence)) return false;
     state.lastPickupSequence = sequence;
+    if (!canPickup(state, world, dropId, eye, feet)) return false;
     const loot::Drop* found = world.dropById(dropId);
-    if (!found) return false;
     loot::Drop drop = *found;
-    if (!reachable(world, drop, eye, feet)) return false;
     State next = state;
     int left = add(next, drop.item, drop.count);
     int taken = (int)drop.count - left;
@@ -132,5 +131,13 @@ bool pickup(State& state, uint32_t sequence, World& world, uint32_t dropId,
     state.slots = next.slots;
     state.revision = next.revision;
     return true;
+}
+
+bool canPickup(const State& state, const World& world, uint32_t dropId,
+               Vec3 eye, Vec3 feet) {
+    const loot::Drop* drop = world.dropById(dropId);
+    if (!drop || !drop->count || !reachable(world, *drop, eye, feet)) return false;
+    State next = state;
+    return add(next, drop->item, drop->count) < drop->count;
 }
 }

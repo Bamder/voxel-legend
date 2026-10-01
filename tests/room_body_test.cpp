@@ -2,13 +2,16 @@
 #include "../src/net/room_inventory.hpp"
 #include "../src/plugin/plugin.hpp"
 #include "../src/world/building_loot.hpp"
+#include "../src/world/clue_quiz.hpp"
 #include "../src/world/guide.hpp"
 #include "../src/world/match_content.hpp"
 #include "../src/world/ritual.hpp"
 #include "../src/world/structure.hpp"
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
+#include <unordered_set>
 
 namespace {
 int checks = 0;
@@ -19,6 +22,51 @@ void check(bool value, const char* message) {
 }
 
 int main() {
+    check(clue_quiz::count() == 50, "clue question bank contains exactly 50 questions");
+    std::unordered_set<std::string> subjects;
+    std::unordered_set<std::string> prompts;
+    for (size_t i = 0; i < clue_quiz::count(); ++i) {
+        const auto& question = clue_quiz::at(i);
+        check(question.correct < 4 && std::strlen(question.prompt) <= 96 &&
+              std::strlen(question.subject) <= 96, "question fits bounded wire strings");
+        std::unordered_set<std::string> options;
+        for (const char* option : question.options) {
+            check(option && *option && std::strlen(option) <= 96,
+                  "every clue option fits bounded wire string");
+            options.insert(option);
+        }
+        check(options.size() == 4, "clue question has four distinct answers");
+        check(prompts.insert(question.prompt).second, "clue question prompt is unique");
+        subjects.insert(question.subject);
+    }
+    check(subjects.size() == 8, "clue questions cover all eight requested subjects");
+    ClueQuizNet quiz;
+    quiz.status = 1; quiz.challengeId = 91; quiz.dropId = 42;
+    quiz.subject = "拓扑学"; quiz.prompt = "测试题";
+    quiz.options = {"甲", "乙", "丙", "丁"};
+    auto quizBytes = encodeClueQuiz(quiz);
+    ClueQuizNet quizDecoded;
+    check(decodeClueQuiz(quizBytes.data(), quizBytes.data() + quizBytes.size(), quizDecoded) &&
+          quizDecoded.challengeId == 91 && quizDecoded.options[3] == "丁",
+          "four-choice clue challenge roundtrip");
+    check(!decodeClueQuiz(quizBytes.data(), quizBytes.data() + quizBytes.size() - 1, quizDecoded),
+          "truncated clue challenge rejected");
+    ClueQuizNet denied;
+    denied.status = 4; denied.dropId = 42;
+    denied.prompt = "该线索不属于当前阵营或阶段";
+    auto deniedBytes = encodeClueQuiz(denied);
+    check(decodeClueQuiz(deniedBytes.data(), deniedBytes.data() + deniedBytes.size(), quizDecoded) &&
+          quizDecoded.status == 4 && quizDecoded.prompt == denied.prompt,
+          "server clue pickup rejection explains the reason to the client");
+    auto answerBytes = encodeClueAnswer(91, 3);
+    uint32_t challengeId = 0; uint8_t answerOption = 0;
+    check(decodeClueAnswer(answerBytes.data(), answerBytes.data() + answerBytes.size(),
+                           challengeId, answerOption) && challengeId == 91 && answerOption == 3,
+          "clue answer roundtrip");
+    answerBytes = encodeClueAnswer(91, 4);
+    check(!decodeClueAnswer(answerBytes.data(), answerBytes.data() + answerBytes.size(),
+                            challengeId, answerOption), "fifth clue option rejected");
+
     room_body::State state;
     room_body::spawn(state, {1,2,3});
     PlayInputNet input;
@@ -451,6 +499,23 @@ int main() {
     }
     check(!matchClues.targetFor(2).active && !matchClues.targetFor(6).active,
           "a one-team match does not create routes for absent teams");
+    matchWorld.updateDrops(cfg::DROP_LIFETIME + 1.0f);
+    int survivingClues = 0;
+    for (const auto& drop : matchWorld.drops()) survivingClues += drop.item == ITEM_CLUE;
+    check(survivingClues == 6, "progression clues survive ordinary drop expiry");
+    for (const auto& drop : matchWorld.drops()) {
+        if (drop.item != ITEM_CLUE || !matchClues.canPickup(drop.netId, 1)) continue;
+        room_inventory::State cluePickup;
+        Vec3 feet{drop.pos.x, drop.pos.y - cfg::BLOCK_SCALE * .5f, drop.pos.z};
+        Vec3 eye{feet.x, feet.y + cfg::EYE_HEIGHT, feet.z};
+        check(room_inventory::canPickup(cluePickup, matchWorld, drop.netId, eye, feet),
+              "first spawned clue is reachable and fits in an empty inventory");
+        int nearby = room_inventory::nearbyDrop(matchWorld, eye, feet);
+        check(nearby >= 0 && matchWorld.drops()[(size_t)nearby].netId == drop.netId,
+              "F can target the first spawned clue from player eye height");
+        break;
+    }
+    room_inventory::State routeInventory;
     int bossSteps = 0;
     for (int stage = 1; stage <= 6; ++stage) {
         uint32_t next = 0;
@@ -461,7 +526,12 @@ int main() {
             cluePosition = drop.pos;
             break;
         }
-        check(next && matchClues.claimPickup(next, 1), "ordered clue can be claimed");
+        Vec3 feet{cluePosition.x, cluePosition.y - cfg::BLOCK_SCALE * .5f, cluePosition.z};
+        Vec3 eye{feet.x, feet.y + cfg::EYE_HEIGHT, feet.z};
+        check(next && room_inventory::pickup(routeInventory, (uint32_t)stage,
+                                             matchWorld, next, eye, feet) &&
+              matchClues.claimPickup(next, 1),
+              "each ordered clue can actually enter inventory from its spawned position");
         clue::Target target = matchClues.targetFor(1);
         check(target.stage == stage && target.active, "clue advances exactly one stage");
         check((target.position - cluePosition).lengthSq() > 1.0f,

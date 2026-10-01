@@ -25,6 +25,9 @@ bool acceptLayout(State& state, uint32_t sequence, uint32_t baseRevision,
 uint8_t held(const State& state, const vitals::Vitals& body, int slot);
 // Client hint only; the server rechecks reach and line of sight in pickup().
 int nearbyDrop(const World& world, Vec3 eye, Vec3 feet, float radius = 1.8f);
+// Read-only check used before presenting a server-owned clue question.
+bool canPickup(const State& state, const World& world, uint32_t dropId,
+               Vec3 eye, Vec3 feet);
 bool pickup(State& state, uint32_t sequence, World& world, uint32_t dropId,
             Vec3 eye, Vec3 feet);
 }

@@ -70,7 +70,7 @@ constexpr BlockInfo kBlocks[BLOCK_COUNT] = {
     { "冰封术卷轴", false, false, false, false, TEX_SNOW, TEX_SNOW, TEX_SNOW, TEX_SNOW, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "治疗术卷轴", false, false, false, false, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, TEX_LEAVES, 0.20f, 0.25f, false, 0.0f, 0.0f },
     { "新手指南", false, false, false, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.30f, 0.42f, false, 0.0f, 0.0f },
-    { "建筑线索", false, false, false, false, TEX_SAND, TEX_SAND, TEX_SAND, TEX_SAND, 0.08f, 0.30f, false, 0.0f, 0.0f },
+    { "建筑线索", false, false, false, false, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, TEX_PLANKS, 0.08f, 0.30f, false, 0.0f, 0.0f },
     { "核心", true, false, true, false, TEX_CORE, TEX_CORE, TEX_CORE, TEX_CORE, 8.00f, 0.60f, false, 0.0f, 0.0f },
     { "木梁", true, false, true, false, TEX_TIMBER, TEX_TIMBER, TEX_TIMBER, TEX_TIMBER, 9.00f, 0.50f, false, 0.0f, 0.0f },
     { "白灰墙", true, false, true, false, TEX_PLASTER, TEX_PLASTER, TEX_PLASTER, TEX_PLASTER, 8.00f, 0.58f, false, 0.0f, 0.0f },
