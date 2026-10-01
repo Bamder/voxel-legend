@@ -2,12 +2,16 @@
 #include "../src/net/room_inventory.hpp"
 #include "../src/plugin/plugin.hpp"
 #include "../src/world/building_loot.hpp"
+#include "../src/world/clue_quiz.hpp"
 #include "../src/world/guide.hpp"
+#include "../src/world/match_content.hpp"
 #include "../src/world/ritual.hpp"
 #include "../src/world/structure.hpp"
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
+#include <unordered_set>
 
 namespace {
 int checks = 0;
@@ -18,6 +22,51 @@ void check(bool value, const char* message) {
 }
 
 int main() {
+    check(clue_quiz::count() == 50, "clue question bank contains exactly 50 questions");
+    std::unordered_set<std::string> subjects;
+    std::unordered_set<std::string> prompts;
+    for (size_t i = 0; i < clue_quiz::count(); ++i) {
+        const auto& question = clue_quiz::at(i);
+        check(question.correct < 4 && std::strlen(question.prompt) <= 96 &&
+              std::strlen(question.subject) <= 96, "question fits bounded wire strings");
+        std::unordered_set<std::string> options;
+        for (const char* option : question.options) {
+            check(option && *option && std::strlen(option) <= 96,
+                  "every clue option fits bounded wire string");
+            options.insert(option);
+        }
+        check(options.size() == 4, "clue question has four distinct answers");
+        check(prompts.insert(question.prompt).second, "clue question prompt is unique");
+        subjects.insert(question.subject);
+    }
+    check(subjects.size() == 8, "clue questions cover all eight requested subjects");
+    ClueQuizNet quiz;
+    quiz.status = 1; quiz.challengeId = 91; quiz.dropId = 42;
+    quiz.subject = "拓扑学"; quiz.prompt = "测试题";
+    quiz.options = {"甲", "乙", "丙", "丁"};
+    auto quizBytes = encodeClueQuiz(quiz);
+    ClueQuizNet quizDecoded;
+    check(decodeClueQuiz(quizBytes.data(), quizBytes.data() + quizBytes.size(), quizDecoded) &&
+          quizDecoded.challengeId == 91 && quizDecoded.options[3] == "丁",
+          "four-choice clue challenge roundtrip");
+    check(!decodeClueQuiz(quizBytes.data(), quizBytes.data() + quizBytes.size() - 1, quizDecoded),
+          "truncated clue challenge rejected");
+    ClueQuizNet denied;
+    denied.status = 4; denied.dropId = 42;
+    denied.prompt = "该线索不属于当前阵营或阶段";
+    auto deniedBytes = encodeClueQuiz(denied);
+    check(decodeClueQuiz(deniedBytes.data(), deniedBytes.data() + deniedBytes.size(), quizDecoded) &&
+          quizDecoded.status == 4 && quizDecoded.prompt == denied.prompt,
+          "server clue pickup rejection explains the reason to the client");
+    auto answerBytes = encodeClueAnswer(91, 3);
+    uint32_t challengeId = 0; uint8_t answerOption = 0;
+    check(decodeClueAnswer(answerBytes.data(), answerBytes.data() + answerBytes.size(),
+                           challengeId, answerOption) && challengeId == 91 && answerOption == 3,
+          "clue answer roundtrip");
+    answerBytes = encodeClueAnswer(91, 4);
+    check(!decodeClueAnswer(answerBytes.data(), answerBytes.data() + answerBytes.size(),
+                            challengeId, answerOption), "fifth clue option rejected");
+
     room_body::State state;
     room_body::spawn(state, {1,2,3});
     PlayInputNet input;
@@ -186,6 +235,13 @@ int main() {
     // A deterministic flat test arena; never spawned in the actual game world.
     plugin::init();
     ritual::roll(7);
+    bool assignedRituals[ritual::kRitualCount]{};
+    for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
+        int assigned = ritual::assignedRitual(team);
+        check(assigned >= 0 && assigned < ritual::kRitualCount &&
+              !assignedRituals[assigned], "all six teams have distinct ritual assignments");
+        assignedRituals[assigned] = true;
+    }
     check(!ritual::relicSpawned(0) && !ritual::relicSpawned(ritual::RelicCount - 1),
           "legacy map stamping no longer gives away Boss relics");
     World world(7);
@@ -336,9 +392,18 @@ int main() {
     check(!room_inventory::pickup(pickupInventory, 2, world, farId,
                                   {8,1.5f,8}, {8,.5f,8}) && world.dropById(farId),
           "server rejects distant pickup without deleting it");
+    // Place an actual wall at world z=10 (voxel z=20 at half-block scale).
+    world.setBlock(16, 2, 20, STONE, true, false);
+    world.setBlock(16, 3, 20, STONE, true, false);
     uint32_t wallId = world.spawnDrop({8,1,11}, HAND_PICK, 1, true);
     check(!room_inventory::pickup(pickupInventory, 3, world, wallId,
                                   {8,1.5f,9}, {8,.5f,9}), "solid wall blocks pickup");
+    // A real player looks down at a floor drop from eye height. The supporting
+    // floor is beyond the item and must not be mistaken for an obstruction.
+    uint32_t floorId = world.spawnDrop({8,.75f,8}, ITEM_ARCANE_FIREBALL, 1, true);
+    check(floorId && room_inventory::pickup(pickupInventory, 4, world, floorId,
+                                            {8,2.12f,8}, {8,.5f,8}),
+          "server accepts a visible floor drop from normal player eye height");
     room_body::spawn(state, {8,.5001f,8});
     input = {}; input.movement = kMoveForward;
     for (uint32_t tick = 1; tick <= 40; ++tick) {
@@ -378,5 +443,112 @@ int main() {
     state.player.vitals.limb[vitals::Head].health = 0;
     room_body::tick(state, world, 16, true, false);
     check(state.player.dead && state.player.vel.lengthSq() == 0, "server death stops simulation");
+
+    // Exercise the same team content builder the Dedicated Server calls.
+    World matchWorld(247);
+    matchWorld.setSaveEnabled(false);
+    matchWorld.setMatchBounds(true);
+    building_loot::Spawner matchLoot(matchWorld, 247);
+    clue::Director matchClues;
+    check(!match_content::populateTeam(matchWorld, matchLoot, matchClues, 247, 0),
+          "spectators receive no team content");
+    check(match_content::populateTeam(matchWorld, matchLoot, matchClues, 247, 1),
+          "one active team receives its buildings, altar, weapons and clue route");
+    int altarX = 0, altarZ = 0;
+    int assignedAltar = ritual::assignedRitual(1);
+    int altarY = 0;
+    check(structure::ritualAnchor(assignedAltar, altarX, altarZ) &&
+          structure::isOfferingCell(matchWorld, assignedAltar, altarX,
+                                    matchWorld.surfaceHeight(altarX, altarZ) + 1, altarZ),
+          "painted ritual altar remains the authoritative offering site");
+    altarY = matchWorld.surfaceHeight(altarX, altarZ);
+    check(matchWorld.getBlock(altarX, altarY, altarZ) == BRICK &&
+          matchWorld.getBlock(altarX, altarY + 1, altarZ) == AIR,
+          "painted altar leaves its offering triangle accessible");
+    int neededRelics[3];
+    ritual::recipeRelics(assignedAltar, neededRelics);
+    for (int i = 0; i < 3; ++i)
+        matchWorld.setBlock(altarX + i - 1, altarY + 1, altarZ,
+                            (uint8_t)ritual::blockId(neededRelics[i]), true, false);
+    check(structure::offeringReady(matchWorld, assignedAltar),
+          "three Boss relics complete the painted ritual site");
+    int picks = 0, axes = 0, arcaneItems = 0, clueDrops = 0, relicDrops = 0;
+    for (const auto& drop : matchWorld.drops()) {
+        picks += drop.item == HAND_PICK;
+        axes += drop.item == HAND_AXE;
+        arcaneItems += drop.item == ITEM_ARCANE_FIREBALL ||
+                       drop.item == ITEM_ARCANE_FREEZE || drop.item == ITEM_ARCANE_HEAL;
+        clueDrops += drop.item == ITEM_CLUE;
+        relicDrops += drop.item >= ITEM_ELEM_CORE && drop.item <= ITEM_EYELESS;
+    }
+    check(picks >= 1 && axes >= 1 && arcaneItems >= 3 &&
+          picks + axes + arcaneItems <= 6 && clueDrops == 6 && !relicDrops,
+          "weapon room has both tools and all spells plus at most one random bonus; no relics");
+    for (const auto& drop : matchWorld.drops()) {
+        if (drop.item != HAND_PICK) continue;
+        room_inventory::State roomPickup;
+        Vec3 feet{drop.pos.x, drop.pos.y - cfg::BLOCK_SCALE * .5f, drop.pos.z};
+        Vec3 eye{feet.x, feet.y + cfg::EYE_HEIGHT, feet.z};
+        int nearby = room_inventory::nearbyDrop(matchWorld, eye, feet);
+        check(nearby >= 0 && matchWorld.drops()[(size_t)nearby].netId == drop.netId,
+              "F can target the spawned weapon-room tool through decorative grass");
+        check(room_inventory::pickup(roomPickup, 1, matchWorld, drop.netId, eye, feet) &&
+              roomPickup.slots[0].block == HAND_PICK,
+              "a spawned weapon-room tool can be picked up from player eye height");
+        break;
+    }
+    check(!matchClues.targetFor(2).active && !matchClues.targetFor(6).active,
+          "a one-team match does not create routes for absent teams");
+    matchWorld.updateDrops(cfg::DROP_LIFETIME + 1.0f);
+    int survivingClues = 0;
+    for (const auto& drop : matchWorld.drops()) survivingClues += drop.item == ITEM_CLUE;
+    check(survivingClues == 6, "progression clues survive ordinary drop expiry");
+    for (const auto& drop : matchWorld.drops()) {
+        if (drop.item != ITEM_CLUE || !matchClues.canPickup(drop.netId, 1)) continue;
+        room_inventory::State cluePickup;
+        Vec3 feet{drop.pos.x, drop.pos.y - cfg::BLOCK_SCALE * .5f, drop.pos.z};
+        Vec3 eye{feet.x, feet.y + cfg::EYE_HEIGHT, feet.z};
+        check(room_inventory::canPickup(cluePickup, matchWorld, drop.netId, eye, feet),
+              "first spawned clue is reachable and fits in an empty inventory");
+        int nearby = room_inventory::nearbyDrop(matchWorld, eye, feet);
+        check(nearby >= 0 && matchWorld.drops()[(size_t)nearby].netId == drop.netId,
+              "F can target the first spawned clue from player eye height");
+        break;
+    }
+    room_inventory::State routeInventory;
+    int bossSteps = 0;
+    for (int stage = 1; stage <= 6; ++stage) {
+        uint32_t next = 0;
+        Vec3 cluePosition{};
+        for (const auto& drop : matchWorld.drops()) {
+            if (!matchClues.canPickup(drop.netId, 1)) continue;
+            next = drop.netId;
+            cluePosition = drop.pos;
+            break;
+        }
+        Vec3 feet{cluePosition.x, cluePosition.y - cfg::BLOCK_SCALE * .5f, cluePosition.z};
+        Vec3 eye{feet.x, feet.y + cfg::EYE_HEIGHT, feet.z};
+        check(next && room_inventory::pickup(routeInventory, (uint32_t)stage,
+                                             matchWorld, next, eye, feet) &&
+              matchClues.claimPickup(next, 1),
+              "each ordered clue can actually enter inventory from its spawned position");
+        clue::Target target = matchClues.targetFor(1);
+        check(target.stage == stage && target.active, "clue advances exactly one stage");
+        check((target.position - cluePosition).lengthSq() > 1.0f,
+              "each clue points away from its own pickup location");
+        if (target.destination == clue::Destination::Boss) {
+            ++bossSteps;
+            int relic = (int)target.rewardItem - (int)ITEM_ELEM_CORE;
+            Vec3 home{};
+            check(structure::guardianHome(matchWorld, relic, home) &&
+                  (home - target.position).lengthSq() < 1.0f,
+                  "Boss clue points to a spawned guardian core");
+            check(matchClues.completeBoss(matchWorld, 1, (uint32_t)relic + 1, home),
+                  "server Boss completion awards its bound ritual relic");
+        }
+    }
+    check(bossSteps == 3, "route supplies all three Boss relics needed for the ritual");
+    check(match_content::populateTeam(matchWorld, matchLoot, matchClues, 247, 6),
+          "late sixth team can receive its own independent content");
     std::cout << "room body: " << checks << " checks passed\n";
 }

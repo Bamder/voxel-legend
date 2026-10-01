@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2609300001u;
+constexpr uint32_t kRoomProto = 2610010002u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -43,8 +43,20 @@ enum class RoomMsg : uint16_t {
     PlayWelcome = 7, // id, seed, spawn, spectator, team
     PlayInput = 8,   // pose, avatar inputs, block edits, chunk resync asks
     PlayDelta = 9,   // server tick + player state + chunk baseline / delta / hash
-    Deploy = 10,     // client: set or cancel a deploy pin
-    DeploySync = 11  // server: same-team pins (aiming X or fading dot)
+    Deploy = 10,     // client: deploy pin; action 3 requests travel in local clue QA only
+    DeploySync = 11, // server: same-team pins (aiming X or fading dot)
+    ClueQuiz = 12,   // server: question or answer result; never includes answer key
+    ClueAnswer = 13  // client: challenge id and one of four option indices
+};
+
+struct ClueQuizNet {
+    uint8_t status = 0; // 1 question, 2 wrong/cooldown, 3 solved, 4 unavailable
+    uint32_t challengeId = 0;
+    uint32_t dropId = 0;
+    uint16_t retrySeconds = 0;
+    std::string subject;
+    std::string prompt;
+    std::array<std::string, 4> options{};
 };
 
 struct DeployPinNet {
@@ -392,6 +404,47 @@ inline bool decodeDeploy(const uint8_t* p, const uint8_t* end, uint8_t& action, 
     bx = (int)x;
     bz = (int)z;
     return true;
+}
+
+inline std::vector<uint8_t> encodeClueQuiz(const ClueQuizNet& quiz) {
+    Buf b;
+    b.u8(quiz.status);
+    b.u32(quiz.challengeId);
+    b.u32(quiz.dropId);
+    b.u16(quiz.retrySeconds);
+    b.str(quiz.subject);
+    b.str(quiz.prompt);
+    for (const std::string& option : quiz.options) b.str(option);
+    return b.data();
+}
+
+inline bool decodeClueQuiz(const uint8_t* p, const uint8_t* end, ClueQuizNet& quiz) {
+    quiz = {};
+    if (!Buf::u8(p, end, quiz.status) || quiz.status < 1 || quiz.status > 4 ||
+        !Buf::u32(p, end, quiz.challengeId) || !Buf::u32(p, end, quiz.dropId) ||
+        !Buf::u16(p, end, quiz.retrySeconds) ||
+        !Buf::str(p, end, quiz.subject) || !Buf::str(p, end, quiz.prompt)) return false;
+    for (std::string& option : quiz.options)
+        if (!Buf::str(p, end, option)) return false;
+    if (p != end || quiz.retrySeconds > 120) return false;
+    if (quiz.status == 1) {
+        if (!quiz.challengeId || !quiz.dropId || quiz.subject.empty() || quiz.prompt.empty()) return false;
+        for (const std::string& option : quiz.options) if (option.empty()) return false;
+    }
+    return true;
+}
+
+inline std::vector<uint8_t> encodeClueAnswer(uint32_t challengeId, uint8_t option) {
+    Buf b;
+    b.u32(challengeId);
+    b.u8(option);
+    return b.data();
+}
+
+inline bool decodeClueAnswer(const uint8_t* p, const uint8_t* end,
+                             uint32_t& challengeId, uint8_t& option) {
+    return Buf::u32(p, end, challengeId) && challengeId != 0 &&
+        Buf::u8(p, end, option) && option < 4 && p == end;
 }
 
 inline std::vector<uint8_t> encodeDeploySync(const std::vector<DeployPinNet>& pins) {

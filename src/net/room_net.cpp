@@ -532,6 +532,7 @@ void GameClient::close() {
     dead = false;
     why.clear();
     deltas.clear();
+    clueQuizzes.clear();
     deploySnap.clear();
     deployFresh = false;
     id = 0;
@@ -576,6 +577,12 @@ void GameClient::pumpWelcome() {
             if (decodeDeploySync(p, e, pins)) {
                 deploySnap.swap(pins);
                 deployFresh = true;
+            }
+        } else if (type == (uint16_t)RoomMsg::ClueQuiz && haveWelcome) {
+            ClueQuizNet quiz;
+            if (decodeClueQuiz(p, e, quiz)) {
+                if (clueQuizzes.size() >= 8) clueQuizzes.erase(clueQuizzes.begin());
+                clueQuizzes.push_back(std::move(quiz));
             }
         }
     }
@@ -629,10 +636,22 @@ void GameClient::sendDeploy(uint8_t action, int bx, int bz) {
     conn.pump();
 }
 
+void GameClient::sendClueAnswer(uint32_t challengeId, uint8_t option) {
+    if (phase != Phase::Play || !challengeId || option >= 4) return;
+    conn.send((uint16_t)RoomMsg::ClueAnswer, encodeClueAnswer(challengeId, option));
+    conn.pump();
+}
+
 std::vector<PlayDeltaNet> GameClient::takeDeltas() {
     std::vector<PlayDeltaNet> o;
     o.swap(deltas);
     return o;
+}
+
+std::vector<ClueQuizNet> GameClient::takeClueQuizzes() {
+    std::vector<ClueQuizNet> out;
+    out.swap(clueQuizzes);
+    return out;
 }
 
 bool GameClient::takeDeploy(std::vector<DeployPinNet>& out) {
@@ -738,7 +757,8 @@ bool readRoomHandoff(const std::string& utf8Path, std::vector<RoomTeamNet>& team
     return true;
 }
 
-bool spawnRoomServer(uint16_t port, const std::string& handoffUtf8, ServerProcess& proc, std::string& err) {
+bool spawnRoomServer(uint16_t port, const std::string& handoffUtf8, ServerProcess& proc,
+                     std::string& err, bool clueQa) {
     proc.kill();
     wchar_t exe[MAX_PATH] = {};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
@@ -754,6 +774,7 @@ bool spawnRoomServer(uint16_t port, const std::string& handoffUtf8, ServerProces
     cmd += L" --handoff \"";
     cmd += hopW;
     cmd += L"\"";
+    if (clueQa) cmd += L" --qa-clue";
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(0);
 

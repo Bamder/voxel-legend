@@ -349,7 +349,8 @@ void stampColumn(int cx, int cz,
             }
             if (s.cx >= x0 && s.cx <= x1 && s.cz >= z0 && s.cz <= z1) {
                 s.ground = ground;
-                if (!s.looted && ritual::relicSpawned(s.id))
+                // The core identifies a live guardian; it is never a relic pickup.
+                if (!s.looted)
                     cell(s.cx, s.cz, ground, 0, (uint8_t)GUARDIAN_CORE);
             }
         } else {
@@ -395,6 +396,14 @@ bool offeringReady(World& world, int ritual) {
     return offeringPlaced(world, ritual, relics[0])
         && offeringPlaced(world, ritual, relics[1])
         && offeringPlaced(world, ritual, relics[2]);
+}
+
+bool ritualAnchor(int ritual, int& x, int& z) {
+    const Site* site = ritualSite(ritual);
+    if (!site) return false;
+    x = site->cx;
+    z = site->cz;
+    return true;
 }
 
 bool nearRitual(int ritual, float x, float z) {
@@ -784,6 +793,21 @@ void collectRoomGuardians(std::vector<GuardianSync>& out) {
     }
 }
 
+bool guardianHome(World& world, int relic, Vec3& out) {
+    if (relic < 0 || relic >= ritual::RelicCount) return false;
+    for (const Site& s : g_sites) {
+        if (s.kind != 0 || s.id != relic || s.looted) continue;
+        world.ensureColumn(floorDiv(s.cx, cfg::CHUNK_X), floorDiv(s.cz, cfg::CHUNK_Z));
+        if (s.ground < 0 || world.getBlock(s.cx, s.ground, s.cz) != (uint8_t)GUARDIAN_CORE)
+            return false;
+        const float scale = cfg::BLOCK_SCALE;
+        out = {(s.cx + 0.5f) * scale, (s.ground + 2.0f) * scale,
+               (s.cz + 0.5f) * scale};
+        return true;
+    }
+    return false;
+}
+
 void setGuardianPose(int relic, float x, float y, float z, float yaw, uint8_t swing) {
     if (relic < 0 || relic >= ritual::RelicCount) return;
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(yaw)) return;
@@ -1042,6 +1066,31 @@ bool paintRitualAltar(World& world, int worldX, int& worldY, int worldZ, int alt
     worldY = stampBlueprint(world, worldX, worldZ, b, placed);
     fprintf(stderr, "[DEBUG] Altar %s: placed %d blocks at (%d,%d,%d) size=(%d,%d,%d) loaded=%d\n",
         ritualAltarName(altarIndex), placed, worldX, worldY, worldZ, b.sx, b.sy, b.sz, loaded ? 1 : 0);
+    return true;
+}
+
+bool paintMatchRitualAltar(World& world, int ritual) {
+    const Site* site = ritualSite(ritual);
+    if (!site) return false;
+    const int x = site->cx, z = site->cz;
+    for (int cz = floorDiv(z - 21, cfg::CHUNK_Z); cz <= floorDiv(z + 21, cfg::CHUNK_Z); ++cz)
+        for (int cx = floorDiv(x - 21, cfg::CHUNK_X); cx <= floorDiv(x + 21, cfg::CHUNK_X); ++cx)
+            world.ensureColumn(cx, cz);
+    int blueprintFloor = altarGround(world, *site);
+    if (!paintRitualAltar(world, x, blueprintFloor, z, ritual)) return false;
+    // The new blueprints can have a raised center. The ritual rule reads the
+    // center surface, so place its offering triangle at that same height.
+    int ground = altarGround(world, *site);
+    // Preserve the existing offering rule: three relics sit one cell above
+    // the brick triangle at this seed-rolled site, on server and clients.
+    for (int dz = -6; dz <= 3; ++dz) {
+        for (int dx = -5; dx <= 5; ++dx) {
+            if (!insideTri(dx, dz)) continue;
+            world.setBlock(x + dx, ground, z + dz, (uint8_t)BRICK, true, false);
+            for (int rise = 1; rise <= 3; ++rise)
+                world.setBlock(x + dx, ground + rise, z + dz, AIR, true, false);
+        }
+    }
     return true;
 }
 

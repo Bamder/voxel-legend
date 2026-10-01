@@ -749,6 +749,7 @@ void Renderer::render(const World& world, const Player& player, float timeOfDay,
         renderLook = look * -1.0f;
         camUp = player.right().cross(look);
     }
+    eye += ui.cameraOffset;
     gl::Viewport(0, 0, scrW, scrH);
     Mat4 proj = Mat4::perspective(cfg::FOV_Y, (float)scrW / (float)scrH, cfg::NEAR_PLANE, cfg::FAR_PLANE);
     Mat4 view = Mat4::lookAt(Vec3{ 0, 0, 0 }, renderLook, camUp);
@@ -1013,8 +1014,16 @@ void Renderer::drawWorld(const World& w, const Vec3& eye, const Mat4& vp, const 
     gl::Disable(GL_BLEND);
 
     auto drawRange = [&](bool transparent) {
+        const int eyeBlockX = (int)std::floor(eye.x / cfg::BLOCK_SCALE);
+        const int eyeBlockZ = (int)std::floor(eye.z / cfg::BLOCK_SCALE);
+        const int eyeChunkX = floorDiv(eyeBlockX, cfg::CHUNK_X);
+        const int eyeChunkZ = floorDiv(eyeBlockZ, cfg::CHUNK_Z);
         for (const auto& [key, ch] : w.chunks()) {
             if (!ch.hasMesh || !ch.uploaded) continue;
+            const int cx = chunkCX(key);
+            const int cz = chunkCZ(key);
+            if (std::max(std::abs(cx - eyeChunkX), std::abs(cz - eyeChunkZ)) > cfg::CLIENT_RENDER_RADIUS)
+                continue;
             auto it = m_chunkGL.find(key);
             if (it == m_chunkGL.end()) continue;
             const ChunkGL& cg = it->second;
@@ -3800,6 +3809,11 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         gl::Enable(GL_DEPTH_TEST);
         return;
     }
+    if (ui.clueQuizOpen) {
+        drawClueQuiz(ui);
+        gl::Enable(GL_DEPTH_TEST);
+        return;
+    }
     if (ui.clueOpen) {
         drawClue(ui);
         gl::Enable(GL_DEPTH_TEST);
@@ -3889,7 +3903,9 @@ void Renderer::drawUI(const World& w, const Player& p, float timeOfDay, UIState&
         const char* action = "拾取";
         if (ui.targetAim >= 0) action = "状态";
         else if (carrying) action = "放下";
-        else if (ui.targetDrop >= 0) action = "拾取";
+        else if (ui.targetDrop >= 0)
+            action = ui.targetDrop < (int)w.drops().size() &&
+                     w.drops()[(size_t)ui.targetDrop].item == ITEM_CLUE ? "答题" : "拾取";
         else if (ui.processLogReady) action = "加工";
         promptItems[promptCount++] = { CrosshairKeyKind::Text, "F", action };
     }
@@ -4368,6 +4384,59 @@ void Renderer::drawClue(UIState& ui) {
     ui.clueCloseHover = ui.mouseX >= bx && ui.mouseX < bx + bw &&
         ui.mouseY >= by && ui.mouseY < by + bh;
     buttonChrome(bx, by, bw, bh, ui.clueCloseHover);
+    flushUI(progUI, whiteTex);
+    centeredText("关闭", bx + bw * .5f, by + bh * .5f, .95f, 1, 1, 1, 1);
+}
+
+void Renderer::drawClueQuiz(UIState& ui) {
+    quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0, 0, 0, .68f);
+    float w = std::min(850.0f, (float)scrW - 48.0f);
+    float h = std::min(550.0f, (float)scrH - 48.0f);
+    float x = ((float)scrW - w) * .5f, y = ((float)scrH - h) * .5f;
+    quad(x, y, w, h, 0, 0, 0, 0, .065f, .10f, .115f, .98f);
+    quad(x + 10, y + 10, w - 20, h - 20, 0, 0, 0, 0, .12f, .14f, .14f, .96f);
+    flushUI(progUI, whiteTex);
+    centeredText("解读建筑线索", x + w * .5f, y + 35, 1.45f, .94f, .82f, .55f, 1);
+    ui.clueQuizOptionHover.fill(false);
+    if (ui.clueQuizStatus == 1) {
+        centeredText("学科：" + ui.clueQuizSubject, x + w * .5f, y + 82,
+                     1.0f, .58f, .83f, .88f, 1);
+        drawString(ui.clueQuizPrompt, x + 42, y + 125, 1.02f, .97f, .95f, .85f, 1);
+        for (int i = 0; i < 4; ++i) {
+            float bx = x + 42, by = y + 182 + i * 65.0f, bw = w - 84, bh = 49;
+            bool hover = !ui.clueQuizSubmitting && ui.mouseX >= bx && ui.mouseX < bx + bw &&
+                ui.mouseY >= by && ui.mouseY < by + bh;
+            ui.clueQuizOptionHover[(size_t)i] = hover;
+            buttonChrome(bx, by, bw, bh, hover, hover ? .35f : .21f,
+                         hover ? .42f : .29f, hover ? .43f : .31f);
+            flushUI(progUI, whiteTex);
+            drawString(std::string(1, (char)('A' + i)) + ".  " + ui.clueQuizOptions[(size_t)i],
+                       bx + 18, by + 14, .96f, .95f, .94f, .86f, 1);
+        }
+        if (ui.clueQuizSubmitting)
+            centeredText("正在由服务器核对答案...", x + w * .5f, y + h - 43,
+                         .85f, .78f, .83f, .84f, 1);
+        else
+            centeredText("单选一项；答错后 20 秒换题", x + w * .5f, y + h - 43,
+                         .85f, .70f, .78f, .77f, 1);
+    } else {
+        const char* message = ui.clueQuizStatus == 4 && !ui.clueQuizPrompt.empty()
+            ? ui.clueQuizPrompt.c_str() :
+            ui.clueQuizStatus == 2 ? "回答错误，线索仍留在原处" :
+            ui.clueQuizStatus == 3 ? "回答正确，线索已收入背包" :
+            "线索已被队友解开、失效，或你离它太远";
+        centeredText(message, x + w * .5f, y + 186, 1.20f, .93f, .88f, .72f, 1);
+        if (ui.clueQuizStatus == 2)
+            centeredText("约 " + std::to_string(ui.clueQuizRetrySeconds) + " 秒后再按 F，将出现另一道题",
+                         x + w * .5f, y + 244, .95f, .70f, .82f, .88f, 1);
+        if (ui.clueQuizStatus == 3)
+            centeredText("选中线索道具并右键，可查看下一目标坐标",
+                         x + w * .5f, y + 244, .95f, .70f, .82f, .88f, 1);
+    }
+    float bw = 120, bh = 40, bx = x + (w - bw) * .5f, by = y + h - 95;
+    ui.clueQuizCloseHover = ui.mouseX >= bx && ui.mouseX < bx + bw &&
+        ui.mouseY >= by && ui.mouseY < by + bh;
+    buttonChrome(bx, by, bw, bh, ui.clueQuizCloseHover);
     flushUI(progUI, whiteTex);
     centeredText("关闭", bx + bw * .5f, by + bh * .5f, .95f, 1, 1, 1, 1);
 }

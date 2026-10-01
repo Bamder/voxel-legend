@@ -13,6 +13,7 @@
 #include "../world/arcane.hpp"
 #include "../world/building_loot.hpp"
 #include "../world/clue.hpp"
+#include "../world/clue_quiz.hpp"
 #include "../world/combat.hpp"
 #include "../world/guardian_fight.hpp"
 #include "../world/guardian_fight_world.hpp"
@@ -21,9 +22,11 @@
 #include "../world/structure.hpp"
 #include "../world/world.hpp"
 #include "../world/matchmap.hpp"
+#include "../world/match_content.hpp"
 #include <filesystem>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -99,6 +102,14 @@ struct SClient {
     uint32_t id = 0;
     std::string name;
     int team = -1;
+    bool qaHost = false;
+    ClueQuizNet quizOffer;
+    uint8_t quizCorrect = 0;
+    uint32_t quizPickupSequence = 0;
+    uint32_t quizExpiresAt = 0;
+    uint32_t quizRetryAt = 0;
+    uint32_t quizAttempt = 0;
+    int lastQuizQuestion = -1;
     bool spectator = false;
     bool landed = true;
     bool deathDeploy = false;
@@ -668,12 +679,12 @@ PlayerPoseNet poseOf(const SClient& o, uint32_t serverTick) {
 
 } // namespace
 
-int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
+int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
     WSADATA w{};
     if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return 1;
 
-    FILE* log = fopen("room_server.log", "w");
-    slog(log, "room server starting");
+    FILE* log = fopen(clueQa ? "room_clue_qa.log" : "room_server.log", "w");
+    slog(log, clueQa ? "room server starting (LOCAL CLUE QA ONLY)" : "room server starting");
 
     std::vector<RoomTeamNet> teams;
     std::vector<RoomPlayerNet> roster;
@@ -718,7 +729,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
         setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        // The QA server has travel and test inventory; never expose it on the LAN.
+        addr.sin_addr.s_addr = htonl(clueQa ? INADDR_LOOPBACK : INADDR_ANY);
         addr.sin_port = htons(port);
         if (bind(listenSock, (sockaddr*)&addr, sizeof(addr)) == 0 && listen(listenSock, 8) == 0) break;
         closesocket(listenSock);
@@ -740,6 +752,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     std::vector<SClient> clients;
     std::unordered_map<int64_t, SrvChunk> srvChunks;
     uint32_t nextId = 1;
+    uint32_t nextQuizId = 1;
     int spawnSlot = 0;
     bool worldReady = false;
     bool hadClient = false;
@@ -758,13 +771,140 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
     // director. Until it does, no unbound ITEM_CLUE can advance progression.
     clue::Director clueDirector;
 
+    // TEST/DEBUG ONLY. This is used only by a loopback-bound --qa-clue server.
+    auto qaStandingSpot = [&](Vec3 goal, int startRadius, Vec3& position) {
+        const int gx = (int)std::floor(goal.x / S);
+        const int gy = (int)std::floor(goal.y / S);
+        const int gz = (int)std::floor(goal.z / S);
+        const int clearHeight = (int)std::ceil(cfg::PLAYER_HEIGHT / S) + 1;
+        for (int radius = startRadius; radius <= 10; ++radius) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (std::max(std::abs(dx), std::abs(dz)) != radius) continue;
+                    const int bx = gx + dx, bz = gz + dz;
+                    world.ensureColumn(floorDiv(bx, cfg::CHUNK_X), floorDiv(bz, cfg::CHUNK_Z));
+                    for (int dy = 0; dy <= 5; ++dy) {
+                        const int ys[] = {gy - dy, gy + dy};
+                        for (int by : ys) {
+                            if (by < 1 || by + clearHeight >= cfg::WORLD_H ||
+                                !blocksMotion(world.getBlock(bx, by - 1, bz))) continue;
+                            bool clear = true;
+                            for (int h = 0; h < clearHeight; ++h)
+                                if (blocksMotion(world.getBlock(bx, by + h, bz))) { clear = false; break; }
+                            if (!clear) continue;
+                            position = {(bx + 0.5f) * S, by * S + 0.02f, (bz + 0.5f) * S};
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
     // Building loot spawner for clues, weapons, and arcane items near buildings
     building_loot::Spawner lootSpawner(world, seed);
 
-    // Ritual altar placement: tracks which altars have been placed and team spawn info
-    bool ritualAltarsPlaced = false;
-    int ritualAltarTeamSpawns[matchmap::kCombatTeams][3] = {}; // [team][x, y, z]
-    bool ritualAltarUsedForTeam[matchmap::kCombatTeams] = {};   // whether team has an altar
+    bool populatedTeams[matchmap::kCombatTeams]{};
+    bool stonehengesPlaced = false;
+    std::array<bool, ritual::RelicCount> defeatedGuardians{};
+    auto finishGuardian = [&](int relic, int gx, int gy, int gz) {
+        if (relic < 0 || relic >= ritual::RelicCount) return;
+        world.setBlock(gx, gy, gz, AIR, false, false);
+        defeatedGuardians[(size_t)relic] = true;
+        const float scale = cfg::BLOCK_SCALE;
+        Vec3 dropPosition{(gx + 0.5f) * scale, (gy + 0.5f) * scale,
+                          (gz + 0.5f) * scale};
+        bool assigned = false;
+        for (int team = 1; team <= matchmap::kCombatTeams; ++team) {
+            clue::Target target = clueDirector.targetFor(team);
+            if (!target.active || target.destination != clue::Destination::Boss ||
+                target.rewardItem != (uint8_t)ritual::blockId(relic)) continue;
+            assigned |= clueDirector.completeBoss(world, team, (uint32_t)relic + 1,
+                                                  dropPosition) != 0;
+        }
+        // An untracked discovery still gives its Boss's relic once.
+        if (!assigned)
+            world.spawnDrop(dropPosition, (uint8_t)ritual::blockId(relic), 1, true);
+    };
+
+    auto claimClue = [&](SClient& c, uint32_t sequence, uint32_t dropId) {
+        const loot::Drop* drop = world.dropById(dropId);
+        if (!drop || drop->item != ITEM_CLUE || !clueDirector.canPickup(dropId, c.team) ||
+            !room_inventory::canPickup(c.inventory, world, dropId,
+                                       c.body.player.eye(), c.body.player.pos) ||
+            !room_inventory::pickup(c.inventory, sequence, world, dropId,
+                                    c.body.player.eye(), c.body.player.pos) ||
+            !clueDirector.claimPickup(dropId, c.team)) return false;
+        clue::Target target = clueDirector.targetFor(c.team);
+        int relic = (int)target.rewardItem - (int)ITEM_ELEM_CORE;
+        if (target.destination == clue::Destination::Boss &&
+            relic >= 0 && relic < ritual::RelicCount && defeatedGuardians[(size_t)relic])
+            clueDirector.completeBoss(world, c.team, (uint32_t)relic + 1, target.position);
+        for (SClient& teammate : clients) {
+            if (&teammate != &c && teammate.team == c.team && teammate.quizOffer.status == 1 &&
+                teammate.quizOffer.dropId == dropId) {
+                teammate.quizOffer = {};
+                ClueQuizNet resolved;
+                resolved.status = 4;
+                resolved.dropId = dropId;
+                teammate.conn.send((uint16_t)RoomMsg::ClueQuiz, encodeClueQuiz(resolved));
+            }
+            if (!teammate.known || teammate.team != c.team ||
+                inventoryHas(teammate.inventory, ITEM_CLUE)) continue;
+            room_inventory::add(teammate.inventory, ITEM_CLUE, 1);
+        }
+        return true;
+    };
+
+    auto sendQuizResult = [&](SClient& c, uint8_t status, uint32_t dropId,
+                              uint16_t retrySeconds = 0, const char* reason = nullptr) {
+        ClueQuizNet result;
+        result.status = status;
+        result.dropId = dropId;
+        result.retrySeconds = retrySeconds;
+        if (reason) result.prompt = reason;
+        c.conn.send((uint16_t)RoomMsg::ClueQuiz, encodeClueQuiz(result));
+    };
+
+    auto offerQuiz = [&](SClient& c, uint32_t dropId, uint32_t pickupSequence) {
+        if (serverTick < c.quizRetryAt) {
+            uint32_t ticks = c.quizRetryAt - serverTick;
+            sendQuizResult(c, 2, dropId,
+                           (uint16_t)((ticks + cfg::TICKS_PER_SECOND - 1) / cfg::TICKS_PER_SECOND));
+            return;
+        }
+        if (c.quizOffer.status == 1 && c.quizOffer.dropId == dropId &&
+            serverTick < c.quizExpiresAt) {
+            c.conn.send((uint16_t)RoomMsg::ClueQuiz, encodeClueQuiz(c.quizOffer));
+            return;
+        }
+        uint32_t nonce = clue_quiz::mix(seed ^ dropId ^ c.id ^ serverTick ^ ++c.quizAttempt);
+        size_t index = nonce % clue_quiz::count();
+        if ((int)index == c.lastQuizQuestion) index = (index + 1) % clue_quiz::count();
+        c.lastQuizQuestion = (int)index;
+        const clue_quiz::Question& question = clue_quiz::at(index);
+        ClueQuizNet offer;
+        offer.status = 1;
+        if (!++nextQuizId) ++nextQuizId;
+        offer.challengeId = nextQuizId;
+        offer.dropId = dropId;
+        offer.subject = question.subject;
+        offer.prompt = question.prompt;
+        std::array<uint8_t, 4> order{0, 1, 2, 3};
+        for (int i = 3; i > 0; --i) {
+            nonce = clue_quiz::mix(nonce + (uint32_t)i + 0x9e3779b9u);
+            std::swap(order[(size_t)i], order[(size_t)(nonce % (uint32_t)(i + 1))]);
+        }
+        for (int i = 0; i < 4; ++i) {
+            offer.options[(size_t)i] = question.options[(size_t)order[(size_t)i]];
+            if (order[(size_t)i] == question.correct) c.quizCorrect = (uint8_t)i;
+        }
+        c.quizOffer = std::move(offer);
+        c.quizPickupSequence = pickupSequence;
+        c.quizExpiresAt = serverTick + 180u * cfg::TICKS_PER_SECOND;
+        c.conn.send((uint16_t)RoomMsg::ClueQuiz, encodeClueQuiz(c.quizOffer));
+    };
 
     auto broadcastDeploy = [&]() {
         for (SClient& c : clients) {
@@ -829,11 +969,19 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         if (seat.used || seat.player.name != name) continue;
                         seat.used = true;
                         c.team = seat.player.team;
+                        c.qaHost = seat.player.host;
                         break;
                     }
                     c.spectator = (c.team == 0);
                     if (!c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams) {
                         room_inventory::add(c.inventory, ITEM_GUIDE_BOOK, 1);
+                        if (clueQa && c.qaHost) {
+                            room_inventory::add(c.inventory, HAND_PICK, 1);
+                            room_inventory::add(c.inventory, HAND_AXE, 1);
+                            room_inventory::add(c.inventory, ITEM_ARCANE_FIREBALL, 8);
+                            room_inventory::add(c.inventory, ITEM_ARCANE_FREEZE, 8);
+                            room_inventory::add(c.inventory, ITEM_ARCANE_HEAL, 8);
+                        }
                         if (clueDirector.targetFor(c.team).active)
                             room_inventory::add(c.inventory, ITEM_CLUE, 1);
                     }
@@ -868,236 +1016,36 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     room_body::spawn(c.body, {c.x, c.y, c.z});
                     c.body.player.yaw = c.yaw;
                     c.body.player.pitch = c.pitch;
-                    // DEBUG: log spawn point to file
-                    snprintf(line, sizeof(line), "[DEBUG] Player %s spawned at team=%d, bx=%d, by=%d, bz=%d", c.name.c_str(), c.team, bx, by, bz);
-                    slog(log, line);
-                    // Place ritual altars near team spawn points (only once, when first player joins)
-                    if (!ritualAltarsPlaced && !c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams) {
-                        snprintf(line, sizeof(line), "[DEBUG] Entering altar placement for team=%d", c.team);
-                        slog(log, line);
-                        // Record this team's spawn point
-                        ritualAltarTeamSpawns[c.team - 1][0] = bx;
-                        ritualAltarTeamSpawns[c.team - 1][1] = by;
-                        ritualAltarTeamSpawns[c.team - 1][2] = bz;
-                        ritualAltarUsedForTeam[c.team - 1] = true;
-                        // Place altars when first player joins
-                        // Count active teams
-                        int activeTeams = 0;
-                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
-                            if (ritualAltarUsedForTeam[i]) activeTeams++;
-                        }
-                        // Use a simple seeded RNG based on server seed
-                        uint32_t rngSeed = seed ^ (uint32_t)(c.team * 7919);
-                        auto rng = [&]() {
-                            rngSeed = rngSeed * 1664525u + 1013904223u;
-                            return rngSeed >> 16;
-                        };
-                        // Assign altars to all active teams (one per team)
-                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
-                            if (!ritualAltarUsedForTeam[i]) continue;
-                            int altarIndex = i % structure::kRitualAltarCount;
-                            int wx = ritualAltarTeamSpawns[i][0];
-                            int wz = ritualAltarTeamSpawns[i][2];
-                            // Place altar 3-5 blocks away from spawn point
-                            int offsetX = (rng() % 5) - 2;
-                            int offsetZ = (rng() % 5) - 2;
-                            int finalX = wx + offsetX, finalZ = wz + offsetZ;
-                            int wy = 0;
-                            std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIndex)) + ".vlstruct";
-                            bool fileExists = std::filesystem::exists(altarPath);
-                            structure::paintRitualAltar(world, finalX, wy, finalZ, altarIndex);
-                            snprintf(line, sizeof(line), "[DEBUG] Placing altar %d (%s) for team %d at wx=%d, wy=%d, wz=%d fileExists=%d",
-                                altarIndex, structure::ritualAltarName(altarIndex), i + 1, finalX, wy, finalZ, fileExists ? 1 : 0);
-                            slog(log, line);
-                        }
-                        // Place remaining random altars to fill up to kRitualAltarCount (6)
-                        for (int extra = activeTeams; extra < structure::kRitualAltarCount; extra++) {
-                            // Pick a random team zone for the extra altar
-                            int zoneIdx = rng() % matchmap::kCombatTeams;
-                            matchmap::Zone zone = matchmap::combatZone(zoneIdx);
-                            int wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                            int wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
-                            int wy = 0;
-                            // Offset from zone center
-                            int offsetX = (rng() % 8) - 4;
-                            int offsetZ = (rng() % 8) - 4;
-                            int finalX = wx + offsetX, finalZ = wz + offsetZ;
-                            int altarIdx = extra % structure::kRitualAltarCount;
-                            std::string altarPath = "assets/structures/" + std::string(structure::ritualAltarName(altarIdx)) + ".vlstruct";
-                            bool fileExists = std::filesystem::exists(altarPath);
-                            structure::paintRitualAltar(world, finalX, wy, finalZ, altarIdx);
-                            snprintf(line, sizeof(line), "[DEBUG] Placing extra altar %d (%s) at wx=%d, wy=%d, wz=%d fileExists=%d",
-                                altarIdx, structure::ritualAltarName(altarIdx), finalX, wy, finalZ, fileExists ? 1 : 0);
-                            slog(log, line);
-                        }
-                        slog(log, "[DEBUG] All ritual altars placed!");
-
-                        // Place 3 stonehenge structures
-                        // Stonehenge is ~41 blocks diameter, so halfSize = 21
-                        // Find the first active team for stonehenge 0 placement
-                        int firstActiveTeam = 0;
-                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
-                            if (ritualAltarUsedForTeam[i]) { firstActiveTeam = i; break; }
-                        }
-                        for (int shIdx = 0; shIdx < 3; shIdx++) {
-                            int wx, wz;
+                    if (!c.spectator && c.team >= 1 && c.team <= matchmap::kCombatTeams &&
+                        !populatedTeams[c.team - 1]) {
+                        populatedTeams[c.team - 1] = match_content::populateTeam(
+                            world, lootSpawner, clueDirector, seed, c.team);
+                        if (!populatedTeams[c.team - 1])
+                            slog(log, "match content placement failed");
+                    }
+                    // Stonehenge is shared world content; the team's rooms,
+                    // clues and ritual sites above are populated independently.
+                    if (!stonehengesPlaced && !c.spectator &&
+                        c.team >= 1 && c.team <= matchmap::kCombatTeams) {
+                        for (int shIdx = 0; shIdx < 3; ++shIdx) {
+                            int wx = bx, wz = bz;
                             if (shIdx == 0) {
-                                // First stonehenge: near first active team's spawn point
-                                wx = ritualAltarTeamSpawns[firstActiveTeam][0];
-                                wz = ritualAltarTeamSpawns[firstActiveTeam][2];
-                                // Offset 60-80 blocks from spawn, towards north-east to avoid conflicts
                                 wx += 70;
                                 wz -= 70;
-                            } else if (shIdx == 1) {
-                                // Second stonehenge: random zone, far from spawns
-                                int zoneIdx = (shIdx * 3) % matchmap::kCombatTeams;
-                                matchmap::Zone zone = matchmap::combatZone(zoneIdx);
-                                wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                                wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
-                                // Offset to corner of zone
-                                wx -= 50;
-                                wz += 50;
                             } else {
-                                // Third stonehenge: another random zone
-                                int zoneIdx = (shIdx * 7) % matchmap::kCombatTeams;
+                                int zoneIdx = (shIdx == 1 ? 3 : 14) % matchmap::kCombatTeams;
                                 matchmap::Zone zone = matchmap::combatZone(zoneIdx);
-                                wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                                wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
-                                // Offset to opposite corner
-                                wx += 50;
-                                wz += 50;
+                                wx = zone.cx0 * cfg::CHUNK_X +
+                                     (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
+                                wz = zone.cz0 * cfg::CHUNK_Z +
+                                     (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                                if (shIdx == 1) { wx -= 50; wz += 50; }
+                                else { wx += 50; wz += 50; }
                             }
                             int wy = 0;
-                            std::string stonehengePath = "assets/structures/" + std::string(structure::stonehengeName(0)) + ".vlstruct";
-                            bool fileExists = std::filesystem::exists(stonehengePath);
                             structure::paintStonehenge(world, wx, wy, wz, 0);
-                            snprintf(line, sizeof(line), "[DEBUG] Placing stonehenge %d at wx=%d, wy=%d, wz=%d fileExists=%d",
-                                shIdx, wx, wy, wz, fileExists ? 1 : 0);
-                            slog(log, line);
                         }
-                        slog(log, "[DEBUG] All stonehenge structures placed!");
-
-                        // Place room buildings near team spawn points (3 types: props, weapon, clue)
-                        // Record altar positions for spacing
-                        struct PlacedBuilding {
-                            int x, z;
-                            int halfSize;
-                        };
-                        std::vector<PlacedBuilding> placedBuildings;
-
-                        // First pass: record altar positions
-                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
-                            if (!ritualAltarUsedForTeam[i]) continue;
-                            int wx = ritualAltarTeamSpawns[i][0];
-                            int wz = ritualAltarTeamSpawns[i][2];
-                            // Estimate altar half-size (ritual altars are roughly 20 blocks diameter)
-                            placedBuildings.push_back({wx, wz, 12});
-                        }
-                        // Extra altar positions
-                        for (int extra = activeTeams; extra < structure::kRitualAltarCount; extra++) {
-                            int zoneIdx = extra % matchmap::kCombatTeams;
-                            matchmap::Zone zone = matchmap::combatZone(zoneIdx);
-                            int wx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                            int wz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
-                            placedBuildings.push_back({wx, wz, 12});
-                        }
-
-                        // Place 3 room buildings per team at different positions
-                        for (int i = 0; i < matchmap::kCombatTeams; i++) {
-                            if (!ritualAltarUsedForTeam[i]) continue;
-                            int spawnX = ritualAltarTeamSpawns[i][0];
-                            int spawnZ = ritualAltarTeamSpawns[i][2];
-                            int teamId = i + 1;
-
-                            // Props east, weapon south, clue west. The houses are 25–37 blocks
-                            // across; an 8-block offset planted them inside each other and
-                            // inside the ~40-block altar. 44 stays inside the 128-block zone
-                            // and leaves a gap around that altar.
-                            const int roomOffsets[3][2] = {
-                                {44, 0},
-                                {0, 44},
-                                {-44, 0}
-                            };
-
-                            for (int roomType = 0; roomType < 3; roomType++) {
-                                int offsetX = roomOffsets[roomType][0];
-                                int offsetZ = roomOffsets[roomType][1];
-                                int finalX = spawnX + offsetX;
-                                int finalZ = spawnZ + offsetZ;
-                                int wy = 0;
-                                structure::paintRoomBuilding(world, finalX, wy, finalZ, roomType);
-                                snprintf(line, sizeof(line), "[DEBUG] Placing room %d (%s) for team %d at wx=%d, wy=%d, wz=%d",
-                                    roomType, structure::roomBuildingName(roomType), teamId, finalX, wy, finalZ);
-                                slog(log, line);
-
-                                // Spawn clues, weapons, and arcane items near each room building
-                                // Use a seeded RNG based on building position
-                                uint32_t buildingSeed = seed ^ (uint32_t)(teamId * 1000 + roomType * 100 + finalX * 7 + finalZ * 13);
-                                std::mt19937 buildingRng(buildingSeed);
-
-                                // Spawn more loot around each building (8 items per building)
-                                // Weapons, clues, and arcane items are represented as glowing blocks/items in the game
-                                for (int lootIdx = 0; lootIdx < 8; lootIdx++) {
-                                    // Generate random offset around the building (wider spread)
-                                    int lootOffsetX = (int)(buildingRng() % 9) - 4;  // -4 to +4
-                                    int lootOffsetZ = (int)(buildingRng() % 9) - 4;  // -4 to +4
-                                    float lootX = (float)(finalX + lootOffsetX + 2) * cfg::BLOCK_SCALE;
-                                    float lootY = (float)(wy + 2) * cfg::BLOCK_SCALE;
-                                    float lootZ = (float)(finalZ + lootOffsetZ + 2) * cfg::BLOCK_SCALE;
-                                    Vec3 lootPos = {lootX, lootY, lootZ};
-
-                                    // Different items have different visual appearances:
-                                    // - Weapons (ITEM_ELEM_CORE, ITEM_PRIM_FIRE, etc.): Purple/gold glowing blocks
-                                    // - Clues (ITEM_CLUE): Special blinking item
-                                    // - Arcane (ITEM_ARCANE_FIREBALL, etc.): Fire/green glowing blocks
-                                    if (roomType == 0 || roomType == 1) {
-                                        // Props/Weapon rooms: more weapons
-                                        if (lootIdx < 3) {
-                                            // 3 weapons per props/weapon room
-                                            static const uint8_t weaponItems[] = {ITEM_ELEM_CORE, ITEM_PRIM_FIRE, ITEM_JUDGE_SCALE};
-                                            lootSpawner.spawnItemAt(lootPos, {weaponItems[lootIdx % 3], 1});
-                                        } else if (lootIdx < 5) {
-                                            // 2 arcane items
-                                            static const uint8_t arcaneItems[] = {ITEM_ARCANE_FIREBALL, ITEM_ARCANE_HEAL};
-                                            lootSpawner.spawnItemAt(lootPos, {arcaneItems[(lootIdx - 3) % 2], 1});
-                                        } else {
-                                            // 3 clues per props/weapon room
-                                            clue::Link link;
-                                            link.team = (uint8_t)teamId;
-                                            link.stage = clueDirector.currentStage(teamId) + 1;
-                                            link.target = lootPos;
-                                            link.destination = clue::Destination::Clue;
-                                            link.rewardItem = ITEM_GOLD_CROWN;
-                                            lootSpawner.spawnClueAt(lootPos, clueDirector, link);
-                                        }
-                                    } else {
-                                        // Clue room: more clues
-                                        if (lootIdx < 2) {
-                                            // 2 weapons per clue room
-                                            static const uint8_t weaponItems[] = {ITEM_ELEM_CORE, ITEM_PRIM_FIRE};
-                                            lootSpawner.spawnItemAt(lootPos, {weaponItems[lootIdx % 2], 1});
-                                        } else if (lootIdx < 4) {
-                                            // 2 arcane items
-                                            static const uint8_t arcaneItems[] = {ITEM_ARCANE_FIREBALL, ITEM_ARCANE_HEAL, ITEM_ARCANE_FREEZE};
-                                            lootSpawner.spawnItemAt(lootPos, {arcaneItems[lootIdx % 3], 1});
-                                        } else {
-                                            // 4 clues per clue room
-                                            clue::Link link;
-                                            link.team = (uint8_t)teamId;
-                                            link.stage = clueDirector.currentStage(teamId) + 1;
-                                            link.target = lootPos;
-                                            link.destination = clue::Destination::Clue;
-                                            link.rewardItem = ITEM_ANCIENT_TOTEM;
-                                            lootSpawner.spawnClueAt(lootPos, clueDirector, link);
-                                        }
-                                    }
-                                }
-                                snprintf(line, sizeof(line), "[DEBUG] Spawned 8 loot items near room %d for team %d (weapons=purple/gold, arcane=fire/green, clues=blinking)", roomType, teamId);
-                                slog(log, line);
-                            }
-                        }
-                        slog(log, "[DEBUG] All room buildings placed with loot!");
-                        ritualAltarsPlaced = true;
+                        stonehengesPlaced = true;
                     }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::PlayInput) {
                     PlayInputNet in;
@@ -1119,15 +1067,20 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                     if (in.pickupSequence && !c.spectator && c.landed && !c.body.player.dead) {
                         const loot::Drop* pendingDrop = world.dropById(in.pickupDrop);
                         bool clueDrop = pendingDrop && pendingDrop->item == ITEM_CLUE;
-                        bool routeAllows = !clueDrop || clueDirector.canPickup(in.pickupDrop, c.team);
-                        if (routeAllows && room_inventory::pickup(c.inventory, in.pickupSequence, world,
-                                in.pickupDrop, c.body.player.eye(), c.body.player.pos) && clueDrop &&
-                            clueDirector.claimPickup(in.pickupDrop, c.team)) {
-                            for (SClient& teammate : clients) {
-                                if (!teammate.known || teammate.team != c.team ||
-                                    inventoryHas(teammate.inventory, ITEM_CLUE)) continue;
-                                room_inventory::add(teammate.inventory, ITEM_CLUE, 1);
-                            }
+                        if (clueDrop) {
+                            if (!clueDirector.canPickup(in.pickupDrop, c.team))
+                                sendQuizResult(c, 4, in.pickupDrop, 0,
+                                               "该线索不属于当前阵营或阶段");
+                            else if (!room_inventory::canPickup(c.inventory, world, in.pickupDrop,
+                                                                  c.body.player.eye(), c.body.player.pos))
+                                sendQuizResult(c, 4, in.pickupDrop, 0,
+                                               "请靠近线索并留出背包空位");
+                            else
+                                offerQuiz(c, in.pickupDrop, in.pickupSequence);
+                        } else {
+                            c.quizOffer = {};
+                            room_inventory::pickup(c.inventory, in.pickupSequence, world,
+                                                   in.pickupDrop, c.body.player.eye(), c.body.player.pos);
                         }
                     }
                     c.heldL = room_inventory::held(c.inventory, c.body.player.vitals, c.selectedLeft);
@@ -1286,13 +1239,62 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                         c.seen.erase(chunkKey(ask.cx, ask.cy, ask.cz));
                         queueBase(c, columnKey(ask.cx, ask.cz), true);
                     }
+                } else if (c.sentWelcome && type == (uint16_t)RoomMsg::ClueAnswer) {
+                    uint32_t challengeId = 0;
+                    uint8_t option = 0;
+                    if (!decodeClueAnswer(p, end, challengeId, option) ||
+                        c.quizOffer.status != 1 || c.quizOffer.challengeId != challengeId) continue;
+                    const uint32_t dropId = c.quizOffer.dropId;
+                    if (serverTick >= c.quizExpiresAt || c.spectator || !c.landed ||
+                        c.body.player.dead || !clueDirector.canPickup(dropId, c.team) ||
+                        !room_inventory::canPickup(c.inventory, world, dropId,
+                                                   c.body.player.eye(), c.body.player.pos)) {
+                        c.quizOffer = {};
+                        sendQuizResult(c, 4, dropId);
+                    } else if (option != c.quizCorrect) {
+                        c.quizOffer = {};
+                        c.quizRetryAt = serverTick + 20u * cfg::TICKS_PER_SECOND;
+                        sendQuizResult(c, 2, dropId, 20);
+                    } else {
+                        bool awarded = claimClue(c, c.quizPickupSequence, dropId);
+                        c.quizOffer = {};
+                        sendQuizResult(c, awarded ? 3 : 4, dropId);
+                    }
                 } else if (c.sentWelcome && type == (uint16_t)RoomMsg::Deploy) {
                     uint8_t action = 0;
                     int bx = 0, bz = 0;
                     if (!decodeDeploy(p, end, action, bx, bz)) continue;
                     if (c.spectator || c.team < 1 || c.team > matchmap::kCombatTeams) continue;
+                    if (action == 3) {
+                        if (!clueQa || !c.qaHost || !c.landed || c.fade > 0.0f ||
+                            c.body.player.dead) continue;
+                        clue::Target target = clueDirector.targetFor(c.team);
+                        Vec3 goal{};
+                        bool found = target.active;
+                        if (found) goal = target.position;
+                        else for (const loot::Drop& drop : world.drops()) {
+                            if (drop.item != ITEM_CLUE || !clueDirector.canPickup(drop.netId, c.team))
+                                continue;
+                            goal = drop.pos;
+                            found = true;
+                            break;
+                        }
+                        Vec3 standing{};
+                        int startRadius = target.active && target.destination == clue::Destination::Boss ? 6 : 2;
+                        if (!found || !qaStandingSpot(goal, startRadius, standing)) continue;
+                        c.body.player.pos = standing;
+                        c.body.player.vel = {};
+                        c.body.player.onGround = false;
+                        c.body.input = {};
+                        c.body.hasInput = false;
+                        c.x = standing.x; c.y = standing.y; c.z = standing.z;
+                        c.vx = c.vz = 0.0f;
+                        slog(log, "QA travel to next clue objective");
+                        continue;
+                    }
                     if (action == 2) {
                         if (!c.body.player.dead) continue; // death is never a client declaration
+                        c.quizOffer = {};
                         c.landed = false;
                         c.deathDeploy = true;
                         c.pin = false;
@@ -1484,11 +1486,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                     int dmg = structure::guardianStrikeHurt(equipped, relic);
                                     guardian_fight::noteDamage(relic, c.id, dmg);
                                     if (structure::damageGuardian(world, relic, dmg, gx, gy, gz)) {
-                                        world.setBlock(gx, gy, gz, AIR, false, false);
-                                        uint8_t drop = (uint8_t)ritual::blockId(relic);
-                                        const float Sdrop = cfg::BLOCK_SCALE;
-                                        world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
-                                                          (gz + 0.5f) * Sdrop }, drop, 1, true);
+                                        finishGuardian(relic, gx, gy, gz);
                                     }
                                 }
                             }
@@ -1521,11 +1519,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                                 int dmg = structure::guardianStrikeHurt(equipped, relic);
                                 guardian_fight::noteDamage(relic, c.id, dmg);
                                 if (structure::damageGuardian(world, relic, dmg, gx, gy, gz)) {
-                                    world.setBlock(gx, gy, gz, AIR, false, false);
-                                    uint8_t drop = (uint8_t)ritual::blockId(relic);
-                                    const float Sdrop = cfg::BLOCK_SCALE;
-                                    world.spawnDrop({ (gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
-                                                      (gz + 0.5f) * Sdrop }, drop, 1, true);
+                                    finishGuardian(relic, gx, gy, gz);
                                 }
                             }
                         }
@@ -1660,11 +1654,7 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8) {
                             bool killed = structure::damageGuardian(world, guardian.relic, amount, gx, gy, gz);
                             guardian_fight::noteDamage(guardian.relic, projectile.owner, dealt);
                             if (killed) {
-                                world.setBlock(gx, gy, gz, AIR, false, false);
-                                uint8_t drop = (uint8_t)ritual::blockId(guardian.relic);
-                                const float Sdrop = cfg::BLOCK_SCALE;
-                                world.spawnDrop({(gx + 0.5f) * Sdrop, (gy + 0.5f) * Sdrop,
-                                                 (gz + 0.5f) * Sdrop}, drop, 1, true);
+                                finishGuardian(guardian.relic, gx, gy, gz);
                             }
                             CombatEventNet event;
                             event.serial = nextCombatSerial++;

@@ -26,6 +26,7 @@
 #include "plugin/plugin.hpp"
 #include "net/room_net.hpp"
 #include "net/room_body.hpp"
+#include "net/room_inventory.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -1329,6 +1330,7 @@ int main(int argc, char** argv) {
     int selfTest = -1;    // -1 = disabled
     bool seedData = false;
     bool roomServer = false;
+    bool clueQa = false;
     bool editStructure = false;
     std::string editStructurePath;
     uint16_t roomServerPort = kRoomPortDefault;
@@ -1345,6 +1347,7 @@ int main(int argc, char** argv) {
         else if (a == "--withertest") { witherTest = true; }
         else if (a == "--watertest") { waterTest = true; }
         else if (a == "--room-server") { roomServer = true; }
+        else if (a == "--qa-clue") { clueQa = true; }
         else if (a == "--edit-structure") {
             editStructure = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') editStructurePath = argv[++i];
@@ -1362,6 +1365,7 @@ int main(int argc, char** argv) {
             printf("  --no-save      disable save/load\n");
             printf("  --seed-data    write missing assets/data files and exit\n");
             printf("  --room-server  headless room server (started by the host)\n");
+            printf("  --qa-clue     local in-game clue/Boss test; F8 travels to the next objective\n");
             printf("  --port N       room server port (default 35535)\n");
             printf("  --handoff PATH lobby roster for --room-server\n");
             printf("  --edit-structure [file]  fly-build a structure file\n");
@@ -1369,7 +1373,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (roomServer) return runRoomServer(roomServerPort, roomHandoff);
+    if (roomServer) return runRoomServer(roomServerPort, roomHandoff, clueQa);
     if (seedData) {
         printf("data pack ready under assets/data/\n");
         return 0;
@@ -1498,6 +1502,8 @@ int main(int argc, char** argv) {
     float damageFlash = 0.0f;
     uint8_t roomPlayerStatus = 0;
     ClueTargetNet roomClueTarget{};
+    ClueQuizNet clueQuiz{};
+    bool clueQuizSubmitting = false;
     std::vector<ArcaneProjectileView> arcaneProjectiles;
     std::vector<ArcaneBurstView> arcaneBursts;
     struct ChunkNetState {
@@ -1515,6 +1521,7 @@ int main(int argc, char** argv) {
     std::chrono::steady_clock::time_point roomTickAt{};
     NetSample selfShown{};
     bool selfShownOk = false;
+    Vec3 roomCameraOffset{ 0, 0, 0 };
     bool spectating = false;
     bool deploying = false;
     bool deployDeath = false;
@@ -1546,7 +1553,7 @@ int main(int argc, char** argv) {
     float tickSpeed = 1.0f;
     float gameTickAccum = 0.0f;
     uint64_t gameTick = 0;
-    bool prevF3 = false, prevF = false, prevF5 = false, prevE = false, prevEsc = false;
+    bool prevF3 = false, prevF = false, prevF5 = false, prevF8 = false, prevE = false, prevEsc = false;
     bool prevLmb = false, prevRmb = false;
     bool firstLook = true;
     DragState drag;
@@ -1605,6 +1612,8 @@ int main(int argc, char** argv) {
         roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
         roomClueTarget = {};
+        clueQuiz = {};
+        clueQuizSubmitting = false;
         arcaneProjectiles.clear(); arcaneBursts.clear();
         lobbyHost.close();
         lobbyGuest.close();
@@ -1623,6 +1632,7 @@ int main(int argc, char** argv) {
         roomTick = 0;
         roomTickInit = false;
         selfShownOk = false;
+        roomCameraOffset = { 0, 0, 0 };
         chunkNet.clear();
         resyncAsk.clear();
         loadSeedApplied = false;
@@ -1777,6 +1787,8 @@ int main(int argc, char** argv) {
         storyOpen = false;
         guideOpen = false;
         clueOpen = false;
+        clueQuiz = {};
+        clueQuizSubmitting = false;
         guidePage = 0;
         ui.noteOpen = false;
         ui.storyOpen = false;
@@ -2005,6 +2017,9 @@ int main(int argc, char** argv) {
     auto openDeploy = [&](bool death) {
         int team = gameClient.team();
         if (spectating || team < 1 || team > matchmap::kCombatTeams) return;
+        clueOpen = false;
+        clueQuiz = {};
+        clueQuizSubmitting = false;
         matchmap::Zone zone = matchmap::combatZone(team - 1);
         deployOx = zone.cx0 * cfg::CHUNK_X;
         deployOz = zone.cz0 * cfg::CHUNK_Z;
@@ -2030,6 +2045,8 @@ int main(int argc, char** argv) {
         roomGuardianRelic = 255;
         roomCombatAck = roomArcaneAck = 0; hitMarker = damageFlash = 0; roomPlayerStatus = 0;
         roomClueTarget = {};
+        clueQuiz = {};
+        clueQuizSubmitting = false;
         arcaneProjectiles.clear(); arcaneBursts.clear();
         int team = gameClient.team();
         for (RoomPlayerView& rp : roomPlayers)
@@ -2051,6 +2068,7 @@ int main(int argc, char** argv) {
         roomTick = 0;
         roomTickInit = false;
         selfShownOk = false;
+        roomCameraOffset = { 0, 0, 0 };
         player.privilegeMode = false;
         player.flying = spectating;
         player.noclip = spectating;
@@ -2091,7 +2109,7 @@ int main(int argc, char** argv) {
         lobbyHost.sendMatchStart();
         lobbyHost.flushOut(400);
         lobbyHost.close();
-        if (!spawnRoomServer((uint16_t)roomPort, path, roomProc, err)) {
+        if (!spawnRoomServer((uint16_t)roomPort, path, roomProc, err, clueQa)) {
             ui.menuMessage = err.empty() ? "无法启动服务器进程" : err;
             std::string reopen;
             if (!lobbyHost.open((uint16_t)roomPort, reopen))
@@ -2204,13 +2222,31 @@ int main(int argc, char** argv) {
                 ui.menuMessage = "与服务器断开";
                 return;
             }
+            for (ClueQuizNet& message : gameClient.takeClueQuizzes()) {
+                clueQuiz = std::move(message);
+                clueQuizSubmitting = false;
+                clueOpen = true;
+                guideOpen = false;
+                inventoryOpen = false;
+                roomMovement = 0;
+            }
             for (PlayDeltaNet& d : gameClient.takeDeltas()) {
                 if (!spectating && !structureEdit) {
                     player.vitals = d.body.vitals;
                     player.fatigue = d.body.fatigue;
                     player.dead = vitals::isDead(player.vitals);
                     if (!deploying && !storyOpen && (d.body.flags & 1)) {
-                        player.pos = {d.body.x, d.body.y, d.body.z};
+                        Vec3 serverPos{d.body.x, d.body.y, d.body.z};
+                        // Keep the rendered camera continuous across the
+                        // authoritative correction. The actual player position
+                        // remains server-authoritative for physics, raycasts,
+                        // and outgoing input.
+                        Vec3 renderedPos = player.pos + roomCameraOffset;
+                        roomCameraOffset = renderedPos - serverPos;
+                        float err2 = roomCameraOffset.lengthSq();
+                        if (err2 > 1.5f * 1.5f)
+                            roomCameraOffset = roomCameraOffset * (1.5f / std::sqrt(err2));
+                        player.pos = serverPos;
                         player.vel = {d.body.vx, d.body.vy, d.body.vz};
                         player.onGround = (d.body.flags & 2) != 0;
                         player.inWater = (d.body.flags & 4) != 0;
@@ -2940,6 +2976,11 @@ int main(int argc, char** argv) {
             saveCurrentStructure();
         if (spectating) ui.camMode = 0;
         prevF5 = f5;
+        bool f8 = keyDown(VK_F8);
+        if (clueQa && playing && roomSession && !paused && !deploying && !clueOpen && !spectating &&
+            !player.dead && f8 && !prevF8)
+            gameClient.sendDeploy(3, 0, 0);
+        prevF8 = f8;
         bool e = keyDown('E');
         if (playing && e && !prevE && !spectating && !deploying && !guideOpen && !clueOpen) {
             if (structureEdit) {
@@ -3012,6 +3053,8 @@ int main(int argc, char** argv) {
             }
             else if (clueOpen) {
                 clueOpen = false;
+                clueQuiz = {};
+                clueQuizSubmitting = false;
                 firstLook = true;
             }
             else if (targetPanel >= 0) {
@@ -3339,6 +3382,12 @@ int main(int argc, char** argv) {
         ui.targetPhys = hitOk ? physHit : -1;
         ui.targetDrop = (dropHit >= 0 && !inventoryOpen && !paused && !guideOpen && !clueOpen &&
                          playing && !spectating) ? dropHit : -1;
+        // Small rotating item meshes are hard to hit precisely with the
+        // crosshair. In a room, F may also pick a nearby visible floor drop;
+        // the dedicated server validates the same ID again before transfer.
+        if (roomSession && ui.targetDrop < 0 && playing && !spectating && !player.dead &&
+            !inventoryOpen && !paused && !guideOpen && !clueOpen && !structureEdit)
+            ui.targetDrop = room_inventory::nearbyDrop(world, player.eye(), player.pos);
         ui.processLogReady = false;
         if (hitOk && physHit < 0 && !player.dead && carry.empty() && lookLocked &&
             !inventoryOpen && !paused && !guideOpen && !clueOpen && playing && !spectating &&
@@ -3398,10 +3447,12 @@ int main(int argc, char** argv) {
                         guidePage = 0;
                         guideOpen = true;
                         clueOpen = false;
+                        clueQuiz = {};
                         roomMovement = 0;
                         in = InputState{};
                     } else if (used == ITEM_CLUE) {
                         clueOpen = true;
+                        clueQuiz = {};
                         guideOpen = false;
                         roomMovement = 0;
                         in = InputState{};
@@ -4001,9 +4052,21 @@ int main(int argc, char** argv) {
                     else if (ui.guideCloseHover) { guideOpen = false; firstLook = true; }
                 }
             } else if (clueOpen) {
-                if (lmb && !prevLmb && ui.clueCloseHover) {
-                    clueOpen = false;
-                    firstLook = true;
+                if (lmb && !prevLmb) {
+                    if (clueQuiz.status == 1 && !clueQuizSubmitting) {
+                        for (int option = 0; option < 4; ++option) {
+                            if (!ui.clueQuizOptionHover[(size_t)option]) continue;
+                            gameClient.sendClueAnswer(clueQuiz.challengeId, (uint8_t)option);
+                            clueQuizSubmitting = true;
+                            break;
+                        }
+                    }
+                    if (clueQuiz.status ? ui.clueQuizCloseHover : ui.clueCloseHover) {
+                        clueOpen = false;
+                        clueQuiz = {};
+                        clueQuizSubmitting = false;
+                        firstLook = true;
+                    }
                 }
             } else if (spectating) {
                 inventoryOpen = false;
@@ -4454,7 +4517,11 @@ int main(int argc, char** argv) {
             }
             if (sub == cfg::MAX_SUBSTEPS) accumulator = 0.0f;
 
-            world.update(player.pos, 16);
+            int meshBudget = cfg::CLIENT_MESH_BUDGET;
+            if (dt > 0.030f) meshBudget = 1;
+            else if (dt > 0.022f) meshBudget = 2;
+            if (roomSession && meshBudget > 2) meshBudget = 2;
+            world.update(player.pos, meshBudget);
             if (deploying && deploySpan > 0) {
                 const float S = cfg::BLOCK_SCALE;
                 Vec3 zone{
@@ -4639,7 +4706,14 @@ int main(int argc, char** argv) {
         ui.guideLineCount = guide::pageLineCount(guidePage);
         for (int i = 0; i < 7; ++i)
             ui.guideLines[i] = i < ui.guideLineCount ? guide::pageLine(guidePage, i) : "";
-        ui.clueOpen = clueOpen && playing;
+        ui.clueOpen = clueOpen && playing && clueQuiz.status == 0;
+        ui.clueQuizOpen = clueOpen && playing && clueQuiz.status != 0;
+        ui.clueQuizStatus = clueQuiz.status;
+        ui.clueQuizRetrySeconds = clueQuiz.retrySeconds;
+        ui.clueQuizSubmitting = clueQuizSubmitting;
+        ui.clueQuizSubject = clueQuiz.subject;
+        ui.clueQuizPrompt = clueQuiz.prompt;
+        ui.clueQuizOptions = clueQuiz.options;
         ui.clueTargetActive = roomClueTarget.active;
         ui.clueStage = roomClueTarget.stage;
         ui.clueDestination = roomClueTarget.active
@@ -4707,6 +4781,14 @@ int main(int argc, char** argv) {
         else ui.held.clear();
         ui.fps = fps;
         ui.loadedChunks = world.loadedChunks();
+        if (roomSession) {
+            float k = 1.0f - std::exp(-dt * 18.0f);
+            roomCameraOffset = roomCameraOffset * (1.0f - k);
+            if (roomCameraOffset.lengthSq() < 1.0e-5f) roomCameraOffset = { 0, 0, 0 };
+        } else {
+            roomCameraOffset = { 0, 0, 0 };
+        }
+        ui.cameraOffset = roomCameraOffset;
         ui.timeOfDay = timeOfDay;
         ui.playerPos = player.pos;
         ui.playerVel = player.vel;

@@ -3070,7 +3070,10 @@ void World::updateDrops(float dt) {
     for (size_t i = 0; i < m_drops.size();) {
         loot::Drop& d = m_drops[i];
         d.age += dt;
-        if (d.age > cfg::DROP_LIFETIME || d.pos.y < -12.0f || d.item == AIR || d.count == 0) {
+        // Clues are progression-critical and may be placed long before a
+        // player reaches their building. Ordinary dropped items still expire.
+        if ((d.item != ITEM_CLUE && d.age > cfg::DROP_LIFETIME) ||
+            d.pos.y < -12.0f || d.item == AIR || d.count == 0) {
             m_drops[i] = std::move(m_drops.back());
             m_drops.pop_back();
             continue;

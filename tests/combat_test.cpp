@@ -100,6 +100,17 @@ int main() {
     body = {};
     Actor attacker{1, 1, true}, enemy{2, 2, true}, friendActor{3, 1, true};
     check(hostile(attacker, enemy), "opposing teams valid");
+    Actor teamFive{4, 5, true}, teamSix{5, 6, true};
+    check(hostile(teamFive, teamSix) && hostile(teamSix, attacker),
+          "fifth and sixth teams can fight other teams");
+    MeleeState sixthMelee;
+    check(beginMelee(sixthMelee, 1, 0, teamSix, body, Hand::Right, HAND_PICK),
+          "sixth team can start an authoritative melee attack");
+    arcane::CastState sixthCast;
+    check(arcane::beginFireball(sixthCast, 1, 0, teamSix, body, Hand::Right,
+                               ITEM_ARCANE_FIREBALL) &&
+          arcane::makeFreeze(19, teamSix.id, 1, teamSix.team, {}, {0,0,1}, 0).id == 19,
+          "sixth team can cast and spawn an authoritative projectile");
     check(!hostile(attacker, friendActor) && !hostile(attacker, attacker), "friendly and self damage blocked");
     enemy.active = false;
     check(!hostile(attacker, enemy), "protected target rejected");

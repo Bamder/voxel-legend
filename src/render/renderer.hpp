@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -117,6 +118,9 @@ struct UIState {
 
     float fps = 0.0f;
     int loadedChunks = 0;
+    // Visual-only camera correction used when client prediction is corrected by
+    // a room-server snapshot. Gameplay and network coordinates remain separate.
+    Vec3 cameraOffset{ 0, 0, 0 };
     float timeOfDay = 0.0f;
     Vec3 playerPos{ 0, 0, 0 };
     Vec3 playerVel{ 0, 0, 0 };
@@ -217,6 +221,15 @@ struct UIState {
     Vec3 cluePosition{};
     bool clueBossRewardClaimed = false;
     bool clueCloseHover = false;
+    bool clueQuizOpen = false;
+    uint8_t clueQuizStatus = 0;
+    uint16_t clueQuizRetrySeconds = 0;
+    bool clueQuizSubmitting = false;
+    std::string clueQuizSubject;
+    std::string clueQuizPrompt;
+    std::array<std::string, 4> clueQuizOptions{};
+    std::array<bool, 4> clueQuizOptionHover{};
+    bool clueQuizCloseHover = false;
     bool storyOpen = false;
     bool storyHold = false;
     float storyFade = 1.0f;
@@ -485,6 +498,7 @@ private:
     void drawNote(UIState& ui);
     void drawGuide(UIState& ui);
     void drawClue(UIState& ui);
+    void drawClueQuiz(UIState& ui);
     void drawInventoryDoll(UIState& ui, float x, float y, float w, float h,
                            const vitals::Vitals* health = nullptr, bool showStamina = true);
     void drawTargetPanel(UIState& ui);

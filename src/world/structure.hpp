@@ -34,6 +34,7 @@ bool isOfferingCell(World& world, int ritual, int x, int y, int z);
 // The team's three relics are all sitting in that triangle.
 bool offeringReady(World& world, int ritual);
 bool offeringPlaced(World& world, int ritual, int relic);
+bool ritualAnchor(int ritual, int& x, int& z);
 
 // The relic block on a guardian platform is a hidden token, not the pickup.
 // Defeating that guardian removes the token and the caller spawns the drop.
@@ -77,6 +78,8 @@ bool roomGuardianHit(const World& world, const Vec3& eye, int relic, float reach
                      int& x, int& y, int& z);
 // Nearest living guardian within maxDist of pos (world units). 
 bool nearestGuardian(const World& world, const Vec3& pos, float maxDist, GuardianSpan& out);
+// Loads the match guardian's home and returns the location used by clue routes.
+bool guardianHome(World& world, int relic, Vec3& out);
 const char* guardianAppearance(int relic);
 
 // Free-explore trial chamber: 255×128×255 blocks (the world is only 128 blocks tall).
@@ -100,6 +103,8 @@ bool paintFile(World& world, const std::string& path);
 // Centers the altar on worldX/worldZ. Writes the floor Y back through worldY:
 // the highest terrain under the footprint, clamped so the roof stays in the world.
 bool paintRitualAltar(World& world, int worldX, int& worldY, int worldZ, int altarIndex);
+// Paints the assigned blueprint at the seed-rolled ritual site shared by all clients.
+bool paintMatchRitualAltar(World& world, int ritual);
 // Number of available ritual altar variants
 inline constexpr int kRitualAltarCount = 6;
 const char* ritualAltarName(int altarIndex);

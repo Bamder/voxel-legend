@@ -1,5 +1,6 @@
 #include "combat.hpp"
 #include "../core/config.hpp"
+#include "matchmap.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -92,9 +93,9 @@ std::optional<Weapon> weapon(uint8_t item) {
 
 bool hostile(const Actor& a, const Actor& b) {
     if (!a.id || !b.id || a.id == b.id || !a.active || !b.active) return false;
-    if (a.category != EntityCategory::Player || a.team < 1 || a.team > 4) return false;
+    if (a.category != EntityCategory::Player || a.team < 1 || a.team > matchmap::kCombatTeams) return false;
     if (b.category == EntityCategory::Boss) return true;
-    return b.category == EntityCategory::Player && b.team >= 1 && b.team <= 4 && a.team != b.team;
+    return b.category == EntityCategory::Player && b.team >= 1 && b.team <= matchmap::kCombatTeams && a.team != b.team;
 }
 
 bool handUsable(const vitals::Vitals& v, Hand hand) {
@@ -180,7 +181,7 @@ bool beginMelee(MeleeState& state, uint32_t sequence, uint32_t tick,
     if (!newer(sequence, state.lastSequence)) return false;
     state.lastSequence = sequence;
     auto def = weapon(ownedItem);
-    if (!actor.active || !actor.id || actor.category != EntityCategory::Player || actor.team < 1 || actor.team > 4 ||
+    if (!actor.active || !actor.id || actor.category != EntityCategory::Player || actor.team < 1 || actor.team > matchmap::kCombatTeams ||
         !handUsable(body, hand) || !def || blocked || state.pending || !reached(tick, state.readyAt)) return false;
     state.action = sequence;
     state.item = ownedItem;

@@ -121,7 +121,9 @@ public:
     int team() const { return teamId; }
     void sendInput(const PlayInputNet& in);
     void sendDeploy(uint8_t action, int bx, int bz);
+    void sendClueAnswer(uint32_t challengeId, uint8_t option);
     std::vector<PlayDeltaNet> takeDeltas();
+    std::vector<ClueQuizNet> takeClueQuizzes();
     bool takeDeploy(std::vector<DeployPinNet>& out);
 
 private:
@@ -145,6 +147,7 @@ private:
     bool spec = false;
     int teamId = -1;
     std::vector<PlayDeltaNet> deltas;
+    std::vector<ClueQuizNet> clueQuizzes;
     std::vector<DeployPinNet> deploySnap;
     bool deployFresh = false;
     long long deadlineMs = 0;
@@ -167,6 +170,7 @@ bool writeRoomHandoff(const std::string& utf8Path, const std::vector<RoomTeamNet
                       const std::vector<RoomPlayerNet>& players, std::string& err);
 bool readRoomHandoff(const std::string& utf8Path, std::vector<RoomTeamNet>& teams,
                      std::vector<RoomPlayerNet>& players);
-bool spawnRoomServer(uint16_t port, const std::string& handoffUtf8, ServerProcess& proc, std::string& err);
+bool spawnRoomServer(uint16_t port, const std::string& handoffUtf8, ServerProcess& proc,
+                     std::string& err, bool clueQa = false);
 
-int runRoomServer(uint16_t port, const std::string& handoffUtf8);
+int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa = false);

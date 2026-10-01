@@ -1,5 +1,6 @@
 #include "arcane.hpp"
 #include "../core/config.hpp"
+#include "matchmap.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -18,7 +19,7 @@ bool begin(CastState& state, uint32_t sequence, uint32_t tick,
     if (!newer(sequence, state.lastSequence)) return false;
     state.lastSequence = sequence;
     if (!actor.active || !actor.id || actor.category != combat::EntityCategory::Player ||
-        actor.team < 1 || actor.team > 4 || ownedItem != expectedItem || blocked ||
+        actor.team < 1 || actor.team > matchmap::kCombatTeams || ownedItem != expectedItem || blocked ||
         !combat::handUsable(body, hand) || !reached(tick, state.readyAt)) return false;
     state.readyAt = tick + ticks(cooldown);
     return true;
@@ -29,7 +30,7 @@ Projectile makeProjectile(ProjectileKind kind, float speed, float ttl, uint32_t 
     Projectile out;
     float lengthSq = direction.lengthSq();
     if ((kind != ProjectileKind::Fireball && kind != ProjectileKind::Freeze) ||
-        !id || !owner || team < 1 || team > 4 || !finite(origin) || !finite(direction) ||
+        !id || !owner || team < 1 || team > matchmap::kCombatTeams || !finite(origin) || !finite(direction) ||
         !std::isfinite(lengthSq) || lengthSq < 1e-10f) return out;
     out.id = id;
     out.owner = owner;
