@@ -18,6 +18,7 @@ void splitResourceBuildings(int total, uint32_t pick, int outTypes[3]);
 void beginMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed);
 bool advanceMatchContent(World& world, building_loot::Spawner& loot, uint32_t seed);
 bool matchContentReady();
+void placementProgress(int& done, int& total);
 
 // Called once for each team that actually enters the match. The server owns
 // the spawned drops and clue bindings; no other team needs to be present.

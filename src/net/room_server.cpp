@@ -938,6 +938,14 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                 }
             }
             c.conn.send((uint16_t)RoomMsg::DeploySync, encodeDeploySync(pins));
+            int placed = 0, placeTotal = 0;
+            match_content::placementProgress(placed, placeTotal);
+            if (placed < 0) placed = 0;
+            if (placeTotal < placed) placeTotal = placed;
+            if (placeTotal > 65535) placeTotal = 65535;
+            if (placed > placeTotal) placed = placeTotal;
+            c.conn.send((uint16_t)RoomMsg::PlaceProgress,
+                        encodePlaceProgress((uint16_t)placed, (uint16_t)placeTotal));
             c.conn.pump();
         }
     };

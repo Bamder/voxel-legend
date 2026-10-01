@@ -121,6 +121,10 @@ public:
     int team() const { return teamId; }
     int span() const { return playSpan; }
     uint8_t teamMask() const { return rosterMask; }
+    bool placeReady() const { return placeTotal > 0 && placeDone >= placeTotal; }
+    float placeFraction() const {
+        return placeTotal > 0 ? (float)placeDone / (float)placeTotal : 0.0f;
+    }
     void sendInput(const PlayInputNet& in);
     void sendDeploy(uint8_t action, int bx, int bz);
     void sendClueAnswer(uint32_t challengeId, uint8_t option);
@@ -150,6 +154,8 @@ private:
     int teamId = -1;
     int playSpan = 0;
     uint8_t rosterMask = 0;
+    int placeDone = 0;
+    int placeTotal = 0;
     std::vector<PlayDeltaNet> deltas;
     std::vector<ClueQuizNet> clueQuizzes;
     std::vector<DeployPinNet> deploySnap;

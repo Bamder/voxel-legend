@@ -12,7 +12,7 @@
 
 // Lobby + match messages. Little-endian, length-prefixed by the socket layer.
 constexpr uint16_t kRoomPortDefault = 35535;
-constexpr uint32_t kRoomProto = 2610010004u;
+constexpr uint32_t kRoomProto = 2610010005u;
 
 // PlayInput flags. The server steps locomotion from these; it does not take the client's clock.
 constexpr uint8_t kPfSprint = 1;
@@ -45,6 +45,7 @@ enum class RoomMsg : uint16_t {
     PlayDelta = 9,   // server tick + player state + chunk baseline / delta / hash
     Deploy = 10,     // client: deploy pin; action 3 requests travel in local clue QA only
     DeploySync = 11, // server: same-team pins (aiming X or fading dot)
+    PlaceProgress = 14, // server: buildings placed, then the total to place
     ClueQuiz = 12,   // server: question or answer result; never includes answer key
     ClueAnswer = 13  // client: challenge id and one of four option indices
 };
@@ -468,6 +469,17 @@ inline bool decodeClueAnswer(const uint8_t* p, const uint8_t* end,
                              uint32_t& challengeId, uint8_t& option) {
     return Buf::u32(p, end, challengeId) && challengeId != 0 &&
         Buf::u8(p, end, option) && option < 4 && p == end;
+}
+
+inline std::vector<uint8_t> encodePlaceProgress(uint16_t done, uint16_t total) {
+    Buf b;
+    b.u16(done);
+    b.u16(total);
+    return b.data();
+}
+
+inline bool decodePlaceProgress(const uint8_t* p, const uint8_t* end, uint16_t& done, uint16_t& total) {
+    return Buf::u16(p, end, done) && Buf::u16(p, end, total) && done <= total && p == end;
 }
 
 inline std::vector<uint8_t> encodeDeploySync(const std::vector<DeployPinNet>& pins) {

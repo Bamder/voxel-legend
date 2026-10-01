@@ -538,6 +538,8 @@ void GameClient::close() {
     id = 0;
     playSpan = 0;
     rosterMask = 0;
+    placeDone = 0;
+    placeTotal = 0;
 }
 
 bool GameClient::connecting() const {
@@ -574,6 +576,12 @@ void GameClient::pumpWelcome() {
         } else if (type == (uint16_t)RoomMsg::PlayDelta && haveWelcome) {
             PlayDeltaNet d;
             if (decodePlayDelta(p, e, d)) deltas.push_back(std::move(d));
+        } else if (type == (uint16_t)RoomMsg::PlaceProgress) {
+            uint16_t done = 0, total = 0;
+            if (decodePlaceProgress(p, e, done, total)) {
+                placeDone = (int)done;
+                placeTotal = (int)total;
+            }
         } else if (type == (uint16_t)RoomMsg::DeploySync && haveWelcome) {
             std::vector<DeployPinNet> pins;
             if (decodeDeploySync(p, e, pins)) {

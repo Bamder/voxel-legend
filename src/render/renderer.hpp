@@ -188,6 +188,8 @@ struct UIState {
     int deploySpan = 0;
     int deployPreview = 0;
     int deployOx = 0, deployOz = 0;
+    bool deployAltar = false;
+    int deployAltarX = 0, deployAltarZ = 0;
     float deployMapX = 0, deployMapY = 0, deployMapS = 0;
     float deployR = 1, deployG = 0.3f, deployB = 0.3f;
     int deploySeconds = -1;
@@ -301,6 +303,7 @@ struct UIState {
     bool joinAddrActive = false;
     bool joinPortActive = false;
     std::string loadStatus;
+    float loadProgress = -1.0f; // 0..1 while buildings are placed; negative hides the bar
     int loadHover = -1;        // 0 cancel
     std::vector<RemoteAvatar> remotes;
     bool spectating = false;   // in match, camera only

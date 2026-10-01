@@ -223,6 +223,21 @@ bool matchContentReady() {
     return g_planned && g_job >= (int)g_jobs.size();
 }
 
+void placementProgress(int& done, int& total) {
+    if (!g_planned) {
+        done = 0;
+        total = 0;
+        return;
+    }
+    total = (int)g_jobs.size();
+    done = g_job;
+    if (done > total) done = total;
+    if (total == 0) {
+        done = 1;
+        total = 1;
+    }
+}
+
 int resourceBuildingTotal(int combatTeams, int combatPlayers, uint32_t pick) {
     if (combatTeams < 0) combatTeams = 0;
     if (combatPlayers < 0) combatPlayers = 0;

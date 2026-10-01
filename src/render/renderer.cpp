@@ -3040,18 +3040,39 @@ void Renderer::drawJoinRoom(UIState& ui) {
 void Renderer::drawRoomLoading(UIState& ui) {
     const float bw = 220.0f, bh = 48.0f;
     const float bx = ((float)scrW - bw) * 0.5f;
-    const float by = (float)scrH * 0.5f + 48.0f;
+    const bool showBar = ui.loadProgress >= 0.0f;
+    const float by = (float)scrH * 0.5f + (showBar ? 78.0f : 48.0f);
 
     quad(0, 0, (float)scrW, (float)scrH, 0, 0, 0, 0, 0.05f, 0.06f, 0.08f, 1.0f);
     ui.loadHover = -1;
     bool hover = ui.mouseX >= bx && ui.mouseX < bx + bw && ui.mouseY >= by && ui.mouseY < by + bh;
     if (hover) ui.loadHover = 0;
     buttonChrome(bx, by, bw, bh, hover);
+    if (showBar) {
+        float frac = ui.loadProgress;
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        const float barW = 420.0f;
+        const float barH = 18.0f;
+        const float barX = ((float)scrW - barW) * 0.5f;
+        const float barY = (float)scrH * 0.5f + 28.0f;
+        quad(barX - 3.0f, barY - 3.0f, barW + 6.0f, barH + 6.0f, 0, 0, 0, 0, 0.02f, 0.02f, 0.03f, 1.0f);
+        quad(barX, barY, barW, barH, 0, 0, 0, 0, 0.16f, 0.17f, 0.19f, 1.0f);
+        if (frac > 0.0f)
+            quad(barX, barY, barW * frac, barH, 0, 0, 0, 0, 0.42f, 0.72f, 0.34f, 1.0f);
+    }
     flushUI(progUI, whiteTex);
 
     centeredText("正在进入房间", (float)scrW * 0.5f, (float)scrH * 0.5f - 36.0f, 1.3f, 1, 1, 1, 1);
     std::string status = ui.loadStatus.empty() ? "正在加载" : ui.loadStatus;
     centeredText(status, (float)scrW * 0.5f, (float)scrH * 0.5f + 4.0f, 0.95f, 0.8f, 0.84f, 0.78f, 1);
+    if (showBar) {
+        int pct = (int)std::lround(ui.loadProgress * 100.0f);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        centeredText(std::to_string(pct) + "%", (float)scrW * 0.5f, (float)scrH * 0.5f + 37.0f, 0.85f,
+                     0.94f, 0.95f, 0.92f, 1);
+    }
     centeredText("取消", bx + bw * 0.5f, by + bh * 0.5f, 1.0f, 1, 1, 1, 1);
 }
 
@@ -3733,6 +3754,54 @@ void Renderer::drawDeploy(UIState& ui) {
         }
     }
     flushUI(progUI, whiteTex);
+    if (ui.deploySpan > 0) {
+        const float midBx = ((float)matchmap::playMin() + (float)matchmap::playMax() + 1.0f) * 0.5f * cfg::CHUNK_X;
+        const float midBz = ((float)matchmap::playMin() + (float)matchmap::playMax() + 1.0f) * 0.5f * cfg::CHUNK_Z;
+        const float cornerB[4][2] = {
+            { (float)ui.deployOx, (float)ui.deployOz },
+            { (float)ui.deployOx + (float)ui.deploySpan, (float)ui.deployOz },
+            { (float)ui.deployOx, (float)ui.deployOz + (float)ui.deploySpan },
+            { (float)ui.deployOx + (float)ui.deploySpan, (float)ui.deployOz + (float)ui.deploySpan },
+        };
+        int nearest = 0;
+        float nearestD = 1.0e30f;
+        for (int i = 0; i < 4; ++i) {
+            float dx = cornerB[i][0] - midBx;
+            float dz = cornerB[i][1] - midBz;
+            float d = dx * dx + dz * dz;
+            if (d < nearestD) {
+                nearestD = d;
+                nearest = i;
+            }
+        }
+        float sx = x + (cornerB[nearest][0] - (float)ui.deployOx) / (float)ui.deploySpan * side;
+        float sy = y + (cornerB[nearest][1] - (float)ui.deployOz) / (float)ui.deploySpan * side;
+        float inwardX = cornerB[nearest][0] <= (float)ui.deployOx + 1.0f ? 1.0f : -1.0f;
+        float inwardY = cornerB[nearest][1] <= (float)ui.deployOz + 1.0f ? 1.0f : -1.0f;
+        const float arm = side * 0.16f;
+        const float thick = 8.0f;
+        float hx = inwardX > 0.0f ? sx : sx - arm;
+        float hy = inwardY > 0.0f ? sy : sy - thick;
+        quad(hx, hy, arm, thick, 0, 0, 0, 0, 0.92f, 0.14f, 0.12f, 1.0f);
+        float vx = inwardX > 0.0f ? sx : sx - thick;
+        float vy = inwardY > 0.0f ? sy : sy - arm;
+        quad(vx, vy, thick, arm, 0, 0, 0, 0, 0.92f, 0.14f, 0.12f, 1.0f);
+        flushUI(progUI, whiteTex);
+    }
+    if (ui.deployAltar && ui.deploySpan > 0) {
+        float ax = x + ((float)(ui.deployAltarX - ui.deployOx) + 0.5f) * cell;
+        float ay = y + ((float)(ui.deployAltarZ - ui.deployOz) + 0.5f) * cell;
+        if (ax >= x && ay >= y && ax <= x + side && ay <= y + side) {
+            const float s = 11.0f;
+            const float t = 3.0f;
+            quad(ax - s, ay - s, s * 2.0f, t, 0, 0, 0, 0, 1.0f, 0.82f, 0.28f, 1.0f);
+            quad(ax - s, ay + s - t, s * 2.0f, t, 0, 0, 0, 0, 1.0f, 0.82f, 0.28f, 1.0f);
+            quad(ax - s, ay - s, t, s * 2.0f, 0, 0, 0, 0, 1.0f, 0.82f, 0.28f, 1.0f);
+            quad(ax + s - t, ay - s, t, s * 2.0f, 0, 0, 0, 0, 1.0f, 0.82f, 0.28f, 1.0f);
+            flushUI(progUI, whiteTex);
+            centeredText("祭坛", ax, ay - 18.0f, 0.9f, 1.0f, 0.86f, 0.45f, 1);
+        }
+    }
     for (const DeployPinView& pin : ui.deployPins) {
         if (pin.phase == 2) continue;
         float px = x + ((float)(pin.bx - ui.deployOx) + 0.5f) * cell;

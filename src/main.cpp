@@ -1494,6 +1494,8 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> deployPixels;
     std::vector<DeployPinNet> deployPins;
     int deployOx = 0, deployOz = 0, deploySpan = 0, deployStamp = 0;
+    bool deployAltar = false;
+    int deployAltarX = 0, deployAltarZ = 0;
     bool structureEdit = editStructure;
     std::string structurePath = editStructurePath;
     uint8_t editBlock = PLANKS;
@@ -1970,6 +1972,7 @@ int main(int argc, char** argv) {
         appScreen = AppScreen::RoomLoading;
         ui.appScreen = AppScreen::RoomLoading;
         ui.loadStatus = "正在连接服务器";
+        ui.loadProgress = -1.0f;
         ui.menuMessage.clear();
         g_textTarget = nullptr;
         g_textDigits = false;
@@ -1990,6 +1993,14 @@ int main(int argc, char** argv) {
         deployOx = zone.cx0 * cfg::CHUNK_X;
         deployOz = zone.cz0 * cfg::CHUNK_Z;
         deploySpan = zone.columns * cfg::CHUNK_X;
+        deployAltar = false;
+        int altarRitual = ritual::assignedRitual(team);
+        int altarX = 0, altarZ = 0;
+        if (structure::ritualAnchor(altarRitual, altarX, altarZ)) {
+            deployAltar = true;
+            deployAltarX = altarX;
+            deployAltarZ = altarZ;
+        }
         paintDeployPreview(world, deployOx, deployOz, deploySpan, deployPixels);
         deployStamp++;
         deployPins.clear();
@@ -2182,8 +2193,19 @@ int main(int argc, char** argv) {
             const float S = cfg::BLOCK_SCALE;
             int cx = floorDiv((int)std::floor(player.pos.x / S), cfg::CHUNK_X);
             int cz = floorDiv((int)std::floor(player.pos.z / S), cfg::CHUNK_Z);
-            ui.loadStatus = "正在生成世界 " + std::to_string(world.loadedChunks());
-            if (loadShown >= 0.4f && world.columnLoaded(cx, cz) && world.loadedChunks() >= 48)
+            const bool worldReadyLocal = loadShown >= 0.4f && world.columnLoaded(cx, cz) &&
+                                         world.loadedChunks() >= 48;
+            int team = gameClient.team();
+            const bool waitsForBuildings = !gameClient.spectator() &&
+                                            team >= 1 && team <= matchmap::kCombatTeams;
+            if (waitsForBuildings) {
+                ui.loadProgress = gameClient.placeFraction();
+                ui.loadStatus = "正在生成建筑";
+            } else {
+                ui.loadProgress = -1.0f;
+                ui.loadStatus = "正在生成世界 " + std::to_string(world.loadedChunks());
+            }
+            if (worldReadyLocal && (!waitsForBuildings || gameClient.placeReady()))
                 enterRoomPlay();
         } else if (roomSession && appScreen == AppScreen::Playing) {
             gameClient.poll();
@@ -4615,6 +4637,9 @@ int main(int argc, char** argv) {
         ui.deployPreview = deploying ? matchmap::kDeployPreview : 0;
         ui.deployOx = deployOx;
         ui.deployOz = deployOz;
+        ui.deployAltar = deploying && deployAltar;
+        ui.deployAltarX = deployAltarX;
+        ui.deployAltarZ = deployAltarZ;
         ui.deploySeconds = -1;
         ui.deployPins.clear();
         if (deploying) {
