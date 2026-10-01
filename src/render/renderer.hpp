@@ -186,6 +186,7 @@ struct UIState {
     const std::vector<uint8_t>* deployPixels = nullptr;
     int deployStamp = 0;
     int deploySpan = 0;
+    int deployPreview = 0;
     int deployOx = 0, deployOz = 0;
     float deployMapX = 0, deployMapY = 0, deployMapS = 0;
     float deployR = 1, deployG = 0.3f, deployB = 0.3f;

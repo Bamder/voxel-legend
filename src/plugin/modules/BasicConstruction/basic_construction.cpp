@@ -133,6 +133,10 @@ struct ShellStrategy : BlockStrategy {
     bool canBreak(uint8_t) const override { return false; }
     bool canPlace(uint8_t) const override { return false; }
 };
+// Unbreakable in play, but the structure editor lists anything canPlace allows.
+struct CoreStrategy : BlockStrategy {
+    bool canBreak(uint8_t) const override { return false; }
+};
 struct UnplaceableStrategy : BlockStrategy {
     bool canPlace(uint8_t) const override { return false; }
 };
@@ -255,6 +259,7 @@ struct PlayerStrategy : EntityStrategy {
 
 BedrockStrategy g_bedrock;
 ShellStrategy g_shell;
+CoreStrategy g_core;
 UnplaceableStrategy g_unplaceable;
 LogStrategy g_log;
 ShrubStemStrategy g_shrubStem;
@@ -263,7 +268,8 @@ GrassTuftStrategy g_grassTuft;
 PlayerStrategy g_player;
 
 BlockStrategy* strategyFor(int id) {
-    if (id == ARENA_SHELL || id == GUARDIAN_CORE) return &g_shell;
+    if (id == ARENA_SHELL) return &g_shell;
+    if (id == GUARDIAN_CORE) return &g_core;
     if (id == ITEM_TARGET) return &g_unplaceable;
     if (id == ITEM_ARCANE_FIREBALL || id == ITEM_ARCANE_FREEZE || id == ITEM_ARCANE_HEAL ||
         id == ITEM_GUIDE_BOOK || id == ITEM_CLUE) return &g_unplaceable;

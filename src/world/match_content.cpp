@@ -59,8 +59,8 @@ bool populateTeam(World& world, building_loot::Spawner& loot,
     int relics[3];
     ritual::recipeRelics(assigned, relics);
     matchmap::Zone zone = matchmap::combatZone(team - 1);
-    const int spawnX = zone.cx0 * cfg::CHUNK_X + matchmap::kZoneChunks * cfg::CHUNK_X / 2;
-    const int spawnZ = zone.cz0 * cfg::CHUNK_Z + matchmap::kZoneChunks * cfg::CHUNK_Z / 2;
+    const int spawnX = zone.cx0 * cfg::CHUNK_X + zone.columns * cfg::CHUNK_X / 2;
+    const int spawnZ = zone.cz0 * cfg::CHUNK_Z + zone.columns * cfg::CHUNK_Z / 2;
     // The 32-40-block blueprints need enough separation to leave the spawn clear.
     const int offsets[3][2] = {{48, 0}, {0, 48}, {-48, 0}};
     std::array<std::vector<Vec3>, 3> spots;

@@ -52,9 +52,11 @@ inline bool columnRim(int cx, int cz) {
     return columnInside(cx, cz) && !columnPlayable(cx, cz);
 }
 
-// Six combat teams. Each owns one 4×4 chunk-column corner of the playable field.
+// Six combat team slots. The first four each own one corner square whose side
+// is 40% of the playable field. The last two use the central gap.
 inline constexpr int kCombatTeams = 6;
-inline constexpr int kZoneChunks = 4;
+inline constexpr double kZoneSide = 0.40;
+inline constexpr int kDeployPreview = 512;
 inline constexpr float kDeploySeconds = 10.0f;
 inline constexpr float kDeployDeathSeconds = 20.0f;
 inline constexpr float kDeployFade = 1.6f;
@@ -62,7 +64,20 @@ inline constexpr float kDeployFade = 1.6f;
 struct Zone {
     int cx0 = 0;
     int cz0 = 0;
+    int columns = 0;
 };
+
+// Deploy square side, in chunk columns. Opposite corners stay apart.
+inline int zoneColumns() {
+    int columns = (int)std::lround((double)span() * kZoneSide);
+    if (columns < 1) columns = 1;
+    int limit = span() / 2;
+    if (limit < 1) limit = 1;
+    if (columns > limit) columns = limit;
+    if (span() > 1 && columns * 2 >= span()) columns = (span() - 1) / 2;
+    if (columns < 1) columns = 1;
+    return columns;
+}
 
 inline int blockToCol(int block, int chunk) {
     int q = block / chunk;
@@ -74,29 +89,27 @@ inline int blockToCol(int block, int chunk) {
 inline Zone combatZone(int index) {
     if (index < 0) index = 0;
     if (index >= kCombatTeams) index = kCombatTeams - 1;
-    // 6-team layout: 3 columns x 2 rows
-    // 2 | 4 | 3
-    //---+---+---
-    // 0 | 5 | 1
-    int cols = 3;  // number of columns
-    int col = index % cols;
-    int row = index / cols;
-    // Calculate x side: 0=left, 1=right, 2=center
-    int xSide;
-    if (col == 0) xSide = playMin();
-    else if (col == 2) xSide = playMax() - (kZoneChunks - 1);
-    else xSide = (playMin() + playMax() + 1 - kZoneChunks) / 2;
-    // Calculate z side: 0=bottom, 1=top
-    int zSide = row == 0 ? playMin() : (playMax() - (kZoneChunks - 1));
-    return { xSide, zSide };
+    const int columns = zoneColumns();
+    // Teams 0–3: four corners. x side is index & 1, z side is index & 2.
+    if (index < 4) {
+        int xSide = (index & 1) ? playMax() - (columns - 1) : playMin();
+        int zSide = (index & 2) ? playMax() - (columns - 1) : playMin();
+        return { xSide, zSide, columns };
+    }
+    // Teams 4–5 sit in the gap between the corner squares.
+    const int gap = std::max(1, span() - 2 * columns);
+    int xSide = playMin() + columns;
+    int zSide = index == 4 ? playMin() : playMax() - (gap - 1);
+    return { xSide, zSide, gap };
 }
 
 inline bool blockInZone(int combatIndex, int bx, int bz) {
     if (combatIndex < 0 || combatIndex >= kCombatTeams) return false;
     Zone z = combatZone(combatIndex);
+    if (z.columns < 1) return false;
     int cx = blockToCol(bx, cfg::CHUNK_X);
     int cz = blockToCol(bz, cfg::CHUNK_Z);
-    return cx >= z.cx0 && cx < z.cx0 + kZoneChunks && cz >= z.cz0 && cz < z.cz0 + kZoneChunks;
+    return cx >= z.cx0 && cx < z.cx0 + z.columns && cz >= z.cz0 && cz < z.cz0 + z.columns;
 }
 
 // 0 on the playable side of the ring, 1 on the outer face.

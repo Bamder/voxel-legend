@@ -1174,11 +1174,6 @@ static NetSample sampleFromPose(const PlayerPoseNet& pose, uint32_t tick) {
     return s;
 }
 
-void clearDeployMap(std::vector<uint8_t>& px, int span) {
-    px.assign((size_t)span * (size_t)span * 4, 0);
-    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
-}
-
 void deployBlockColor(uint8_t b, int y, int& r, int& g, int& bl) {
     if (b == WATER || isLiquid(b)) { r = 42; g = 86; bl = 148; return; }
     if (b == SAND || b == SANDSTONE) { r = 194; g = 174; bl = 108; return; }
@@ -1198,57 +1193,28 @@ void deployBlockColor(uint8_t b, int y, int& r, int& g, int& bl) {
     r = 96; g = 96; bl = 100;
 }
 
-bool paintDeployColumns(World& world, int ox, int oz, int span, uint32_t& painted, std::vector<uint8_t>& px) {
-    if (span <= 0) return false;
-    int cx0 = ox / cfg::CHUNK_X;
-    int cz0 = oz / cfg::CHUNK_Z;
-    bool any = false;
-    for (int dz = 0; dz < matchmap::kZoneChunks; dz++) {
-        for (int dx = 0; dx < matchmap::kZoneChunks; dx++) {
-            uint32_t bit = 1u << (dz * matchmap::kZoneChunks + dx);
-            if (painted & bit) continue;
-            int cx = cx0 + dx;
-            int cz = cz0 + dz;
-            if (!world.columnLoaded(cx, cz)) continue;
-            int bx0 = cx * cfg::CHUNK_X;
-            int bz0 = cz * cfg::CHUNK_Z;
-            for (int lz = 0; lz < cfg::CHUNK_Z; lz++) {
-                for (int lx = 0; lx < cfg::CHUNK_X; lx++) {
-                    int wx = bx0 + lx;
-                    int wz = bz0 + lz;
-                    int localX = wx - ox;
-                    int localZ = wz - oz;
-                    if (localX < 0 || localZ < 0 || localX >= span || localZ >= span) continue;
-                    int h = world.surfaceHeight(wx, wz);
-                    int yTop = h + 28;
-                    if (yTop >= cfg::WORLD_H) yTop = cfg::WORLD_H - 1;
-                    uint8_t top = AIR;
-                    int topY = h;
-                    for (int y = yTop; y >= 0; y--) {
-                        uint8_t b = world.getBlock(wx, y, wz);
-                        if (b == AIR || b == GRASS_TUFT) continue;
-                        top = b;
-                        topY = y;
-                        break;
-                    }
-                    size_t i = ((size_t)localZ * (size_t)span + (size_t)localX) * 4;
-                    if (top == AIR) {
-                        px[i] = 0; px[i + 1] = 0; px[i + 2] = 0; px[i + 3] = 255;
-                        continue;
-                    }
-                    int r = 0, g = 0, bl = 0;
-                    deployBlockColor(top, topY, r, g, bl);
-                    px[i] = (uint8_t)r;
-                    px[i + 1] = (uint8_t)g;
-                    px[i + 2] = (uint8_t)bl;
-                    px[i + 3] = 255;
-                }
-            }
-            painted |= bit;
-            any = true;
+void paintDeployPreview(World& world, int ox, int oz, int span, std::vector<uint8_t>& px) {
+    const int n = matchmap::kDeployPreview;
+    px.assign((size_t)n * (size_t)n * 4, 255);
+    if (span <= 0) return;
+    for (int iz = 0; iz < n; iz++) {
+        int wz = oz + (int)(((long long)iz * span) / n);
+        for (int ix = 0; ix < n; ix++) {
+            int wx = ox + (int)(((long long)ix * span) / n);
+            int h = world.surfaceHeight(wx, wz);
+            uint8_t top = GRASS;
+            if (h < cfg::SEA_LEVEL) top = WATER;
+            else if (h >= cfg::SEA_LEVEL + 30) top = SNOW;
+            else if (h >= cfg::SEA_LEVEL + 18) top = STONE;
+            int r = 0, g = 0, bl = 0;
+            deployBlockColor(top, h, r, g, bl);
+            size_t i = ((size_t)iz * (size_t)n + (size_t)ix) * 4;
+            px[i] = (uint8_t)r;
+            px[i + 1] = (uint8_t)g;
+            px[i + 2] = (uint8_t)bl;
+            px[i + 3] = 255;
         }
     }
-    return any;
 }
 
 static bool stepLocalGuardians(World& world, Player& player, float dt) {
@@ -1528,7 +1494,6 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> deployPixels;
     std::vector<DeployPinNet> deployPins;
     int deployOx = 0, deployOz = 0, deploySpan = 0, deployStamp = 0;
-    uint32_t deployPainted = 0;
     bool structureEdit = editStructure;
     std::string structurePath = editStructurePath;
     uint8_t editBlock = PLANKS;
@@ -1793,7 +1758,6 @@ int main(int argc, char** argv) {
         ui.noteOpen = false;
         ui.storyOpen = false;
         deployPins.clear();
-        deployPainted = 0;
         roomSession = false;
         roomTeams.clear();
         roomPlayers.clear();
@@ -2024,9 +1988,8 @@ int main(int argc, char** argv) {
         matchmap::Zone zone = matchmap::combatZone(team - 1);
         deployOx = zone.cx0 * cfg::CHUNK_X;
         deployOz = zone.cz0 * cfg::CHUNK_Z;
-        deploySpan = matchmap::kZoneChunks * cfg::CHUNK_X;
-        clearDeployMap(deployPixels, deploySpan);
-        deployPainted = 0;
+        deploySpan = zone.columns * cfg::CHUNK_X;
+        paintDeployPreview(world, deployOx, deployOz, deploySpan, deployPixels);
         deployStamp++;
         deployPins.clear();
         deploying = true;
@@ -4532,8 +4495,6 @@ int main(int argc, char** argv) {
                     (deployOz + deploySpan * 0.5f) * S
                 };
                 world.update(zone, 12);
-                if (paintDeployColumns(world, deployOx, deployOz, deploySpan, deployPainted, deployPixels))
-                    deployStamp++;
             }
             if (structureEdit && structureChosen && !structurePainted && world.columnLoaded(0, 0)) {
                 structure::clearVolume(world);
@@ -4646,6 +4607,7 @@ int main(int argc, char** argv) {
         ui.deployPixels = deploying ? &deployPixels : nullptr;
         ui.deployStamp = deployStamp;
         ui.deploySpan = deploySpan;
+        ui.deployPreview = deploying ? matchmap::kDeployPreview : 0;
         ui.deployOx = deployOx;
         ui.deployOz = deployOz;
         ui.deploySeconds = -1;

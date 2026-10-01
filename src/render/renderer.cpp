@@ -3691,9 +3691,9 @@ void Renderer::drawDeploy(UIState& ui) {
     ui.deployMapY = y;
     ui.deployMapS = side;
 
-    if (ui.deployPixels && ui.deploySpan > 0 && ui.deployStamp != deployTexStamp) {
+    if (ui.deployPixels && ui.deployPreview > 0 && ui.deployStamp != deployTexStamp) {
         if (deployTex) gl::DeleteTextures(1, &deployTex);
-        deployTex = makeTexture(ui.deployPixels->data(), ui.deploySpan, ui.deploySpan, false, false);
+        deployTex = makeTexture(ui.deployPixels->data(), ui.deployPreview, ui.deployPreview, false, false);
         deployTexStamp = ui.deployStamp;
     }
     if (deployTex) {

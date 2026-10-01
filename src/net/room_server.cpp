@@ -1001,8 +1001,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                     int bz = (int)std::floor(base.z / S);
                     if (!c.landed) {
                         matchmap::Zone zone = matchmap::combatZone(c.team - 1);
-                        bx = zone.cx0 * cfg::CHUNK_X + (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                        bz = zone.cz0 * cfg::CHUNK_Z + (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                        bx = zone.cx0 * cfg::CHUNK_X + (zone.columns * cfg::CHUNK_X) / 2;
+                        bz = zone.cz0 * cfg::CHUNK_Z + (zone.columns * cfg::CHUNK_Z) / 2;
                     }
                     int by = world.surfaceHeight(bx, bz);
                     float ox = 0.0f, oz = 0.0f;
@@ -1041,10 +1041,8 @@ int runRoomServer(uint16_t port, const std::string& handoffUtf8, bool clueQa) {
                             } else {
                                 int zoneIdx = (shIdx == 1 ? 3 : 14) % matchmap::kCombatTeams;
                                 matchmap::Zone zone = matchmap::combatZone(zoneIdx);
-                                wx = zone.cx0 * cfg::CHUNK_X +
-                                     (matchmap::kZoneChunks * cfg::CHUNK_X) / 2;
-                                wz = zone.cz0 * cfg::CHUNK_Z +
-                                     (matchmap::kZoneChunks * cfg::CHUNK_Z) / 2;
+                                wx = zone.cx0 * cfg::CHUNK_X + (zone.columns * cfg::CHUNK_X) / 2;
+                                wz = zone.cz0 * cfg::CHUNK_Z + (zone.columns * cfg::CHUNK_Z) / 2;
                                 if (shIdx == 1) { wx -= 50; wz += 50; }
                                 else { wx += 50; wz += 50; }
                             }

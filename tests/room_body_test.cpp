@@ -27,6 +27,25 @@ int main() {
     check(matchmap::playableSpan(1, 0) == matchmap::playableSpan(1, 2), "fewer than 2 players counts as 2");
     check(matchmap::playableSpan(6, 90) == 2048, "teams above 4 and players above 64 stay at the full field");
     check(matchmap::span() == matchmap::kFullSpan, "tests start from the full field");
+    check(matchmap::zoneColumns() == 819, "full field deploy side is 40 percent");
+    matchmap::setSpan(181);
+    check(matchmap::zoneColumns() == 72, "shrunk field deploy side stays 40 percent");
+    auto zonesOverlap = [](matchmap::Zone a, matchmap::Zone b) {
+        return a.cx0 < b.cx0 + b.columns && b.cx0 < a.cx0 + a.columns &&
+               a.cz0 < b.cz0 + b.columns && b.cz0 < a.cz0 + a.columns;
+    };
+    for (int i = 0; i < 4; ++i) {
+        matchmap::Zone zone = matchmap::combatZone(i);
+        check(zone.columns == 72, "each corner deploy square uses the 40 percent side");
+        check(matchmap::columnPlayable(zone.cx0, zone.cz0) &&
+              matchmap::columnPlayable(zone.cx0 + zone.columns - 1, zone.cz0 + zone.columns - 1),
+              "corner deploy squares stay inside the playable field");
+        for (int j = i + 1; j < 6; ++j)
+            check(!zonesOverlap(zone, matchmap::combatZone(j)), "deploy squares do not overlap");
+    }
+    check(!zonesOverlap(matchmap::combatZone(4), matchmap::combatZone(5)),
+          "the two center deploy squares do not overlap");
+    matchmap::setSpan(matchmap::kFullSpan);
 
     std::vector<RoomTeamNet> teams(4);
     teams[0].spectator = true;
